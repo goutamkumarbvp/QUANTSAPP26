@@ -1,0 +1,26 @@
+{
+  "name": "q26-options",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Q26 Options — options analytics & paper-trading platform (option chain, OI, IV, strategy builder, optimizer, backtest).",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w @q26/server\" \"npm run dev -w @q26/web\"",
+    "build": "npm run build -w @q26/web && npm run build -w @q26/server",
+    "start": "npm run start -w @q26/server",
+    "test": "npm run test -w @q26/core && npm run test -w @q26/server",
+    "test:e2e": "npm run test:e2e -w @q26/web",
+    "typecheck": "npm run typecheck -w @q26/core && npm run typecheck -w @q26/server && npm run typecheck -w @q26/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  }
+}
