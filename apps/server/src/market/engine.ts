@@ -501,7 +501,7 @@ export class MarketEngine {
     const term = 0.95 + 0.07 * Math.min(1, tDays / 60) + (tDays < 1 ? 0.1 * (1 - tDays) : 0);
     const atm = atmBase * term;
     const sd = atm * Math.sqrt(Math.max(T, 0.5 / 365));
-    const x = Math.max(-4, Math.min(4, Math.log(strike / F) / sd));
+    const x = Math.max(-6.5, Math.min(6.5, Math.log(strike / F) / sd));
     const smile = 1 + inst.skew * x + inst.smile * x * x;
     // Smooth (low-frequency in strike) daily distortion keeps the curve market-like without
     // breaking strike convexity; CE/PE get only a tiny independent jitter.

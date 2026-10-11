@@ -456,7 +456,9 @@ export class Analytics {
     const fixed = strikeIn === 'atm' ? nearest(e.spotAt(symbol, dayIdx, 0)) : nearest(strikeIn);
     const points = e.minuteMarks(upto, Math.max(1, interval)).map((m) => {
       const spot = e.spotAt(symbol, dayIdx, m);
-      const center = mode === 'rolling' && strikeIn === 'atm' ? nearest(spot) : fixed;
+      // Synthetic ATM: the strike nearest the forward, so the rolling straddle doesn't flip on carry.
+      const fwd = spot * Math.exp((e.r - ctx.inst.divYield) * yearsBetween(e.tsOf(dayIdx, m), ctx.expTs));
+      const center = mode === 'rolling' && strikeIn === 'atm' ? nearest(fwd) : fixed;
       const kc = nearest(center + strangleWidth);
       const kp = nearest(center - strangleWidth);
       const ce = e.optionAt(ctx, 'CE', kc, 0, { minute: { dayIdx, m } });

@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 243 246 251;
+  --panel: 255 255 255;
+  --panel2: 241 244 249;
+  --line: 226 232 240;
+  --ink: 15 23 42;
+  --muted: 100 116 139;
+  --accent: 37 99 235;
+  --up: 22 163 74;
+  --down: 220 38 38;
+  --warn: 217 119 6;
+  --itm: 254 249 195;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: 11 18 32;
+  --panel: 17 26 46;
+  --panel2: 22 34 58;
+  --line: 32 45 72;
+  --ink: 230 237 247;
+  --muted: 139 155 184;
+  --accent: 79 140 255;
+  --up: 34 197 94;
+  --down: 248 81 73;
+  --warn: 245 158 11;
+  --itm: 42 46 30;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-ink font-sans antialiased;
+  font-feature-settings: 'tnum' 1, 'cv11' 1;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--line)) transparent;
+}
+
+@layer components {
+  .card {
+    @apply bg-panel border border-line rounded-xl;
+  }
+  .card-pad {
+    @apply p-3 sm:p-4;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed select-none whitespace-nowrap;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn bg-panel2 text-ink hover:bg-line border border-line;
+  }
+  .btn-buy {
+    @apply btn bg-up text-white hover:brightness-110;
+  }
+  .btn-sell {
+    @apply btn bg-down text-white hover:brightness-110;
+  }
+  .input {
+    @apply w-full rounded-lg border border-line bg-panel2 px-2.5 py-1.5 text-sm text-ink outline-none focus:border-accent focus:ring-1 focus:ring-accent/40;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium text-muted;
+  }
+  .tbl {
+    @apply w-full text-xs sm:text-[13px] border-collapse;
+  }
+  .tbl th {
+    @apply sticky top-0 z-10 bg-panel2 px-2 py-2 text-left font-semibold text-muted whitespace-nowrap border-b border-line;
+  }
+  .tbl td {
+    @apply px-2 py-1.5 border-b border-line/60 whitespace-nowrap;
+  }
+  .tbl tbody tr:hover td {
+    @apply bg-panel2/70;
+  }
+  .num {
+    @apply tabular-nums text-right;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-md px-1.5 py-0.5 text-2xs font-semibold;
+  }
+  .up {
+    @apply text-up;
+  }
+  .down {
+    @apply text-down;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@keyframes flash-up {
+  from {
+    background-color: rgb(var(--up) / 0.25);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+@keyframes flash-down {
+  from {
+    background-color: rgb(var(--down) / 0.25);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+.flash-up {
+  animation: flash-up 0.8s ease-out;
+}
+.flash-down {
+  animation: flash-down 0.8s ease-out;
+}

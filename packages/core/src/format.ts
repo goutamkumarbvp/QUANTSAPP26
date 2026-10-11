@@ -2,7 +2,7 @@
 
 export function formatIndian(x: number, decimals = 2): string {
   if (!Number.isFinite(x)) return '—';
-  const neg = x < 0;
+  const neg = x < 0 && Number(Math.abs(x).toFixed(decimals)) !== 0;
   const fixed = Math.abs(x).toFixed(decimals);
   const [intPart, dec] = fixed.split('.');
   let grouped = intPart;
@@ -16,7 +16,8 @@ export function formatIndian(x: number, decimals = 2): string {
 
 export function formatINR(x: number, decimals = 0): string {
   if (!Number.isFinite(x)) return '—';
-  return `${x < 0 ? '-' : ''}₹${formatIndian(Math.abs(x), decimals)}`;
+  const neg = x < 0 && Number(Math.abs(x).toFixed(decimals)) !== 0;
+  return `${neg ? '-' : ''}₹${formatIndian(Math.abs(x), decimals)}`;
 }
 
 /** 1.2K, 3.45L, 12.3Cr */

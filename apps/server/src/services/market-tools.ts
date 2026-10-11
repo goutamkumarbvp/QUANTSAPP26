@@ -211,7 +211,7 @@ export class MarketTools {
     const tick = 0.05;
     const idSeed = Math.floor(live * 100) ^ (spec.strike ?? 0);
     const sec = Math.floor(ts / 1000);
-    const spreadTicks = Math.max(1, Math.round((live * (spec.type === 'FUT' ? 0.00005 : 0.002 + 0.01 / inst.liquidity)) / tick));
+    const spreadTicks = Math.max(1, Math.round((live * (spec.type === 'FUT' ? 0.000012 / inst.liquidity : 0.002 + 0.01 / inst.liquidity)) / tick));
     const bestBid = roundTick(live - Math.floor(spreadTicks / 2) * tick);
     const bestAsk = roundTick(Math.max(bestBid + tick, live + Math.ceil(spreadTicks / 2) * tick));
     const baseQty = Math.max(1, Math.round(inst.liquidity * (spec.type === 'FUT' ? 25 : 60)));
