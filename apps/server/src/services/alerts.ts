@@ -1,6 +1,8 @@
 /** Alerts (price / option / IV / PCR / OI / MTM), notifications and watchlists. */
 import { randomUUID } from 'node:crypto';
-import { formatExpiry, type AlertDef, type Notification, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
+import { formatExpiry, formatIndian, formatTimeIST, type AlertDef, type Notification, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
+import type { Analytics } from './analytics';
+import type { MarketTools } from './market-tools';
 import type { MarketEngine } from '../market/engine';
 import type { Db } from '../store/db';
 import type { Pricer } from './pricer';
@@ -49,6 +51,8 @@ export class AlertService {
     private readonly strategies: StrategyManager,
     private readonly notifier: Notifier,
     private readonly now: () => number,
+    private readonly analytics: Analytics,
+    private readonly tools: MarketTools,
   ) {}
 
   list(uid: string): AlertDef[] {
@@ -56,7 +60,14 @@ export class AlertService {
   }
 
   create(uid: string, input: AlertInput): AlertDef {
-    if (!['PRICE', 'OPTION_PRICE', 'IV', 'PCR', 'OI_CHANGE', 'MTM'].includes(input.kind)) throw httpError(400, 'Invalid alert kind');
+    if (!['PRICE', 'OPTION_PRICE', 'IV', 'PCR', 'OI_CHANGE', 'MTM', 'ORB_BREAK', 'ORDER_FLOW'].includes(input.kind)) throw httpError(400, 'Invalid alert kind');
+    if (input.kind === 'ORB_BREAK') {
+      // value = opening-range length in minutes
+      const v = Number(input.value) || 15;
+      if (!(v >= 1 && v <= 120)) throw httpError(400, 'Opening range must be 1–120 minutes');
+      input = { ...input, value: Math.round(v) };
+    }
+    if (input.kind === 'ORDER_FLOW' && !(Number(input.value) >= 0 && Number(input.value) <= 100)) throw httpError(400, 'Buy volume % must be between 0 and 100');
     if (input.condition !== 'above' && input.condition !== 'below') throw httpError(400, 'Invalid condition');
     if (!Number.isFinite(Number(input.value))) throw httpError(400, 'Invalid value');
     if (input.kind === 'MTM') {
@@ -80,6 +91,7 @@ export class AlertService {
       note: input.note,
       status: 'active',
       createdAt: this.now(),
+      armedAt: this.now(),
     };
     this.list(uid).unshift(alert);
     this.db.save();
@@ -101,6 +113,7 @@ export class AlertService {
     if (status === 'active') {
       a.triggeredAt = undefined;
       a.triggeredValue = undefined;
+      a.armedAt = this.now();
     }
     this.db.save();
     return a;
@@ -120,6 +133,10 @@ export class AlertService {
         return `${a.symbol} PCR`;
       case 'MTM':
         return 'Strategy MTM';
+      case 'ORB_BREAK':
+        return `${a.symbol} ${a.value}-min opening range`;
+      case 'ORDER_FLOW':
+        return `${a.symbol} futures 1-min buy volume %`;
     }
   }
 
@@ -148,18 +165,61 @@ export class AlertService {
       case 'MTM':
         v = this.strategies.get(uid, a.strategyId!).live?.mtm ?? 0;
         break;
+      case 'ORDER_FLOW':
+        v = this.tools.orderFlow(a.symbol, { type: 'FUT' }, ts, { limit: 1 }).lastMinute?.buyPct ?? NaN;
+        break;
+      case 'ORB_BREAK':
+        v = NaN; // event-based, see orbTriggered()
+        break;
     }
     cache.set(k, v);
     return v;
+  }
+
+  /** An opening-range alert fires on the first break of its side confirmed after it was armed. */
+  private orbTriggered(a: AlertDef, ts: number, cache: Map<string, unknown>): { level: number; price: number; at: number; summary: string } | null {
+    const key = `orb|${a.symbol}|${a.value}`;
+    let r = cache.get(key) as ReturnType<Analytics['orb']> | undefined;
+    if (!r) {
+      r = this.analytics.orb(a.symbol, ts, { rangeMinutes: a.value });
+      cache.set(key, r);
+    }
+    const since = a.armedAt ?? a.createdAt;
+    const want = a.condition === 'above' ? 'up' : 'down';
+    // A 'close'-rule break is confirmed when its 1-minute candle closes.
+    const hit = r.evaluation.crossings.find((b) => b.direction === want && b.ts + 60_000 >= since);
+    if (!hit) return null;
+    return { level: want === 'up' ? r.evaluation.high : r.evaluation.low, price: hit.price, at: hit.ts + 60_000, summary: r.summary };
   }
 
   /** Evaluate every active alert plus strategy target/stop-loss MTM levels. */
   evaluate(): void {
     const ts = this.now();
     const cache = new Map<string, number>();
+    const orbCache = new Map<string, unknown>();
     for (const [uid, alerts] of Object.entries(this.db.data.alerts)) {
       for (const a of alerts) {
         if (a.status !== 'active') continue;
+        if (a.kind === 'ORB_BREAK') {
+          let hit: ReturnType<AlertService['orbTriggered']>;
+          try {
+            hit = this.orbTriggered(a, ts, orbCache);
+          } catch {
+            a.status = 'disabled';
+            continue;
+          }
+          if (!hit) continue;
+          a.status = 'triggered';
+          a.triggeredAt = hit.at;
+          a.triggeredValue = hit.price;
+          const dir = a.condition === 'above' ? 'above' : 'below';
+          this.notifier.push(uid, {
+            kind: 'alert',
+            title: `${a.symbol} broke ${dir} its ${a.value}-min opening range — trending ${a.condition === 'above' ? 'up' : 'down'}`,
+            body: `${a.condition === 'above' ? 'High' : 'Low'} ${formatIndian(hit.level)} broken at ${formatTimeIST(hit.at)} (close ${formatIndian(hit.price)})${a.note ? ` — ${a.note}` : ''}`,
+          });
+          continue;
+        }
         let v: number;
         try {
           v = this.value(uid, a, ts, cache);
@@ -167,6 +227,7 @@ export class AlertService {
           a.status = 'disabled';
           continue;
         }
+        if (!Number.isFinite(v)) continue;
         const hit = a.condition === 'above' ? v >= a.value : v <= a.value;
         if (!hit) continue;
         a.status = 'triggered';

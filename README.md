@@ -32,11 +32,12 @@ docker build -t q26-options .
 docker run -p 8787:8787 -v q26-data:/app/apps/server/data q26-options
 ```
 
-## Features (35 screens)
+## Features (37 screens)
 
 | Area | Screens |
 |---|---|
 | Market | Home dashboard, Watchlist, Option Chain, Synopsis heat-map, FII/DII, Participant-wise OI |
+| Trend & flow | 15-min opening range breakout (trend detector), 1-minute order flow (buyer vs seller volume) |
 | Open interest | OI analysis (strike-wise OI & change), Multi-strike OI, OI trend, PCR, Max pain, Futures OI & build-up, Build-up breadth |
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
@@ -54,6 +55,14 @@ Highlights:
   profit at target or POP, honouring stop-loss, max legs and capital limits.
 - **Trade recap** — load the option chain as it was at any past minute, build a position at those prices and
   replay its P&L to expiry.
+- **15-minute opening range breakout** — the high and low of the first 15-minute candle (09:15–09:30) are
+  recorded every session; a 1-minute close beyond either level marks the market as trending up or down
+  (sideways while inside), with whipsaw / failed-breakout detection, an all-F&O scanner, a 20-session record,
+  trend scanners, a dashboard column and break alerts. 5- and 30-minute ranges and a "any touch" rule are
+  selectable.
+- **1-minute order flow** — each minute's traded volume of a future or option is split into aggressive buy vs
+  sell volume (delta, buy %, cumulative delta) with the last completed minute, the minute in progress,
+  last-5-minute and session totals; also shown in Order Book Analytics, on the dashboard and as an alert.
 - **Live updates** — WebSocket ticker and notifications; analytics views poll every few seconds.
 - **Installable PWA** — mobile-first layout with bottom tabs, dark/light themes, offline app shell.
 
@@ -126,7 +135,7 @@ and add the generated Digital Asset Links file at `/.well-known/assetlinks.json`
 All endpoints are under `/api`. Market data: `meta`, `quotes`, `indices`, `expiries/:symbol`, `chain/:symbol`,
 `futures/:symbol`, `candles/:symbol`, `dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`,
 `oi/futures`, `oi/breadth`, `participants`, `fii-dii`, `vol/{iv-chart,skew,surface,cone}/:symbol`, `vol/table`,
-`straddle/:symbol`, `strategy-chart` (POST), `optimizer` (POST), `recap` (POST), `scanners[/:id]`, `unusual`,
+`straddle/:symbol`, `orb`, `orb/:symbol`, `orb/:symbol/history`, `order-flow/:symbol`, `strategy-chart` (POST), `optimizer` (POST), `recap` (POST), `scanners[/:id]`, `unusual`,
 `synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`, `strategies`, `broker/*`,
 `alerts`, `notifications`, `watchlists`. WebSocket: `/ws` (ticks, notifications, order updates).
 

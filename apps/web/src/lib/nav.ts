@@ -23,6 +23,13 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
+    title: 'Trend & Flow',
+    items: [
+      { to: '/orb', label: '15-min Range Breakout', icon: '⇥', desc: 'First 15-min candle high/low — broken = trending' },
+      { to: '/order-flow', label: 'Order Flow (1-min)', icon: '⇄', desc: 'Buyer vs seller volume in the last minute' },
+    ],
+  },
+  {
     title: 'Open Interest',
     items: [
       { to: '/oi/strikes', label: 'OI Analysis', icon: '▮', desc: 'Strike-wise OI and change in OI' },

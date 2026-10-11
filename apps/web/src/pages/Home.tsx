@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { formatExpiry, formatIndian, type BuildUp, type BuildUpCounts, type Candle, type FiiDiiDay, type MarketClockInfo, type Quote } from '@q26/core';
+import { formatExpiry, formatIndian, type BuildUp, type BuildUpCounts, type Candle, type FiiDiiDay, type FlowSummary, type MarketClockInfo, type OrbTrend, type Quote } from '@q26/core';
+import { TrendBadge, sentimentTone } from '../components/trend';
 import { Chart, baseOption, axis, useChartColors } from '../components/Chart';
 import { BuildUpBadge, Card, Chg, Loadable, PageHeader } from '../components/ui';
 import { useLive } from '../lib/hooks';
@@ -23,7 +24,11 @@ interface Dashboard {
   losers: Mover[];
   oiGainers: Mover[];
   buildUpCounts: BuildUpCounts;
-  chains: { symbol: string; expiry: string; pcr: number; maxPain: number; atmIv: number; ivChange: number; support: number; resistance: number; spot: number; daysToExpiry: number }[];
+  chains: {
+    symbol: string; expiry: string; pcr: number; maxPain: number; atmIv: number; ivChange: number; support: number; resistance: number; spot: number; daysToExpiry: number;
+    orb: { high: number; low: number; trend: OrbTrend; whipsaw: boolean; reentered: boolean; summary: string };
+    flow: { buyPct: number; delta: number; sentiment: FlowSummary['sentiment']; ts: number } | null;
+  }[];
   fiiDii: FiiDiiDay[];
 }
 
@@ -124,7 +129,7 @@ function FlowsChart({ days }: { days: FiiDiiDay[] }) {
 
 export default function Home() {
   const q = useLive<Dashboard>(['dashboard'], '/dashboard', 5000);
-  const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/builder', '/optimizer', '/oi/strikes', '/straddle', '/vol/iv-chart', '/scanners', '/recap'].includes(i.to));
+  const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/orb', '/order-flow', '/builder', '/optimizer', '/oi/strikes', '/straddle', '/scanners'].includes(i.to));
   return (
     <div className="space-y-3">
       <PageHeader title="Market Overview" subtitle="Indices, derivatives snapshot, movers and institutional flows" />
@@ -160,6 +165,9 @@ export default function Home() {
                       <th className="num">Support (PE OI)</th>
                       <th className="num">Resistance (CE OI)</th>
                       <th className="num">DTE</th>
+                      <th className="num">15m range H / L</th>
+                      <th>Trend</th>
+                      <th className="num">1-min flow (fut)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -176,6 +184,15 @@ export default function Home() {
                         <td className="num text-up">{formatIndian(c.support, 0)}</td>
                         <td className="num text-down">{formatIndian(c.resistance, 0)}</td>
                         <td className="num">{c.daysToExpiry.toFixed(1)}</td>
+                        <td className="num">
+                          <Link to="/orb" className="hover:underline">{formatIndian(c.orb.high, 0)} / {formatIndian(c.orb.low, 0)}</Link>
+                        </td>
+                        <td title={c.orb.summary}>
+                          <TrendBadge trend={c.orb.trend} whipsaw={c.orb.whipsaw} reentered={c.orb.reentered} />
+                        </td>
+                        <td className={`num ${c.flow ? sentimentTone(c.flow.sentiment) : 'text-muted'}`}>
+                          <Link to="/order-flow" className="hover:underline">{c.flow ? `${c.flow.buyPct.toFixed(0)}% buy` : '—'}</Link>
+                        </td>
                       </tr>
                     ))}
                   </tbody>

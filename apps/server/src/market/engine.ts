@@ -90,12 +90,16 @@ const U_PROFILE: Float64Array = (() => {
   const u = new Float64Array(M + 1);
   let s = 0;
   for (let j = 1; j <= M; j++) {
-    u[j] = 1 + 1.4 * Math.exp(-(j - 1) / 18) + 0.7 * Math.exp(-(M - j) / 22);
+    // Indian opens absorb overnight news: the first ~15 minutes carry ~11% of the day's variance.
+    u[j] = 1 + 3 * Math.exp(-(j - 1) / 15) + 0.7 * Math.exp(-(M - j) / 22);
     s += u[j];
   }
   for (let j = 1; j <= M; j++) u[j] /= s;
   return u;
 })();
+
+/** Intraday realised vol relative to close-to-close vol (intraday noise mean-reverts by the close). */
+const INTRADAY_VOL_FACTOR = 1.1;
 
 const TYPE_CODE = { CE: 1, PE: 2, FUT: 3 } as const;
 
@@ -285,7 +289,7 @@ export class MarketEngine {
         w += Math.sqrt(U_PROFILE[j]) * rng.normal();
         C[j] = rho * Wm[j] + k * w;
       }
-      const sigma = (inst.vol / Math.sqrt(252)) * Math.sqrt(bar.h) * 0.85;
+      const sigma = (inst.vol / Math.sqrt(252)) * Math.sqrt(bar.h) * INTRADAY_VOL_FACTOR;
       const lo = Math.log(bar.open);
       const lc = Math.log(bar.close);
       const P = new Float64Array(M + 1);
@@ -564,6 +568,73 @@ export class MarketEngine {
     const cum = f + (0.7 / (2 * Math.PI)) * Math.sin(2 * Math.PI * f);
     const daily = (inst.kind === 'index' ? bar.volume : bar.futOi * 0.45) * share;
     return Math.max(0, Math.round((daily * cum) / inst.lotSize)) * inst.lotSize;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Order flow                                                           */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Order-book pressure for an underlying (changes every 2 minutes): > 0 means resting bids
+   * outweigh offers. Shared by the depth view and the order-flow split so they agree.
+   */
+  bookTilt(symbol: string, dayIdx: number, minute: number): number {
+    return 0.35 * hashN(this.symId(symbol), dayIdx, Math.floor(minute / 2), 3);
+  }
+
+  /** Std-dev of the underlying's log move over session minute j → j+1. */
+  private minuteSigma(symbol: string, dayIdx: number, j: number): number {
+    const inst = this.inst(symbol);
+    const bar = this.bar(symbol, dayIdx);
+    return (inst.vol / Math.sqrt(252)) * Math.sqrt(bar.h) * INTRADAY_VOL_FACTOR * Math.sqrt(U_PROFILE[Math.min(M, Math.max(1, j + 1))]);
+  }
+
+  /**
+   * Split traded volume between aggressive buyers and sellers. Buyers dominate when the price
+   * (for puts: the underlying, inverted) rises over the interval and when the book leans bid.
+   */
+  private buyShare(symbol: string, sign: 1 | -1, dayIdx: number, j: number, move: number, noiseId: number): number {
+    const z = move / this.minuteSigma(symbol, dayIdx, j);
+    const x = 0.6 * sign * Math.max(-4, Math.min(4, z)) + 0.8 * this.bookTilt(symbol, dayIdx, j) + 0.3 * hashN(this.seed ^ noiseId, dayIdx, j, 53);
+    return 1 / (1 + Math.exp(-x));
+  }
+
+  /**
+   * Buy/sell volume for the 1-minute interval [j, j+1] (or a partial interval up to `to`).
+   * Futures are used for the underlying itself (indices have no traded spot volume).
+   */
+  minuteFlow(
+    symbol: string,
+    spec: { type: 'FUT' | 'CE' | 'PE'; expiry: string; strike?: number },
+    dayIdx: number,
+    j: number,
+    to = j + 1,
+  ): { volume: number; buyVolume: number; sellVolume: number; close: number } {
+    const inst = this.inst(symbol);
+    const lot = inst.lotSize;
+    const P = this.path(symbol, dayIdx);
+    const end = Math.min(M, to);
+    const pEnd = end === Math.floor(end) ? P[end] : P[Math.floor(end)] + (P[Math.min(M, Math.floor(end) + 1)] - P[Math.floor(end)]) * (end - Math.floor(end));
+    const move = Math.log(pEnd / P[j]);
+    let volume: number;
+    let close: number;
+    let sign: 1 | -1 = 1;
+    let noiseId: number;
+    if (spec.type === 'FUT') {
+      volume = this.futureVolume(symbol, spec.expiry, dayIdx, end) - this.futureVolume(symbol, spec.expiry, dayIdx, j);
+      close = this.futurePrice(symbol, spec.expiry, 0, { dayIdx, m: end });
+      noiseId = this.symId(symbol) ^ dateToNum(spec.expiry);
+    } else {
+      const ctx = this.contract(symbol, spec.expiry);
+      const k = Number(spec.strike);
+      volume = this.volumeAt(ctx, spec.type, k, dayIdx, end) - this.volumeAt(ctx, spec.type, k, dayIdx, j);
+      close = this.optionAt(ctx, spec.type, k, 0, { minute: { dayIdx, m: end } }).ltp;
+      sign = spec.type === 'CE' ? 1 : -1;
+      noiseId = this.contractId(ctx, spec.type, k);
+    }
+    volume = Math.max(0, volume);
+    const buyVolume = Math.min(volume, Math.max(0, Math.round((volume * this.buyShare(symbol, sign, dayIdx, j, move, noiseId)) / lot) * lot));
+    return { volume, buyVolume, sellVolume: volume - buyVolume, close };
   }
 
   /* ------------------------------------------------------------------ */

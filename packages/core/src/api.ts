@@ -4,6 +4,7 @@
 import type { BuildUp } from './oi';
 import type { InstrumentType, Leg, Side } from './payoff';
 import type { ExpiryRule } from './dates';
+import type { FlowSummary, MinuteBar, OrbEvaluation, OrbRule, OrbTrend } from './orb';
 
 export type MarketStatusCode = 'open' | 'pre-open' | 'closed';
 
@@ -336,7 +337,7 @@ export interface ScannerRow {
 export interface ScannerDef {
   id: string;
   name: string;
-  category: 'OI' | 'Price' | 'IV' | 'Build-up' | 'Volume' | 'Options';
+  category: 'OI' | 'Price' | 'IV' | 'Build-up' | 'Volume' | 'Options' | 'Trend';
   description: string;
 }
 
@@ -519,7 +520,7 @@ export interface Funds {
   premiumReceived: number;
 }
 
-export type AlertKind = 'PRICE' | 'OPTION_PRICE' | 'IV' | 'PCR' | 'OI_CHANGE' | 'MTM';
+export type AlertKind = 'PRICE' | 'OPTION_PRICE' | 'IV' | 'PCR' | 'OI_CHANGE' | 'MTM' | 'ORB_BREAK' | 'ORDER_FLOW';
 
 export interface AlertDef {
   id: string;
@@ -535,6 +536,8 @@ export interface AlertDef {
   note?: string;
   status: 'active' | 'triggered' | 'disabled';
   createdAt: number;
+  /** Market time the alert was last (re-)armed; ORB alerts only fire on breaks after this. */
+  armedAt?: number;
   triggeredAt?: number;
   triggeredValue?: number;
 }
@@ -605,6 +608,104 @@ export interface OptimizerRequest {
   allowUnlimitedRisk?: boolean;
   maxCapital?: number;
   sortBy?: 'rr' | 'profit' | 'pop';
+}
+
+/* ------------------------- opening range & order flow ------------------------- */
+
+export interface OrbResponse {
+  symbol: string;
+  date: string;
+  rangeMinutes: number;
+  rule: OrbRule;
+  rangeStartTs: number;
+  rangeEndTs: number;
+  live: boolean;
+  ltp: number;
+  changePct: number;
+  dayHigh: number;
+  dayLow: number;
+  evaluation: OrbEvaluation;
+  summary: string;
+  /** 1-minute candles from 09:15; the last one may still be forming when `live`. */
+  bars: MinuteBar[];
+}
+
+export interface OrbScanRow {
+  symbol: string;
+  name: string;
+  kind: 'index' | 'stock';
+  sector: string;
+  ltp: number;
+  changePct: number;
+  high: number;
+  low: number;
+  widthPct: number;
+  trend: OrbTrend;
+  whipsaw: boolean;
+  reentered: boolean;
+  position: 'above' | 'inside' | 'below';
+  /** Latest break (start of the confirming 1-minute candle). */
+  breakTs: number | null;
+  breakPrice: number | null;
+  /** % beyond the broken level in the trend direction (negative = back inside). */
+  beyondPct: number | null;
+  toHighPct: number;
+  toLowPct: number;
+  summary: string;
+}
+
+export interface OrbHistoryRow {
+  date: string;
+  high: number;
+  low: number;
+  widthPct: number;
+  trend: OrbTrend;
+  whipsaw: boolean;
+  firstBreak: { direction: 'up' | 'down'; ts: number } | null;
+  close: number;
+  closeVsRange: 'above' | 'inside' | 'below';
+  /** Close beyond the first broken level, in the break direction, % (null if never broken). */
+  followThroughPct: number | null;
+  dayRangePct: number;
+}
+
+export interface OrbHistoryResponse {
+  symbol: string;
+  rangeMinutes: number;
+  rule: OrbRule;
+  rows: OrbHistoryRow[];
+  stats: { days: number; brokeUp: number; brokeDown: number; sideways: number; whipsaw: number; trendDays: number; avgFollowThroughPct: number };
+}
+
+export interface OrderFlowMinute {
+  ts: number;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+  delta: number;
+  cumDelta: number;
+  buyPct: number;
+  close: number;
+}
+
+export interface OrderFlowResponse {
+  symbol: string;
+  instrument: string;
+  type: 'FUT' | 'CE' | 'PE';
+  expiry: string;
+  strike?: number;
+  date: string;
+  live: boolean;
+  lotSize: number;
+  /** Last fully completed 1-minute candle. */
+  lastMinute: (FlowSummary & { ts: number; close: number }) | null;
+  /** The minute in progress (live only). */
+  currentMinute: (FlowSummary & { ts: number; elapsedSec: number }) | null;
+  last5: FlowSummary;
+  session: FlowSummary;
+  /** Completed minutes, oldest first (the most recent `limit`). */
+  minutes: OrderFlowMinute[];
+  signal: string;
 }
 
 /* ------------------------------- websocket ------------------------------- */

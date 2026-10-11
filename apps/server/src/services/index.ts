@@ -46,7 +46,7 @@ export function createServices(config: AppConfig, opts: { now?: () => number } =
   const orderListeners = new Set<(uid: string, o: Order) => void>();
   const broker = new PaperBroker(engine, db, pricer, now, (uid, n) => notifier.push(uid, n), (uid, o) => orderListeners.forEach((l) => l(uid, o)));
   const strategies = new StrategyManager(engine, db, pricer, now);
-  const alerts = new AlertService(engine, db, pricer, strategies, notifier, now);
+  const alerts = new AlertService(engine, db, pricer, strategies, notifier, now, analytics, tools);
   const watchlists = new Watchlists(db, pricer, now);
   const timers: NodeJS.Timeout[] = [];
   return {

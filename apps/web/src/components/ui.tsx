@@ -24,7 +24,7 @@ export function Card({ title, actions, children, className, pad = true }: { titl
       {(title || actions) && (
         <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2 sm:px-4">
           <h2 className="text-sm font-semibold">{title}</h2>
-          {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+          {actions && <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">{actions}</div>}
         </header>
       )}
       <div className={pad ? 'card-pad' : ''}>{children}</div>

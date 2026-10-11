@@ -78,6 +78,18 @@ const ARTICLES: Article[] = [
     ],
   },
   {
+    slug: 'opening-range-order-flow',
+    title: 'Opening range breakout & 1-minute order flow',
+    level: 'Intermediate',
+    summary: 'Is the market trending today, and who is pushing it right now?',
+    body: [
+      { h: 'Note the first 15-minute candle', p: ['At 09:30 the first 15-minute candle (09:15–09:30) is complete. Its high and low form the opening range — the price zone where the day\'s first battle between buyers and sellers happened.'] },
+      { h: 'Broken = trending', p: ['If a 1-minute candle closes above the range high, buyers have won the open and the market can be treated as trending up; a close below the range low means trending down. While price stays inside the range the market is range-bound.', 'When both sides get broken the day is a whipsaw — trust the latest break, use tighter stops, and be wary when price falls back inside the range (a possible failed breakout).'], tool: { to: '/orb', label: 'Open the range breakout tool' } },
+      { h: '1-minute order flow', p: ['Every trade either lifts the offer (an aggressive buyer) or hits the bid (an aggressive seller). Adding those up minute by minute shows who is in control right now: buy volume vs sell volume, their difference (delta) and the running cumulative delta.'] },
+      { h: 'Using them together', p: ['A breakout backed by buyers dominating the next few minutes (positive delta) is more convincing than one on thin or opposing flow. If price breaks the high but sellers dominate, treat it with suspicion.'], tool: { to: '/order-flow', label: 'Open 1-minute order flow' } },
+    ],
+  },
+  {
     slug: 'optimizer',
     title: 'Using the optimizer well',
     level: 'Advanced',

@@ -4,6 +4,13 @@
 import {
   bsGreeks,
   classifyBuildUp,
+  describeOrb,
+  evaluateOpeningRange,
+  type MinuteBar,
+  type OrbHistoryResponse,
+  type OrbResponse,
+  type OrbRule,
+  type OrbScanRow,
   expiryTs,
   formatExpiry,
   historicalVol,
@@ -154,6 +161,149 @@ export class Analytics {
         buildUp: classifyBuildUp(ltp - prevPx, oi - prevOi),
       };
     });
+  }
+
+  /* ----------------------------- opening range breakout ----------------------------- */
+
+  /**
+   * 1-minute candles of the underlying from 09:15 up to `upto`. When `liveTs` is given and a
+   * minute is in progress, a final partial candle closes at the live price.
+   */
+  minuteBars(symbol: string, dayIdx: number, upto: number, liveTs?: number): { bars: MinuteBar[]; partial: boolean } {
+    const e = this.engine;
+    const P = e.path(symbol, dayIdx);
+    const full = Math.min(M, Math.floor(upto));
+    const r2 = (x: number) => +x.toFixed(2);
+    const bars: MinuteBar[] = [];
+    for (let j = 0; j < full; j++) {
+      bars.push({ ts: e.tsOf(dayIdx, j), open: r2(P[j]), high: r2(Math.max(P[j], P[j + 1])), low: r2(Math.min(P[j], P[j + 1])), close: r2(P[j + 1]) });
+    }
+    let partial = false;
+    if (liveTs !== undefined && upto > full && full < M) {
+      const open = r2(P[full]);
+      const close = e.spot(symbol, liveTs);
+      bars.push({ ts: e.tsOf(dayIdx, full), open, high: Math.max(open, close), low: Math.min(open, close), close });
+      partial = true;
+    }
+    return { bars, partial };
+  }
+
+  private orbFor(symbol: string, dayIdx: number, upto: number, liveTs: number | undefined, rangeMinutes: number, rule: OrbRule) {
+    const { bars, partial } = this.minuteBars(symbol, dayIdx, upto, liveTs);
+    return { bars, partial, ev: evaluateOpeningRange(bars, { rangeMinutes, rule, lastIsPartial: partial }) };
+  }
+
+  orb(symbol: string, ts: number, opts: { date?: string; rangeMinutes?: number; rule?: OrbRule } = {}): OrbResponse {
+    const e = this.engine;
+    const rangeMinutes = Math.max(1, Math.min(120, Math.round(opts.rangeMinutes ?? 15)));
+    const rule = opts.rule ?? 'close';
+    const { dayIdx, upto } = this.resolveDay(opts.date, ts);
+    const now = e.parts(ts);
+    const live = dayIdx === now.dayIdx && upto < M;
+    const { bars, ev } = this.orbFor(symbol, dayIdx, upto, live ? ts : undefined, rangeMinutes, rule);
+    const bar = e.bar(symbol, dayIdx);
+    const ltp = live ? e.spot(symbol, ts) : bars.length ? bars[bars.length - 1].close : bar.open;
+    return {
+      symbol,
+      date: e.days[dayIdx],
+      rangeMinutes,
+      rule,
+      rangeStartTs: e.tsOf(dayIdx, 0),
+      rangeEndTs: e.tsOf(dayIdx, rangeMinutes),
+      live,
+      ltp,
+      changePct: +(((ltp - bar.prevClose) / bar.prevClose) * 100).toFixed(2),
+      dayHigh: bars.length ? Math.max(...bars.map((b) => b.high)) : ltp,
+      dayLow: bars.length ? Math.min(...bars.map((b) => b.low)) : ltp,
+      evaluation: ev,
+      summary: describeOrb(ev),
+      bars,
+    };
+  }
+
+  orbScan(ts: number, opts: { rangeMinutes?: number; rule?: OrbRule } = {}): OrbScanRow[] {
+    const e = this.engine;
+    const rangeMinutes = Math.max(1, Math.min(120, Math.round(opts.rangeMinutes ?? 15)));
+    const rule = opts.rule ?? 'close';
+    const now = e.parts(ts);
+    const live = now.m < M;
+    return [...e.instruments.values()].map((inst) => {
+      const { ev } = this.orbFor(inst.symbol, now.dayIdx, now.m, live ? ts : undefined, rangeMinutes, rule);
+      const bar = e.bar(inst.symbol, now.dayIdx);
+      const ltp = Number.isFinite(ev.last) ? ev.last : bar.open;
+      const lastBreak = ev.breaks[ev.breaks.length - 1] ?? null;
+      const beyondPct = !lastBreak ? null : lastBreak.direction === 'up' ? ((ltp - ev.high) / ev.high) * 100 : ((ev.low - ltp) / ev.low) * 100;
+      return {
+        symbol: inst.symbol,
+        name: inst.name,
+        kind: inst.kind,
+        sector: inst.sector,
+        ltp,
+        changePct: +(((ltp - bar.prevClose) / bar.prevClose) * 100).toFixed(2),
+        high: ev.high,
+        low: ev.low,
+        widthPct: +ev.widthPct.toFixed(2),
+        trend: ev.trend,
+        whipsaw: ev.whipsaw,
+        reentered: ev.reentered,
+        position: ev.position,
+        breakTs: lastBreak?.ts ?? null,
+        breakPrice: lastBreak?.price ?? null,
+        beyondPct: beyondPct === null ? null : +beyondPct.toFixed(2),
+        toHighPct: +ev.toHighPct.toFixed(2),
+        toLowPct: +ev.toLowPct.toFixed(2),
+        summary: describeOrb(ev),
+      };
+    });
+  }
+
+  /** Opening-range outcome for each of the last `days` completed sessions. */
+  orbHistory(symbol: string, days: number, ts: number, opts: { rangeMinutes?: number; rule?: OrbRule } = {}): OrbHistoryResponse {
+    const e = this.engine;
+    e.inst(symbol);
+    const rangeMinutes = Math.max(1, Math.min(120, Math.round(opts.rangeMinutes ?? 15)));
+    const rule = opts.rule ?? 'close';
+    const now = e.parts(ts);
+    const lastDone = now.m >= M ? now.dayIdx : now.dayIdx - 1;
+    const rows: OrbHistoryResponse['rows'] = [];
+    for (let d = Math.max(1, lastDone - Math.max(1, Math.min(250, days)) + 1); d <= lastDone; d++) {
+      const { bars, ev } = this.orbFor(symbol, d, M, undefined, rangeMinutes, rule);
+      const close = bars[bars.length - 1].close;
+      const first = ev.breaks[0] ?? null;
+      const follow = !first ? null : first.direction === 'up' ? ((close - ev.high) / ev.high) * 100 : ((ev.low - close) / ev.low) * 100;
+      const hi = Math.max(...bars.map((b) => b.high));
+      const lo = Math.min(...bars.map((b) => b.low));
+      rows.push({
+        date: e.days[d],
+        high: ev.high,
+        low: ev.low,
+        widthPct: +ev.widthPct.toFixed(2),
+        trend: ev.trend,
+        whipsaw: ev.whipsaw,
+        firstBreak: first ? { direction: first.direction, ts: first.ts } : null,
+        close,
+        closeVsRange: close > ev.high ? 'above' : close < ev.low ? 'below' : 'inside',
+        followThroughPct: follow === null ? null : +follow.toFixed(2),
+        dayRangePct: +(((hi - lo) / lo) * 100).toFixed(2),
+      });
+    }
+    const broke = rows.filter((r) => r.firstBreak);
+    const trendDays = broke.filter((r) => r.closeVsRange === (r.firstBreak!.direction === 'up' ? 'above' : 'below')).length;
+    return {
+      symbol,
+      rangeMinutes,
+      rule,
+      rows: rows.reverse(),
+      stats: {
+        days: rows.length,
+        brokeUp: rows.filter((r) => r.firstBreak?.direction === 'up').length,
+        brokeDown: rows.filter((r) => r.firstBreak?.direction === 'down').length,
+        sideways: rows.filter((r) => !r.firstBreak).length,
+        whipsaw: rows.filter((r) => r.whipsaw).length,
+        trendDays,
+        avgFollowThroughPct: broke.length ? +(broke.reduce((a, r) => a + (r.followThroughPct ?? 0), 0) / broke.length).toFixed(2) : 0,
+      },
+    };
   }
 
   /* ----------------------------- open interest ----------------------------- */

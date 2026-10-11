@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { formatExpiry, type AlertDef, type AlertKind, type Notification, type SavedStrategy } from '@q26/core';
+import { formatExpiry, type AlertDef, type AlertKind, type Notification, type OrbResponse, type OrderFlowResponse, type SavedStrategy } from '@q26/core';
 import { SymbolSelect } from '../components/pickers';
 import { Card, Empty, ErrorBox, Field, Loadable, PageHeader, Pill, Segmented } from '../components/ui';
-import { api } from '../lib/api';
+import { api, qs } from '../lib/api';
 import { formatDateTime } from '../lib/format';
-import { useChain, useExpiries } from '../lib/hooks';
+import { useChain, useExpiries, useLive } from '../lib/hooks';
 import { useApp } from '../lib/store';
 
 const KINDS: { value: AlertKind; label: string; unit: string }[] = [
@@ -15,10 +15,13 @@ const KINDS: { value: AlertKind; label: string; unit: string }[] = [
   { value: 'PCR', label: 'PCR', unit: '' },
   { value: 'OI_CHANGE', label: 'Option OI change', unit: '%' },
   { value: 'MTM', label: 'Strategy MTM', unit: '₹' },
+  { value: 'ORB_BREAK', label: 'Opening range breakout', unit: 'min' },
+  { value: 'ORDER_FLOW', label: '1-min buy volume % (futures)', unit: '%' },
 ];
 
 function describe(a: AlertDef, strategies: SavedStrategy[]): string {
   const k = KINDS.find((x) => x.value === a.kind)!;
+  if (a.kind === 'ORB_BREAK') return `${a.symbol} breaks ${a.condition === 'above' ? 'above' : 'below'} its ${a.value}-min opening range`;
   const what =
     a.kind === 'MTM'
       ? `MTM of “${strategies.find((s) => s.id === a.strategyId)?.name ?? 'strategy'}”`
@@ -49,15 +52,20 @@ export default function Alerts() {
   const chain = useChain(symbol, e, { refetch: 10000 });
   const k = strike && chain.data?.rows.some((r) => r.strike === strike) ? strike : chain.data?.atm;
   const needsOption = kind === 'OPTION_PRICE' || kind === 'OI_CHANGE';
+  const isOrb = kind === 'ORB_BREAK';
+  const orb = useLive<OrbResponse>(['orb', symbol, '', Number(value) || 15, 'close'], `/orb/${symbol}${qs({ minutes: Number(value) || 15 })}`, 10000, isOrb);
+  const flow = useLive<OrderFlowResponse>(['order-flow', symbol, 'FUT', undefined, undefined, '', 1], `/order-flow/${symbol}${qs({ type: 'FUT', limit: 1 })}`, 5000, kind === 'ORDER_FLOW');
   const current =
     kind === 'PRICE' ? chain.data?.spot : kind === 'IV' ? chain.data?.atmIv : kind === 'PCR' ? chain.data?.pcr
       : needsOption ? (() => { const r = chain.data?.rows.find((x) => x.strike === k); const q = r ? (optionType === 'CE' ? r.ce : r.pe) : undefined; return kind === 'OI_CHANGE' ? q?.oiChangePct : q?.ltp; })()
-        : strategies.data?.find((s) => s.id === strategyId)?.live?.mtm;
+        : kind === 'ORDER_FLOW' ? flow.data?.lastMinute?.buyPct
+          : kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.live?.mtm
+            : undefined;
 
   const create = async () => {
     setError(null);
     try {
-      await api('/alerts', { body: { kind, symbol: kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.symbol ?? symbol : symbol, condition, value: Number(value), optionType: needsOption ? optionType : undefined, strike: needsOption ? k : undefined, expiry: needsOption ? e : undefined, strategyId: kind === 'MTM' ? strategyId : undefined, note: note || undefined } });
+      await api('/alerts', { body: { kind, symbol: kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.symbol ?? symbol : symbol, condition, value: isOrb ? Number(value) || 15 : Number(value), optionType: needsOption ? optionType : undefined, strike: needsOption ? k : undefined, expiry: needsOption ? e : undefined, strategyId: kind === 'MTM' ? strategyId : undefined, note: note || undefined } });
       setValue('');
       setNote('');
       qc.invalidateQueries({ queryKey: ['alerts'] });
@@ -103,14 +111,22 @@ export default function Alerts() {
               </Field>
             </>
           )}
-          <Segmented value={condition} onChange={setCondition} options={[{ value: 'above', label: '≥ Above' }, { value: 'below', label: '≤ Below' }]} />
-          <Field label={`Value${current !== undefined ? ` (now ${Number(current).toFixed(2)})` : ''}`}>
-            <input className="input w-32" type="number" value={value} onChange={(ev) => setValue(ev.target.value)} />
-          </Field>
+          <Segmented value={condition} onChange={setCondition} options={isOrb ? [{ value: 'above', label: '↑ Breaks above high' }, { value: 'below', label: '↓ Breaks below low' }] : [{ value: 'above', label: '≥ Above' }, { value: 'below', label: '≤ Below' }]} />
+          {isOrb ? (
+            <Field label={orb.data ? `Range minutes (now: H ${orb.data.evaluation.high.toFixed(1)} / L ${orb.data.evaluation.low.toFixed(1)}, ${orb.data.evaluation.trend})` : 'Range minutes'}>
+              <select className="input w-auto" value={value || '15'} onChange={(ev) => setValue(ev.target.value)}>
+                {[5, 15, 30].map((m) => <option key={m} value={m}>{m} min</option>)}
+              </select>
+            </Field>
+          ) : (
+            <Field label={`Value${current !== undefined && Number.isFinite(Number(current)) ? ` (now ${Number(current).toFixed(2)})` : ''}`}>
+              <input className="input w-32" type="number" value={value} onChange={(ev) => setValue(ev.target.value)} />
+            </Field>
+          )}
           <Field label="Note (optional)">
             <input className="input w-48" value={note} maxLength={200} onChange={(ev) => setNote(ev.target.value)} />
           </Field>
-          <button className="btn-primary" disabled={!value || (kind === 'MTM' && !strategyId)} onClick={create}>Create alert</button>
+          <button className="btn-primary" disabled={(!value && !isOrb) || (kind === 'MTM' && !strategyId)} onClick={create}>Create alert</button>
         </div>
         {error ? <div className="mt-2"><ErrorBox error={error} /></div> : null}
       </Card>

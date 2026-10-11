@@ -6,6 +6,11 @@ import {
   classifyBuildUp,
   formatCompact,
   formatExpiry,
+  formatTimeIST,
+  summariseFlow,
+  type FlowMinute,
+  type OrderFlowMinute,
+  type OrderFlowResponse,
   ivPercentile,
   roundTick,
   SESSION_MINUTES,
@@ -16,7 +21,7 @@ import {
   type SynopsisRow,
   type UnusualActivityRow,
 } from '@q26/core';
-import { hashN, hashU } from '../market/hash';
+import { hashU } from '../market/hash';
 import type { MarketEngine } from '../market/engine';
 import type { Analytics, OptionSnapshotRow } from './analytics';
 
@@ -43,6 +48,9 @@ export const SCANNERS: ScannerDef[] = [
   { id: 'highest-put-oi', name: 'Highest Put OI', category: 'Options', description: 'Put strikes with the most open interest.' },
   { id: 'volume-oi-spike', name: 'Volume / OI Spike', category: 'Volume', description: 'Options trading far more than their open interest.' },
   { id: 'premium-gainers', name: 'Option Premium Gainers', category: 'Options', description: 'Options with the largest % premium gain.' },
+  { id: 'orb-up', name: '15-min Range Breakout ↑', category: 'Trend', description: 'Broke above the first 15-minute candle high (1-min close) — trending up.' },
+  { id: 'orb-down', name: '15-min Range Breakdown ↓', category: 'Trend', description: 'Broke below the first 15-minute candle low (1-min close) — trending down.' },
+  { id: 'orb-inside', name: 'Inside 15-min Range', category: 'Trend', description: 'Still inside the opening 15-minute range — not trending yet.' },
 ];
 
 function optInstrument(r: OptionSnapshotRow): string {
@@ -111,6 +119,18 @@ export class MarketTools {
       }
       case 'volume-oi-spike':
         return top(a.optionSnapshot(ts).filter((r) => r.oi > 0 && r.volume > 0), (r) => r.volume / r.oi).map((r) => optRow(r, +(r.volume / r.oi).toFixed(2), 'Vol / OI'));
+      case 'orb-up':
+      case 'orb-down':
+      case 'orb-inside': {
+        const want = id === 'orb-up' ? 'up' : id === 'orb-down' ? 'down' : 'sideways';
+        const rows = a.orbScan(ts).filter((r) => r.trend === want);
+        const key = (r: (typeof rows)[number]) => (want === 'sideways' ? -r.widthPct : r.beyondPct ?? 0);
+        return top(rows, key).map((r) => ({
+          symbol: r.symbol, instrument: r.symbol, type: 'EQ' as const, ltp: r.ltp, changePct: r.changePct, oi: 0, oiChangePct: 0, volume: 0,
+          metric: want === 'sideways' ? r.widthPct : r.beyondPct ?? 0,
+          metricLabel: want === 'sideways' ? 'Range width %' : want === 'up' ? '% above OR high' : '% below OR low',
+        }));
+      }
       case 'premium-gainers':
         return top(a.optionSnapshot(ts).filter((r) => r.prevLtp >= 2), (r) => r.changePct).map((r) => optRow(r, r.changePct, 'Prem Chg %'));
       default:
@@ -215,7 +235,7 @@ export class MarketTools {
     const bestBid = roundTick(live - Math.floor(spreadTicks / 2) * tick);
     const bestAsk = roundTick(Math.max(bestBid + tick, live + Math.ceil(spreadTicks / 2) * tick));
     const baseQty = Math.max(1, Math.round(inst.liquidity * (spec.type === 'FUT' ? 25 : 60)));
-    const tilt = 0.35 * hashN(e.symId(symbol), p.dayIdx, Math.floor(p.m / 2), 3);
+    const tilt = e.bookTilt(symbol, p.dayIdx, p.m);
     const level = (side: 'b' | 'a', i: number): DepthLevel => {
       const u = hashU(e.symId(symbol), sec, i + (side === 'a' ? 10 : 0), idSeed);
       const lots = 1 + Math.floor(u * baseQty * (1 + i * 0.35) * Math.exp(side === 'b' ? tilt : -tilt));
@@ -238,7 +258,7 @@ export class MarketTools {
       const w = 1 + 0.8 * Math.exp(-m / 30) + 0.5 * Math.exp(-(M - m) / 30);
       pv += prices[i] * w;
       vv += w;
-      const t2 = 0.35 * hashN(e.symId(symbol), p.dayIdx, Math.floor(m / 2), 3);
+      const t2 = e.bookTilt(symbol, p.dayIdx, m);
       const bq = Math.round(baseQty * lot * 40 * Math.exp(t2));
       const aq = Math.round(baseQty * lot * 40 * Math.exp(-t2));
       return { ts: e.tsOf(p.dayIdx, m), ltp: prices[i], bidQty: bq, askQty: aq, ratio: +(bq / aq).toFixed(2), spread: +(spreadTicks * tick).toFixed(2), vwap: +(pv / vv).toFixed(2) };
@@ -302,6 +322,90 @@ export class MarketTools {
       lowerCircuit: Math.max(0.05, roundTick(prevClose * (1 - band))),
       history,
       analytics,
+    };
+  }
+
+  /**
+   * 1-minute order flow: aggressive buy vs sell volume per minute for a future or option,
+   * with the last completed minute, the minute in progress, last-5-minute and session totals.
+   */
+  orderFlow(
+    symbol: string,
+    spec: { type: 'FUT' | 'CE' | 'PE'; strike?: number; expiry?: string },
+    ts: number,
+    opts: { date?: string; limit?: number } = {},
+  ): OrderFlowResponse {
+    const e = this.engine;
+    const inst = e.inst(symbol);
+    const now = e.parts(ts);
+    let dayIdx = now.dayIdx;
+    let upto = now.m;
+    if (opts.date && opts.date < now.date) {
+      const idx = e.dayIndex.get(opts.date);
+      if (idx === undefined) throw Object.assign(new Error(`${opts.date} is not a trading day`), { statusCode: 400 });
+      dayIdx = idx;
+      upto = M;
+    }
+    const live = dayIdx === now.dayIdx && upto < M;
+    const at = live ? ts : e.tsOf(dayIdx, Math.min(upto, M - 1));
+    let expiry: string;
+    let strike: number | undefined;
+    if (spec.type === 'FUT') {
+      const list = e.futureExpiries(symbol, at);
+      expiry = spec.expiry && list.includes(spec.expiry) ? spec.expiry : list[0];
+    } else {
+      const list = e.expiries(symbol, at);
+      expiry = spec.expiry && list.includes(spec.expiry) ? spec.expiry : list[0];
+      const ctx = e.contract(symbol, expiry);
+      const strikes = e.strikes(ctx, dayIdx);
+      const ref = e.spotAt(symbol, dayIdx, upto);
+      strike = spec.strike && strikes.includes(spec.strike) ? spec.strike : strikes.reduce((a, k) => (Math.abs(k - ref) < Math.abs(a - ref) ? k : a));
+    }
+    const fspec = { type: spec.type, expiry, strike };
+    const completed = Math.floor(upto);
+    const all: OrderFlowMinute[] = [];
+    let cum = 0;
+    for (let j = 0; j < completed; j++) {
+      const f = e.minuteFlow(symbol, fspec, dayIdx, j);
+      const delta = f.buyVolume - f.sellVolume;
+      cum += delta;
+      all.push({ ts: e.tsOf(dayIdx, j), volume: f.volume, buyVolume: f.buyVolume, sellVolume: f.sellVolume, delta, cumDelta: cum, buyPct: f.volume ? +((f.buyVolume / f.volume) * 100).toFixed(1) : 50, close: f.close });
+    }
+    const asFlow = (m: OrderFlowMinute): FlowMinute => ({ ts: m.ts, volume: m.volume, buyVolume: m.buyVolume, sellVolume: m.sellVolume });
+    const lastM = all[all.length - 1];
+    const lastMinute = lastM ? { ...summariseFlow([asFlow(lastM)]), ts: lastM.ts, close: lastM.close } : null;
+    let currentMinute: OrderFlowResponse['currentMinute'] = null;
+    if (live && upto > completed) {
+      const f = e.minuteFlow(symbol, fspec, dayIdx, completed, upto);
+      currentMinute = { ...summariseFlow([{ ts: e.tsOf(dayIdx, completed), volume: f.volume, buyVolume: f.buyVolume, sellVolume: f.sellVolume }]), ts: e.tsOf(dayIdx, completed), elapsedSec: Math.round((upto - completed) * 60) };
+    }
+    const last5 = summariseFlow(all.slice(-5).map(asFlow));
+    const session = summariseFlow(all.map(asFlow));
+    const label = spec.type === 'FUT' ? `${symbol} ${formatExpiry(expiry)} FUT` : `${symbol} ${formatExpiry(expiry)} ${strike} ${spec.type}`;
+    let signal = 'Waiting for the first completed minute';
+    if (lastMinute) {
+      const who = lastMinute.sentiment === 'Buyers dominant' ? 'buyers' : lastMinute.sentiment === 'Sellers dominant' ? 'sellers' : null;
+      const trend5 = last5.sentiment === lastMinute.sentiment && who ? ` and over the last 5 minutes` : '';
+      signal = who
+        ? `${formatTimeIST(lastMinute.ts)}–${formatTimeIST(lastMinute.ts + 60_000)}: ${who} were more aggressive (${lastMinute.buyPct.toFixed(0)}% buy volume)${trend5}`
+        : `${formatTimeIST(lastMinute.ts)}–${formatTimeIST(lastMinute.ts + 60_000)}: buying and selling balanced (${lastMinute.buyPct.toFixed(0)}% buy volume)`;
+    }
+    const limit = Math.max(1, Math.min(375, opts.limit ?? 60));
+    return {
+      symbol,
+      instrument: label,
+      type: spec.type,
+      expiry,
+      strike,
+      date: e.days[dayIdx],
+      live,
+      lotSize: inst.lotSize,
+      lastMinute,
+      currentMinute,
+      last5,
+      session,
+      minutes: all.slice(-limit),
+      signal,
     };
   }
 

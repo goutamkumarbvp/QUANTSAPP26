@@ -59,7 +59,7 @@ const orderSchema = z.object({
 });
 
 const alertSchema = z.object({
-  kind: z.enum(['PRICE', 'OPTION_PRICE', 'IV', 'PCR', 'OI_CHANGE', 'MTM']),
+  kind: z.enum(['PRICE', 'OPTION_PRICE', 'IV', 'PCR', 'OI_CHANGE', 'MTM', 'ORB_BREAK', 'ORDER_FLOW']),
   symbol: z.string().min(1),
   condition: z.enum(['above', 'below']),
   value: z.coerce.number(),
@@ -174,9 +174,16 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     const byChange = [...stocks].sort((a, b) => b.spot.changePct - a.spot.changePct);
     const counts = { 'Long Build-up': 0, 'Short Build-up': 0, 'Short Covering': 0, 'Long Unwinding': 0, Neutral: 0 };
     for (const r of stocks) counts[r.buildUp]++;
+    const orbBySymbol = new Map(an.orbScan(ts).map((r) => [r.symbol, r]));
     const chains = ['NIFTY', 'BANKNIFTY', 'SENSEX'].map((s) => {
       const c = e.chain(s, undefined, ts);
-      return { symbol: s, expiry: c.expiry, pcr: c.pcr, maxPain: c.maxPain, atmIv: c.atmIv, ivChange: c.ivChange, support: c.support, resistance: c.resistance, spot: c.spot, daysToExpiry: c.daysToExpiry };
+      const o = orbBySymbol.get(s)!;
+      const flow = svc.tools.orderFlow(s, { type: 'FUT' }, ts, { limit: 1 });
+      return {
+        symbol: s, expiry: c.expiry, pcr: c.pcr, maxPain: c.maxPain, atmIv: c.atmIv, ivChange: c.ivChange, support: c.support, resistance: c.resistance, spot: c.spot, daysToExpiry: c.daysToExpiry,
+        orb: { high: o.high, low: o.low, trend: o.trend, whipsaw: o.whipsaw, reentered: o.reentered, summary: o.summary },
+        flow: flow.lastMinute ? { buyPct: flow.lastMinute.buyPct, delta: flow.lastMinute.delta, sentiment: flow.lastMinute.sentiment, ts: flow.lastMinute.ts } : null,
+      };
     });
     const p = e.parts(ts);
     const flows = svc.flows.fiiDii.slice(Math.max(0, p.dayIdx - 5), p.dayIdx);
@@ -191,6 +198,25 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
       chains,
       fiiDii: flows,
     };
+  });
+
+  /* ---------------------------- trend: opening range & order flow ---------------------------- */
+
+  const orbOpts = (q: Q) => ({ rangeMinutes: num(q.minutes, 15), rule: (q.rule === 'touch' ? 'touch' : 'close') as 'touch' | 'close' });
+
+  app.get('/api/orb', async (req) => an.orbScan(now(), orbOpts(qs(req))));
+  app.get<{ Params: { symbol: string } }>('/api/orb/:symbol', async (req) => {
+    const q = qs(req);
+    return an.orb(req.params.symbol, now(), { ...orbOpts(q), date: q.date || undefined });
+  });
+  app.get<{ Params: { symbol: string } }>('/api/orb/:symbol/history', async (req) => {
+    const q = qs(req);
+    return an.orbHistory(req.params.symbol, num(q.days, 20), now(), orbOpts(q));
+  });
+  app.get<{ Params: { symbol: string } }>('/api/order-flow/:symbol', async (req) => {
+    const q = qs(req);
+    const type = q.type === 'CE' || q.type === 'PE' ? q.type : 'FUT';
+    return svc.tools.orderFlow(req.params.symbol, { type, strike: q.strike ? num(q.strike, 0) : undefined, expiry: q.expiry || undefined }, now(), { date: q.date || undefined, limit: num(q.limit, 60) });
   });
 
   /* ---------------------------- open interest ---------------------------- */

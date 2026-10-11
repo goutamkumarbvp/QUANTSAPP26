@@ -1,5 +1,8 @@
 import { useMemo, useState } from 'react';
-import { formatIndian, type OrderBookResponse } from '@q26/core';
+import { Link } from 'react-router-dom';
+import { formatIndian, type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
+import { FlowSplit, sentimentTone } from '../components/trend';
+import { formatSessionTime } from '../lib/format';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
 import { ExpirySelect, SymbolSelect } from '../components/pickers';
@@ -19,6 +22,7 @@ export default function OrderBook() {
   const chain = useChain(symbol, type === 'FUT' ? undefined : expiry, { refetch: 30000 });
   const k = type === 'FUT' ? undefined : strike && chain.data?.rows.some((r) => r.strike === strike) ? strike : chain.data?.atm;
   const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000);
+  const flow = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, '', 5], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 5 })}`, 2000);
   const c = useChartColors();
   const option = useMemo(() => {
     const h = q.data?.history ?? [];
@@ -103,6 +107,27 @@ export default function OrderBook() {
                 </div>
               </Card>
             </div>
+            {flow.data && (
+              <Card title="1-minute order flow — buyers vs sellers" actions={<Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>}>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div>
+                    <div className="mb-1 flex justify-between text-2xs text-muted">
+                      <span>Last minute {flow.data.lastMinute ? `${formatSessionTime(flow.data.lastMinute.ts)}–${formatSessionTime(flow.data.lastMinute.ts + 60_000)}` : ''}</span>
+                      {flow.data.lastMinute && <span className={sentimentTone(flow.data.lastMinute.sentiment)}>{flow.data.lastMinute.sentiment}</span>}
+                    </div>
+                    {flow.data.lastMinute ? <FlowSplit flow={flow.data.lastMinute} /> : <div className="text-xs text-muted">No completed minute yet</div>}
+                  </div>
+                  <div>
+                    <div className="mb-1 text-2xs text-muted">Current minute {flow.data.currentMinute ? `(${flow.data.currentMinute.elapsedSec}s)` : ''}</div>
+                    {flow.data.currentMinute ? <FlowSplit flow={flow.data.currentMinute} /> : <div className="text-xs text-muted">—</div>}
+                  </div>
+                  <div>
+                    <div className="mb-1 flex justify-between text-2xs text-muted"><span>Last 5 minutes</span><span className={sentimentTone(flow.data.last5.sentiment)}>{flow.data.last5.sentiment}</span></div>
+                    <FlowSplit flow={flow.data.last5} />
+                  </div>
+                </div>
+              </Card>
+            )}
             <Card title="Depth & price through the session"><Chart option={option} height={300} /></Card>
           </>
         )}

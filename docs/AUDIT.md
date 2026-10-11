@@ -61,6 +61,8 @@ Legend: ✅ implemented · ◐ implemented differently / partially · ✗ not im
 | 33 | Classroom / learning | Educational content | `/learn` — 8 original lessons linked to the tools | ◐ text lessons, no videos |
 | 34 | Market dashboard | Indices, movers | `/` — index cards with sparklines, derivatives snapshot, build-up counts, gainers/losers/OI gainers, FII/DII | ✅ |
 | 35 | Light / dark theme, mobile app | — | Dark & light themes, responsive layout with bottom tab bar, installable PWA with offline shell | ◐ PWA (see gaps) |
+| 41 | 15-min opening range breakout (user request) | First 15-min candle high/low; break = trending | `/orb` — live/past sessions, 5/15/30-min ranges, close or touch rule, break markers, whipsaw & failed-breakout flags, all-F&O scanner, 20-session record, `orb-up/down/inside` scanners, dashboard column, ORB_BREAK alert | ✅ |
+| 42 | 1-minute order flow (user request) | Buyer vs seller volume in the last minute | `/order-flow` — futures/options, last completed minute, current minute, last 5 min, session, delta & cumulative delta, per-minute chart/table; panel in Order Book; dashboard column; ORDER_FLOW alert | ✅ (on simulated trades) |
 | 36 | Login | Mobile OTP | Email + password accounts, frictionless guest mode, guest → account upgrade keeps data | ◐ |
 | 37 | Strategy Repair | Adjust losing strategies | — | ✗ not built |
 | 38 | Live exchange data | NSE/BSE real-time feed | Deterministic simulated market (see README) | ✗ needs licensed feed |
