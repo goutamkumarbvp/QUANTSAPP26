@@ -1,12 +1,16 @@
 /** Alerts (price / option / IV / PCR / OI / MTM), notifications and watchlists. */
 import { randomUUID } from 'node:crypto';
-import { formatExpiry, formatIndian, formatTimeIST, type AlertDef, type Notification, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
+import { describeOrb, formatExpiry, formatIndian, formatTimeIST, type AlertDef, type Notification, type OrbEvaluation, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
 import type { Analytics } from './analytics';
 import type { MarketTools } from './market-tools';
 import type { MarketEngine } from '../market/engine';
 import type { Db } from '../store/db';
 import type { Pricer } from './pricer';
 import type { StrategyManager } from './trading';
+
+const MAX_ALERTS = 100;
+/** Opening-range lengths an ORB_BREAK alert may use (minutes). */
+const ORB_RANGES = [5, 15, 30];
 
 function httpError(statusCode: number, message: string) {
   return Object.assign(new Error(message), { statusCode });
@@ -61,11 +65,12 @@ export class AlertService {
 
   create(uid: string, input: AlertInput): AlertDef {
     if (!['PRICE', 'OPTION_PRICE', 'IV', 'PCR', 'OI_CHANGE', 'MTM', 'ORB_BREAK', 'ORDER_FLOW'].includes(input.kind)) throw httpError(400, 'Invalid alert kind');
+    if (this.list(uid).length >= MAX_ALERTS) throw httpError(400, `At most ${MAX_ALERTS} alerts — delete some first`);
     if (input.kind === 'ORB_BREAK') {
-      // value = opening-range length in minutes
+      // value = opening-range length in minutes (the lengths the app offers)
       const v = Number(input.value) || 15;
-      if (!(v >= 1 && v <= 120)) throw httpError(400, 'Opening range must be 1–120 minutes');
-      input = { ...input, value: Math.round(v) };
+      if (!ORB_RANGES.includes(v)) throw httpError(400, `Opening range must be one of ${ORB_RANGES.join(', ')} minutes`);
+      input = { ...input, value: v };
     }
     if (input.kind === 'ORDER_FLOW' && !(Number(input.value) >= 0 && Number(input.value) <= 100)) throw httpError(400, 'Buy volume % must be between 0 and 100');
     if (input.condition !== 'above' && input.condition !== 'below') throw httpError(400, 'Invalid condition');
@@ -166,7 +171,11 @@ export class AlertService {
         v = this.strategies.get(uid, a.strategyId!).live?.mtm ?? 0;
         break;
       case 'ORDER_FLOW':
-        v = this.tools.orderFlow(a.symbol, { type: 'FUT' }, ts, { limit: 1 }).lastMinute?.buyPct ?? NaN;
+        {
+          // A minute with no trades has no buy share — never fire on it.
+          const last = this.tools.lastMinuteFlow(a.symbol, ts);
+          v = last && last.volume > 0 ? last.buyPct : NaN;
+        }
         break;
       case 'ORB_BREAK':
         v = NaN; // event-based, see orbTriggered()
@@ -179,17 +188,18 @@ export class AlertService {
   /** An opening-range alert fires on the first break of its side confirmed after it was armed. */
   private orbTriggered(a: AlertDef, ts: number, cache: Map<string, unknown>): { level: number; price: number; at: number; summary: string } | null {
     const key = `orb|${a.symbol}|${a.value}`;
-    let r = cache.get(key) as ReturnType<Analytics['orb']> | undefined;
-    if (!r) {
-      r = this.analytics.orb(a.symbol, ts, { rangeMinutes: a.value });
-      cache.set(key, r);
+    let ev = cache.get(key) as OrbEvaluation | undefined;
+    if (!ev) {
+      ev = this.analytics.orbConfirmed(a.symbol, ts, a.value);
+      cache.set(key, ev);
     }
     const since = a.armedAt ?? a.createdAt;
     const want = a.condition === 'above' ? 'up' : 'down';
-    // A 'close'-rule break is confirmed when its 1-minute candle closes.
-    const hit = r.evaluation.crossings.find((b) => b.direction === want && b.ts + 60_000 >= since);
+    // A 'close'-rule break is confirmed when its 1-minute candle closes; it must close strictly
+    // after the alert was armed (outside market hours the clock sits exactly on the last close).
+    const hit = ev.crossings.find((b) => b.direction === want && b.ts + 60_000 > since);
     if (!hit) return null;
-    return { level: want === 'up' ? r.evaluation.high : r.evaluation.low, price: hit.price, at: hit.ts + 60_000, summary: r.summary };
+    return { level: want === 'up' ? ev.high : ev.low, price: hit.price, at: hit.ts + 60_000, summary: describeOrb(ev) };
   }
 
   /** Evaluate every active alert plus strategy target/stop-loss MTM levels. */

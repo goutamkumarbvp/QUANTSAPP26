@@ -9,6 +9,7 @@ import {
   formatTimeIST,
   summariseFlow,
   type FlowMinute,
+  type FlowSummary,
   type OrderFlowMinute,
   type OrderFlowResponse,
   ivPercentile,
@@ -21,7 +22,7 @@ import {
   type SynopsisRow,
   type UnusualActivityRow,
 } from '@q26/core';
-import { hashU } from '../market/hash';
+import { hashU, Lru } from '../market/hash';
 import type { MarketEngine } from '../market/engine';
 import type { Analytics, OptionSnapshotRow } from './analytics';
 
@@ -57,7 +58,13 @@ function optInstrument(r: OptionSnapshotRow): string {
   return `${r.symbol} ${formatExpiry(r.expiry)} ${r.strike} ${r.type}`;
 }
 
+function httpError(statusCode: number, message: string) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
 export class MarketTools {
+  private readonly flowCache = new Lru<string, OrderFlowMinute[]>(300);
+
   constructor(private readonly engine: MarketEngine, private readonly analytics: Analytics) {}
 
   scanner(id: string, ts: number, limit = 25): ScannerRow[] {
@@ -123,7 +130,8 @@ export class MarketTools {
       case 'orb-down':
       case 'orb-inside': {
         const want = id === 'orb-up' ? 'up' : id === 'orb-down' ? 'down' : 'sideways';
-        const rows = a.orbScan(ts).filter((r) => r.trend === want);
+        // Skip symbols whose live price contradicts the label (an unconfirmed move to the other side).
+        const rows = a.orbScan(ts).filter((r) => r.trend === want && (want === 'sideways' ? r.pending === null : r.pending !== (want === 'up' ? 'down' : 'up')));
         const key = (r: (typeof rows)[number]) => (want === 'sideways' ? -r.widthPct : r.beyondPct ?? 0);
         return top(rows, key).map((r) => ({
           symbol: r.symbol, instrument: r.symbol, type: 'EQ' as const, ltp: r.ltp, changePct: r.changePct, oi: 0, oiChangePct: 0, volume: 0,
@@ -326,6 +334,35 @@ export class MarketTools {
   }
 
   /**
+   * Completed minutes' flow for one contract on one session, oldest first. Completed minutes
+   * never change, so the array is cached and only extended as new minutes complete.
+   */
+  private completedFlow(symbol: string, spec: { type: 'FUT' | 'CE' | 'PE'; expiry: string; strike?: number }, dayIdx: number, completed: number): OrderFlowMinute[] {
+    const e = this.engine;
+    const key = `${symbol}|${spec.type}|${spec.expiry}|${spec.strike ?? 0}|${dayIdx}`;
+    const all = this.flowCache.getOrCreate(key, () => []);
+    let cum = all.length ? all[all.length - 1].cumDelta : 0;
+    for (let j = all.length; j < completed; j++) {
+      const f = e.minuteFlow(symbol, spec, dayIdx, j);
+      const delta = f.buyVolume - f.sellVolume;
+      cum += delta;
+      all.push({ ts: e.tsOf(dayIdx, j), volume: f.volume, buyVolume: f.buyVolume, sellVolume: f.sellVolume, delta, cumDelta: cum, buyPct: f.volume ? +((f.buyVolume / f.volume) * 100).toFixed(1) : 50, close: f.close });
+    }
+    return all.length > completed ? all.slice(0, completed) : all;
+  }
+
+  /** Flow of the underlying's near-month future in the last completed minute (alerts, dashboard). */
+  lastMinuteFlow(symbol: string, ts: number): (FlowSummary & { ts: number }) | null {
+    const e = this.engine;
+    const now = e.parts(ts);
+    const completed = Math.floor(now.m);
+    if (completed < 1) return null;
+    const expiry = e.futureExpiries(symbol, ts)[0];
+    const f = e.minuteFlow(symbol, { type: 'FUT', expiry }, now.dayIdx, completed - 1);
+    return { ...summariseFlow([{ ts: 0, volume: f.volume, buyVolume: f.buyVolume, sellVolume: f.sellVolume }]), ts: e.tsOf(now.dayIdx, completed - 1) };
+  }
+
+  /**
    * 1-minute order flow: aggressive buy vs sell volume per minute for a future or option,
    * with the last completed minute, the minute in progress, last-5-minute and session totals.
    */
@@ -350,27 +387,26 @@ export class MarketTools {
     const at = live ? ts : e.tsOf(dayIdx, Math.min(upto, M - 1));
     let expiry: string;
     let strike: number | undefined;
+    let expiries: string[];
+    let strikes: number[] = [];
     if (spec.type === 'FUT') {
-      const list = e.futureExpiries(symbol, at);
-      expiry = spec.expiry && list.includes(spec.expiry) ? spec.expiry : list[0];
+      expiries = e.futureExpiries(symbol, at);
+      if (spec.expiry && !expiries.includes(spec.expiry)) throw httpError(400, `${symbol} future ${spec.expiry} was not listed on ${e.days[dayIdx]}`);
+      expiry = spec.expiry || expiries[0];
     } else {
-      const list = e.expiries(symbol, at);
-      expiry = spec.expiry && list.includes(spec.expiry) ? spec.expiry : list[0];
+      expiries = e.expiries(symbol, at);
+      if (spec.expiry && !expiries.includes(spec.expiry)) throw httpError(400, `${symbol} expiry ${spec.expiry} was not listed on ${e.days[dayIdx]}`);
+      expiry = spec.expiry || expiries[0];
       const ctx = e.contract(symbol, expiry);
-      const strikes = e.strikes(ctx, dayIdx);
-      const ref = e.spotAt(symbol, dayIdx, upto);
-      strike = spec.strike && strikes.includes(spec.strike) ? spec.strike : strikes.reduce((a, k) => (Math.abs(k - ref) < Math.abs(a - ref) ? k : a));
+      strikes = e.strikes(ctx, dayIdx);
+      if (spec.strike && !strikes.includes(spec.strike)) throw httpError(400, `Strike ${spec.strike} is not listed for ${symbol} ${expiry}`);
+      // Default ATM from the same price the order book and chain use (the live LTP when live).
+      const ref = live ? e.spot(symbol, ts) : e.spotAt(symbol, dayIdx, upto);
+      strike = spec.strike ? spec.strike : strikes.reduce((a, k) => (Math.abs(k - ref) < Math.abs(a - ref) ? k : a));
     }
     const fspec = { type: spec.type, expiry, strike };
     const completed = Math.floor(upto);
-    const all: OrderFlowMinute[] = [];
-    let cum = 0;
-    for (let j = 0; j < completed; j++) {
-      const f = e.minuteFlow(symbol, fspec, dayIdx, j);
-      const delta = f.buyVolume - f.sellVolume;
-      cum += delta;
-      all.push({ ts: e.tsOf(dayIdx, j), volume: f.volume, buyVolume: f.buyVolume, sellVolume: f.sellVolume, delta, cumDelta: cum, buyPct: f.volume ? +((f.buyVolume / f.volume) * 100).toFixed(1) : 50, close: f.close });
-    }
+    const all = this.completedFlow(symbol, fspec, dayIdx, completed);
     const asFlow = (m: OrderFlowMinute): FlowMinute => ({ ts: m.ts, volume: m.volume, buyVolume: m.buyVolume, sellVolume: m.sellVolume });
     const lastM = all[all.length - 1];
     const lastMinute = lastM ? { ...summariseFlow([asFlow(lastM)]), ts: lastM.ts, close: lastM.close } : null;
@@ -384,11 +420,15 @@ export class MarketTools {
     const label = spec.type === 'FUT' ? `${symbol} ${formatExpiry(expiry)} FUT` : `${symbol} ${formatExpiry(expiry)} ${strike} ${spec.type}`;
     let signal = 'Waiting for the first completed minute';
     if (lastMinute) {
+      const span = `${formatTimeIST(lastMinute.ts)}–${formatTimeIST(lastMinute.ts + 60_000)}`;
       const who = lastMinute.sentiment === 'Buyers dominant' ? 'buyers' : lastMinute.sentiment === 'Sellers dominant' ? 'sellers' : null;
       const trend5 = last5.sentiment === lastMinute.sentiment && who ? ` and over the last 5 minutes` : '';
-      signal = who
-        ? `${formatTimeIST(lastMinute.ts)}–${formatTimeIST(lastMinute.ts + 60_000)}: ${who} were more aggressive (${lastMinute.buyPct.toFixed(0)}% buy volume)${trend5}`
-        : `${formatTimeIST(lastMinute.ts)}–${formatTimeIST(lastMinute.ts + 60_000)}: buying and selling balanced (${lastMinute.buyPct.toFixed(0)}% buy volume)`;
+      signal =
+        lastMinute.sentiment === 'No trades'
+          ? `${span}: no trades in this contract`
+          : who
+            ? `${span}: ${who} were more aggressive (${lastMinute.buyPct.toFixed(0)}% buy volume)${trend5}`
+            : `${span}: buying and selling balanced (${lastMinute.buyPct.toFixed(0)}% buy volume)`;
     }
     const limit = Math.max(1, Math.min(375, opts.limit ?? 60));
     return {
@@ -406,6 +446,8 @@ export class MarketTools {
       session,
       minutes: all.slice(-limit),
       signal,
+      expiries,
+      strikes,
     };
   }
 

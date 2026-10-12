@@ -129,6 +129,7 @@ function FlowsChart({ days }: { days: FiiDiiDay[] }) {
 
 export default function Home() {
   const q = useLive<Dashboard>(['dashboard'], '/dashboard', 5000);
+  const setSymbol = useApp((s) => s.setSymbol);
   const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/orb', '/order-flow', '/algo', '/builder', '/optimizer', '/oi/strikes', '/straddle'].includes(i.to));
   return (
     <div className="space-y-3">
@@ -185,13 +186,13 @@ export default function Home() {
                         <td className="num text-down">{formatIndian(c.resistance, 0)}</td>
                         <td className="num">{c.daysToExpiry.toFixed(1)}</td>
                         <td className="num">
-                          <Link to="/orb" className="hover:underline">{formatIndian(c.orb.high, 0)} / {formatIndian(c.orb.low, 0)}</Link>
+                          <Link to="/orb" onClick={() => setSymbol(c.symbol)} className="hover:underline">{formatIndian(c.orb.high, 0)} / {formatIndian(c.orb.low, 0)}</Link>
                         </td>
                         <td title={c.orb.summary}>
                           <TrendBadge trend={c.orb.trend} whipsaw={c.orb.whipsaw} reentered={c.orb.reentered} />
                         </td>
                         <td className={`num ${c.flow ? sentimentTone(c.flow.sentiment) : 'text-muted'}`}>
-                          <Link to="/order-flow" className="hover:underline">{c.flow ? `${c.flow.buyPct.toFixed(0)}% buy` : '—'}</Link>
+                          <Link to="/order-flow" onClick={() => setSymbol(c.symbol)} className="hover:underline">{c.flow ? `${c.flow.buyPct.toFixed(0)}% buy` : '—'}</Link>
                         </td>
                       </tr>
                     ))}

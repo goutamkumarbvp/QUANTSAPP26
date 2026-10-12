@@ -216,3 +216,86 @@ describe('dashboard', () => {
     }
   });
 });
+
+describe('review regressions', () => {
+  it('opening range high/low include every price the LTP printed in the range', async () => {
+    const s3 = createServices(loadConfig({ persist: false, simStart: '2026-10-09T11:00', authSecret: 'test' }), { now: () => Date.now() });
+    for (const sym of ['NIFTY', 'BANKNIFTY', 'FINNIFTY']) {
+      const orb = s3.analytics.orb(sym, s3.clock.now());
+      const e = orb.evaluation;
+      for (let t = orb.rangeStartTs; t < orb.rangeEndTs; t += 1000) {
+        const ltp = s3.engine.spot(sym, t);
+        expect(ltp, `${sym} ${t}`).toBeLessThanOrEqual(e.high + 1e-9);
+        expect(ltp).toBeGreaterThanOrEqual(e.low - 1e-9);
+      }
+      // ...and the candles API agrees.
+      const c15 = s3.analytics.candles(sym, '15', 1, s3.clock.now())[0];
+      expect(c15.high).toBe(e.high);
+      expect(c15.low).toBe(e.low);
+    }
+    s3.stop();
+  });
+
+  it("a touch in the minute in progress is never taken back", async () => {
+    const s3 = createServices(loadConfig({ persist: false, simStart: '2026-10-09T11:00', authSecret: 'test' }), { now: () => Date.now() });
+    const t0 = s3.clock.now() - (s3.clock.now() % 60_000);
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (let t = t0 + 1000; t < t0 + 60_000; t += 1000) {
+      const { bars } = s3.analytics.minuteBars('NIFTY', s3.engine.parts(t).dayIdx, s3.engine.parts(t).m, t);
+      const last = bars[bars.length - 1];
+      expect(last.high).toBeGreaterThanOrEqual(hi);
+      expect(last.low).toBeLessThanOrEqual(lo);
+      hi = last.high;
+      lo = last.low;
+    }
+    s3.stop();
+  });
+
+  it('buy and sell volume of the minute in progress only grow', () => {
+    const e = svc.engine;
+    const p = e.parts(svc.clock.now());
+    const expiry = e.futureExpiries('BANKNIFTY', svc.clock.now())[0];
+    for (const j of [17, 100, 200]) {
+      let buy = 0;
+      let sell = 0;
+      for (let s = 1; s <= 60; s++) {
+        const f = e.minuteFlow('BANKNIFTY', { type: 'FUT', expiry }, p.dayIdx, j, j + s / 60);
+        expect(f.buyVolume).toBeGreaterThanOrEqual(buy);
+        expect(f.sellVolume).toBeGreaterThanOrEqual(sell);
+        buy = f.buyVolume;
+        sell = f.sellVolume;
+      }
+    }
+  });
+
+  it('does not fire an opening-range alert armed after the close on a break from before', async () => {
+    // Live clock on a Saturday: market time is pinned to Friday 15:30:00.000.
+    const sat = Date.UTC(2026, 9, 10, 5, 30);
+    const s4 = createServices(loadConfig({ persist: false, clockMode: 'live', authSecret: 'test' }), { now: () => sat });
+    const symbols = [...s4.engine.instruments.keys()];
+    for (const symbol of symbols) {
+      for (const condition of ['above', 'below'] as const) s4.alerts.create(`u-${symbol}`, { kind: 'ORB_BREAK', symbol, condition, value: 15 });
+    }
+    // At least one symbol's last candle of the session was a range crossing (the old bug's trigger).
+    const lastCandle = s4.clock.now() - 60_000;
+    expect(symbols.some((sym) => s4.analytics.orbConfirmed(sym, s4.clock.now(), 15).crossings.some((c) => c.ts === lastCandle))).toBe(true);
+    s4.alerts.evaluate();
+    for (const symbol of symbols) expect(s4.alerts.list(`u-${symbol}`).filter((a) => a.status === 'triggered'), symbol).toHaveLength(0);
+    s4.stop();
+  });
+
+  it('validates trend query parameters and contracts', async () => {
+    expect((await get('/api/orb/NIFTY?minutes=0')).status).toBe(400);
+    expect((await get('/api/orb/NIFTY?rule=wick')).status).toBe(400);
+    expect((await get('/api/orb/NIFTY?date=2099-01-01')).status).toBe(400);
+    expect((await get('/api/order-flow/NIFTY?type=XX')).status).toBe(400);
+    expect((await get('/api/order-flow/NIFTY?type=CE&strike=12345')).status).toBe(400);
+    expect((await post('/api/alerts', { kind: 'ORB_BREAK', symbol: 'NIFTY', condition: 'above', value: 60 })).status).toBe(400);
+    // A past session lists its own contracts and defaults to its own near expiry.
+    const past = (await get<OrderFlowResponse>('/api/order-flow/NIFTY?type=CE&date=2026-09-01&limit=5')).body;
+    expect(past.expiries[0]).toBe(past.expiry);
+    expect(past.expiry >= '2026-09-01').toBe(true);
+    expect(past.strikes).toContain(past.strike);
+  });
+});

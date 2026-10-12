@@ -104,6 +104,14 @@ Every observable is a **pure function of (instrument, contract, timestamp)**:
   per-contract factors (with occasional heavy-writing events), interpolated through each session so OI is
   continuous across days.
 
+- Realised close-to-close vol is normalised to sit a little below implied vol (NIFTY ≈ 11% realised vs ≈ 12%
+  implied), with about 15% of daily variance arriving in the overnight gap.
+- Options decay in **trading time**: each session carries 88% of a trading day's variance and each overnight
+  or weekend 12%, so premiums lose value through the day as NSE weeklies do. Quoted IVs are the calendar-time
+  equivalent, so they drift down through a session and rise after weekends.
+- The live LTP adds per-second micro-structure noise; candle highs/lows (and the opening range) include those
+  intra-minute prints.
+
 Because nothing is stored, any past minute can be recomputed exactly — that is what powers Trade Recap,
 multi-strike OI history, IV percentiles and "as-of" option chains (`GET /api/chain/NIFTY?at=<epoch ms>`).
 
@@ -121,6 +129,10 @@ multi-strike OI history, IV percentiles and "as-of" option chains (`GET /api/cha
 | `AUTH_SECRET` | random per boot | HMAC secret for session tokens — **set it in production** so sessions survive restarts |
 | `DATA_DIR` | `apps/server/data` | Where user data (`db.json`) is stored |
 | `PERSIST` | `true` | `false` keeps user data in memory only |
+
+> **Upgrading:** simulator calibration changes alter simulated history at the same timestamps. Paper orders,
+> strategies and alerts saved by an older version keep their old fill prices and will reprice against the new
+> history — reset the paper account (Positions → Funds) after upgrading if that matters to you.
 
 ## Testing
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { formatIndian, type OrderFlowResponse } from '@q26/core';
+import { formatExpiry, formatIndian, type OrderFlowResponse } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { ExpirySelect, SessionDate, SymbolSelect } from '../components/pickers';
 import { FlowSplit, sentimentTone } from '../components/trend';
@@ -19,9 +19,34 @@ export default function OrderFlow() {
   const [date, setDate] = useState('');
   const [limit, setLimit] = useState(60);
   const [unit, setUnit] = useState<'qty' | 'lots'>('qty');
+  // Past sessions list their own contracts (from the response); today's come from the live chain.
+  const [pastExpiry, setPastExpiry] = useState<string>();
+  const [pastStrike, setPastStrike] = useState<number>();
+  const isPast = !!date && !!today && date < today;
   const chain = useChain(symbol, type === 'FUT' ? undefined : expiry, { refetch: 30000 });
   const k = type === 'FUT' ? undefined : strike && chain.data?.rows.some((r) => r.strike === strike) ? strike : chain.data?.atm;
-  const q = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, date, limit], `/order-flow/${symbol}${qs({ type, expiry, strike: k, date, limit })}`, date ? false : 2000);
+  const reqExpiry = isPast ? pastExpiry : expiry;
+  const reqStrike = type === 'FUT' ? undefined : isPast ? pastStrike : k;
+  const q = useLive<OrderFlowResponse>(
+    ['order-flow', symbol, type, reqExpiry, reqStrike, isPast ? date : '', limit],
+    `/order-flow/${symbol}${qs({ type, expiry: reqExpiry, strike: reqStrike, date: isPast ? date : undefined, limit })}`,
+    isPast ? false : 2000,
+  );
+  const changeDate = (v: string) => {
+    setDate(v);
+    setPastExpiry(undefined);
+    setPastStrike(undefined);
+  };
+  const changeType = (t: 'FUT' | 'CE' | 'PE') => {
+    // Futures and options list different expiries: start each from its own nearest one.
+    if ((t === 'FUT') !== (type === 'FUT')) {
+      setExpiry(undefined);
+      setStrike(undefined);
+      setPastExpiry(undefined);
+      setPastStrike(undefined);
+    }
+    setType(t);
+  };
   const c = useChartColors();
   const d = q.data;
   const lot = d?.lotSize ?? 1;
@@ -31,7 +56,6 @@ export default function OrderFlow() {
     const m = d?.minutes ?? [];
     return {
       ...baseOption(c),
-      tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number) => formatCompact(Math.abs(v)) },
       xAxis: timeAxis(c),
       yAxis: [
         { type: 'value', ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatCompact(Math.abs(v)) } },
@@ -39,9 +63,9 @@ export default function OrderFlow() {
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'Buy volume', type: 'bar', stack: 'flow', itemStyle: { color: c.up }, data: m.map((x) => [x.ts, u(x.buyVolume)]) },
-        { name: 'Sell volume', type: 'bar', stack: 'flow', itemStyle: { color: c.down }, data: m.map((x) => [x.ts, -u(x.sellVolume)]) },
-        { name: 'Price', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1.5 }, itemStyle: { color: c.accent }, data: m.map((x) => [x.ts + 60_000, x.close]) },
+        { name: 'Buy volume', type: 'bar', stack: 'flow', itemStyle: { color: c.up }, tooltip: { valueFormatter: (v: number) => formatCompact(Math.abs(v)) }, data: m.map((x) => [x.ts, u(x.buyVolume)]) },
+        { name: 'Sell volume', type: 'bar', stack: 'flow', itemStyle: { color: c.down }, tooltip: { valueFormatter: (v: number) => formatCompact(Math.abs(v)) }, data: m.map((x) => [x.ts, -u(x.sellVolume)]) },
+        { name: 'Price', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1.5 }, itemStyle: { color: c.accent }, tooltip: { valueFormatter: (v: number) => formatIndian(v, 2) }, data: m.map((x) => [x.ts + 60_000, x.close]) },
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -67,15 +91,30 @@ export default function OrderFlow() {
   return (
     <div className="space-y-3">
       <PageHeader title="Order Flow (1-minute)" subtitle="How much volume aggressive buyers vs sellers traded in the last minute — per minute, last 5 minutes and the whole session">
-        <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setStrike(undefined); }} />
-        <Segmented value={type} onChange={setType} options={[{ value: 'FUT', label: 'Future' }, { value: 'CE', label: 'Call' }, { value: 'PE', label: 'Put' }]} />
-        <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} futures={type === 'FUT'} />
-        {type !== 'FUT' && (
-          <select aria-label="Strike" className="input w-auto" value={k ?? ''} onChange={(e) => setStrike(Number(e.target.value))}>
-            {strikes.map((x) => <option key={x} value={x}>{x}{x === chain.data?.atm ? ' (ATM)' : ''}</option>)}
-          </select>
+        <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setStrike(undefined); setPastExpiry(undefined); setPastStrike(undefined); }} />
+        <Segmented value={type} onChange={changeType} options={[{ value: 'FUT', label: 'Future' }, { value: 'CE', label: 'Call' }, { value: 'PE', label: 'Put' }]} />
+        {isPast ? (
+          <>
+            <select aria-label="Expiry" className="input w-auto" value={d?.expiry ?? ''} onChange={(e) => { setPastExpiry(e.target.value); setPastStrike(undefined); }}>
+              {(d?.expiries ?? []).map((x) => <option key={x} value={x}>{formatExpiry(x)}</option>)}
+            </select>
+            {type !== 'FUT' && (
+              <select aria-label="Strike" className="input w-auto" value={d?.strike ?? ''} onChange={(e) => setPastStrike(Number(e.target.value))}>
+                {(d?.strikes ?? []).map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+            )}
+          </>
+        ) : (
+          <>
+            <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} futures={type === 'FUT'} />
+            {type !== 'FUT' && (
+              <select aria-label="Strike" className="input w-auto" value={k ?? ''} onChange={(e) => setStrike(Number(e.target.value))}>
+                {strikes.map((x) => <option key={x} value={x}>{x}{x === chain.data?.atm ? ' (ATM)' : ''}</option>)}
+              </select>
+            )}
+          </>
         )}
-        <SessionDate value={date} onChange={setDate} max={today} />
+        <SessionDate value={date} onChange={changeDate} max={today} />
       </PageHeader>
 
       <Loadable q={q}>

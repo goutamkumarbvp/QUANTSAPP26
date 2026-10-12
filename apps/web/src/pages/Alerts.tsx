@@ -53,19 +53,21 @@ export default function Alerts() {
   const k = strike && chain.data?.rows.some((r) => r.strike === strike) ? strike : chain.data?.atm;
   const needsOption = kind === 'OPTION_PRICE' || kind === 'OI_CHANGE';
   const isOrb = kind === 'ORB_BREAK';
-  const orb = useLive<OrbResponse>(['orb', symbol, '', Number(value) || 15, 'close'], `/orb/${symbol}${qs({ minutes: Number(value) || 15 })}`, 10000, isOrb);
+  // The opening-range length shown, queried and submitted is always one of the offered values.
+  const orbMinutes = ['5', '15', '30'].includes(value) ? Number(value) : 15;
+  const orb = useLive<OrbResponse>(['orb', symbol, '', orbMinutes, 'close'], `/orb/${symbol}${qs({ minutes: orbMinutes })}`, 10000, isOrb);
   const flow = useLive<OrderFlowResponse>(['order-flow', symbol, 'FUT', undefined, undefined, '', 1], `/order-flow/${symbol}${qs({ type: 'FUT', limit: 1 })}`, 5000, kind === 'ORDER_FLOW');
   const current =
     kind === 'PRICE' ? chain.data?.spot : kind === 'IV' ? chain.data?.atmIv : kind === 'PCR' ? chain.data?.pcr
       : needsOption ? (() => { const r = chain.data?.rows.find((x) => x.strike === k); const q = r ? (optionType === 'CE' ? r.ce : r.pe) : undefined; return kind === 'OI_CHANGE' ? q?.oiChangePct : q?.ltp; })()
-        : kind === 'ORDER_FLOW' ? flow.data?.lastMinute?.buyPct
+        : kind === 'ORDER_FLOW' ? (flow.data?.lastMinute?.volume ? flow.data.lastMinute.buyPct : undefined)
           : kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.live?.mtm
             : undefined;
 
   const create = async () => {
     setError(null);
     try {
-      await api('/alerts', { body: { kind, symbol: kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.symbol ?? symbol : symbol, condition, value: isOrb ? Number(value) || 15 : Number(value), optionType: needsOption ? optionType : undefined, strike: needsOption ? k : undefined, expiry: needsOption ? e : undefined, strategyId: kind === 'MTM' ? strategyId : undefined, note: note || undefined } });
+      await api('/alerts', { body: { kind, symbol: kind === 'MTM' ? strategies.data?.find((s) => s.id === strategyId)?.symbol ?? symbol : symbol, condition, value: isOrb ? orbMinutes : Number(value), optionType: needsOption ? optionType : undefined, strike: needsOption ? k : undefined, expiry: needsOption ? e : undefined, strategyId: kind === 'MTM' ? strategyId : undefined, note: note || undefined } });
       setValue('');
       setNote('');
       qc.invalidateQueries({ queryKey: ['alerts'] });
@@ -84,7 +86,15 @@ export default function Alerts() {
       <Card title="New alert">
         <div className="flex flex-wrap items-end gap-2">
           <Field label="Alert on">
-            <select className="input w-auto" value={kind} onChange={(ev) => setKind(ev.target.value as AlertKind)}>
+            <select
+              className="input w-auto"
+              value={kind}
+              onChange={(ev) => {
+                // A value typed for another kind (a price, a PCR…) means nothing for this one.
+                setKind(ev.target.value as AlertKind);
+                setValue('');
+              }}
+            >
               {KINDS.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
             </select>
           </Field>
@@ -114,7 +124,7 @@ export default function Alerts() {
           <Segmented value={condition} onChange={setCondition} options={isOrb ? [{ value: 'above', label: '↑ Breaks above high' }, { value: 'below', label: '↓ Breaks below low' }] : [{ value: 'above', label: '≥ Above' }, { value: 'below', label: '≤ Below' }]} />
           {isOrb ? (
             <Field label={orb.data ? `Range minutes (now: H ${orb.data.evaluation.high.toFixed(1)} / L ${orb.data.evaluation.low.toFixed(1)}, ${orb.data.evaluation.trend})` : 'Range minutes'}>
-              <select className="input w-auto" value={value || '15'} onChange={(ev) => setValue(ev.target.value)}>
+              <select className="input w-auto" value={String(orbMinutes)} onChange={(ev) => setValue(ev.target.value)}>
                 {[5, 15, 30].map((m) => <option key={m} value={m}>{m} min</option>)}
               </select>
             </Field>

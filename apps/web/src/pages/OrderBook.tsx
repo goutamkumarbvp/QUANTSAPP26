@@ -22,7 +22,8 @@ export default function OrderBook() {
   const chain = useChain(symbol, type === 'FUT' ? undefined : expiry, { refetch: 30000 });
   const k = type === 'FUT' ? undefined : strike && chain.data?.rows.some((r) => r.strike === strike) ? strike : chain.data?.atm;
   const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000);
-  const flow = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, '', 5], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 5 })}`, 2000);
+  // For options wait for the strike, so the flow is for the same contract as the depth beside it.
+  const flow = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, '', 5], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 5 })}`, 2000, type === 'FUT' || k !== undefined);
   const c = useChartColors();
   const option = useMemo(() => {
     const h = q.data?.history ?? [];
@@ -108,7 +109,7 @@ export default function OrderBook() {
               </Card>
             </div>
             {flow.data && (
-              <Card title="1-minute order flow — buyers vs sellers" actions={<Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>}>
+              <Card title={`1-minute order flow — ${flow.data.instrument}`} actions={<Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>}>
                 <div className="grid gap-4 md:grid-cols-3">
                   <div>
                     <div className="mb-1 flex justify-between text-2xs text-muted">

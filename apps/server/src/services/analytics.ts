@@ -10,6 +10,7 @@ import {
   type OrbHistoryResponse,
   type OrbResponse,
   type OrbRule,
+  type OrbEvaluation,
   type OrbScanRow,
   expiryTs,
   formatExpiry,
@@ -84,6 +85,9 @@ export interface OptionSnapshotRow {
 
 export class Analytics {
   private snapshotCache = new Lru<string, OptionSnapshotRow[]>(8);
+  /** Completed 1-minute candles per (symbol, session, minutes completed) — they never change. */
+  private barsCache = new Lru<string, MinuteBar[]>(400);
+  private orbScanCache = new Lru<string, OrbScanRow[]>(16);
 
   constructor(readonly engine: MarketEngine) {}
 
@@ -120,6 +124,7 @@ export class Analytics {
     const start = Math.max(0, now.dayIdx - Math.max(1, days) + 1);
     for (let i = start; i <= now.dayIdx; i++) {
       const P = e.path(symbol, i);
+      const w = e.minuteWicks(symbol, i);
       const bar = e.bar(symbol, i);
       const last = i === now.dayIdx ? Math.floor(now.m) : M;
       for (let m0 = 0; m0 < Math.max(last, 1); m0 += step) {
@@ -129,6 +134,9 @@ export class Analytics {
         for (let j = m0; j <= m1; j++) {
           if (P[j] > hi) hi = P[j];
           if (P[j] < lo) lo = P[j];
+          // intra-minute extremes (the LTP's wicks) of completed minutes
+          if (j < m1 && w.hi[j] > hi) hi = w.hi[j];
+          if (j < m1 && w.lo[j] < lo) lo = w.lo[j];
         }
         const vol = bar.volume * ((m1 - m0) / M) * (1 + 0.8 * Math.exp(-m0 / 30) + 0.5 * Math.exp(-(M - m1) / 30));
         out.push({ ts: e.tsOf(i, m0), open: +P[m0].toFixed(2), high: +hi.toFixed(2), low: +lo.toFixed(2), close: +P[m1].toFixed(2), volume: Math.round(vol) });
@@ -174,15 +182,23 @@ export class Analytics {
     const P = e.path(symbol, dayIdx);
     const full = Math.min(M, Math.floor(upto));
     const r2 = (x: number) => +x.toFixed(2);
-    const bars: MinuteBar[] = [];
-    for (let j = 0; j < full; j++) {
-      bars.push({ ts: e.tsOf(dayIdx, j), open: r2(P[j]), high: r2(Math.max(P[j], P[j + 1])), low: r2(Math.min(P[j], P[j + 1])), close: r2(P[j + 1]) });
-    }
+    const done = this.barsCache.getOrCreate(`${symbol}|${dayIdx}|${full}`, () => {
+      const w = e.minuteWicks(symbol, dayIdx);
+      const out: MinuteBar[] = [];
+      for (let j = 0; j < full; j++) {
+        // High/low include the intra-minute prices the live LTP printed during the minute.
+        out.push({ ts: e.tsOf(dayIdx, j), open: r2(P[j]), high: r2(Math.max(P[j], P[j + 1], w.hi[j])), low: r2(Math.min(P[j], P[j + 1], w.lo[j])), close: r2(P[j + 1]) });
+      }
+      return out;
+    });
+    const bars = done.slice();
     let partial = false;
     if (liveTs !== undefined && upto > full && full < M) {
       const open = r2(P[full]);
       const close = e.spot(symbol, liveTs);
-      bars.push({ ts: e.tsOf(dayIdx, full), open, high: Math.max(open, close), low: Math.min(open, close), close });
+      const pw = e.partialWick(symbol, liveTs);
+      // Running extremes so far: a touch, once printed, is never taken back.
+      bars.push({ ts: e.tsOf(dayIdx, full), open, high: Math.max(open, close, pw?.high ?? close), low: Math.min(open, close, pw?.low ?? close), close });
       partial = true;
     }
     return { bars, partial };
@@ -191,6 +207,15 @@ export class Analytics {
   private orbFor(symbol: string, dayIdx: number, upto: number, liveTs: number | undefined, rangeMinutes: number, rule: OrbRule) {
     const { bars, partial } = this.minuteBars(symbol, dayIdx, upto, liveTs);
     return { bars, partial, ev: evaluateOpeningRange(bars, { rangeMinutes, rule, lastIsPartial: partial }) };
+  }
+
+  /**
+   * Opening-range evaluation on completed minutes only (cheap, cached bars). Under the 'close'
+   * rule the minute in progress never confirms a break, so this is what alerts need.
+   */
+  orbConfirmed(symbol: string, ts: number, rangeMinutes: number): OrbEvaluation {
+    const now = this.engine.parts(ts);
+    return this.orbFor(symbol, now.dayIdx, Math.floor(now.m), undefined, rangeMinutes, 'close').ev;
   }
 
   orb(symbol: string, ts: number, opts: { date?: string; rangeMinutes?: number; rule?: OrbRule } = {}): OrbResponse {
@@ -222,9 +247,14 @@ export class Analytics {
   }
 
   orbScan(ts: number, opts: { rangeMinutes?: number; rule?: OrbRule } = {}): OrbScanRow[] {
-    const e = this.engine;
     const rangeMinutes = Math.max(1, Math.min(120, Math.round(opts.rangeMinutes ?? 15)));
     const rule = opts.rule ?? 'close';
+    // Market-wide scan: cached per 5-second bucket like the option snapshot.
+    return this.orbScanCache.getOrCreate(`${rangeMinutes}|${rule}|${Math.floor(ts / 5000)}`, () => this.computeOrbScan(ts, rangeMinutes, rule));
+  }
+
+  private computeOrbScan(ts: number, rangeMinutes: number, rule: OrbRule): OrbScanRow[] {
+    const e = this.engine;
     const now = e.parts(ts);
     const live = now.m < M;
     return [...e.instruments.values()].map((inst) => {
@@ -247,6 +277,7 @@ export class Analytics {
         whipsaw: ev.whipsaw,
         reentered: ev.reentered,
         position: ev.position,
+        pending: ev.pending,
         breakTs: lastBreak?.ts ?? null,
         breakPrice: lastBreak?.price ?? null,
         beyondPct: beyondPct === null ? null : +beyondPct.toFixed(2),

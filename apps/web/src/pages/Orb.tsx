@@ -12,6 +12,9 @@ import { useApp, useTicks } from '../lib/store';
 
 type Filter = 'all' | OrbTrend | 'whipsaw';
 
+/** Decimals for a price: whole rupees for index-sized prices, paise for low-priced stocks. */
+const dec = (v: number) => (Math.abs(v) >= 1000 ? 0 : 2);
+
 /** Aggregate 1-minute candles into n-minute candles aligned to 09:15. */
 function aggregate(bars: MinuteBar[], n: number): MinuteBar[] {
   if (n <= 1) return bars;
@@ -32,10 +35,16 @@ export default function Orb() {
   const [rule, setRule] = useState<'close' | 'touch'>('close');
   const [tf, setTf] = useState(1);
   const [filter, setFilter] = useState<Filter>('all');
-  const q = useLive<OrbResponse>(['orb', symbol, date, minutes, rule], `/orb/${symbol}${qs({ date, minutes, rule })}`, date ? false : 5000);
+  // Today's date (the picker's max) is still the live session — keep polling it.
+  const isPast = !!date && !!today && date < today;
+  const q = useLive<OrbResponse>(['orb', symbol, isPast ? date : '', minutes, rule], `/orb/${symbol}${qs({ date: isPast ? date : undefined, minutes, rule })}`, isPast ? false : 5000);
   const scan = useLive<OrbScanRow[]>(['orb-scan', minutes, rule], `/orb${qs({ minutes, rule })}`, 10000);
   const hist = useLive<OrbHistoryResponse>(['orb-hist', symbol, minutes, rule], `/orb/${symbol}/history${qs({ days: 20, minutes, rule })}`, 60000);
   const c = useChartColors();
+  const openDay = (d: string) => {
+    setDate(d);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const option = useMemo(() => {
     const d = q.data;
@@ -50,23 +59,38 @@ export default function Orb() {
       legend: { show: false },
       tooltip: { ...(baseOption(c).tooltip as object), axisPointer: { type: 'cross' } },
       xAxis: { type: 'category', data: cats, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, fontSize: 11, hideOverlap: true } },
-      yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatIndian(v, 0) } },
+      yAxis: [
+        { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatIndian(v, dec(v)) } },
+        { type: 'value', min: 0, max: 1, show: false },
+      ],
       dataZoom: [{ type: 'inside' }],
       series: [
+        // Opening-range band: full-width background behind every candle of the range.
+        {
+          name: 'range',
+          type: 'bar',
+          yAxisIndex: 1,
+          silent: true,
+          barWidth: '100%',
+          barGap: '-100%',
+          itemStyle: { color: c.warn, opacity: 0.1 },
+          tooltip: { show: false },
+          data: cats.map((_, i) => (i <= rangeEndIdx ? 1 : 0)),
+          z: 0,
+        },
         {
           name: d.symbol,
           type: 'candlestick',
           data: bars.map((b) => [b.open, b.close, b.low, b.high]),
           itemStyle: { color: c.up, color0: c.down, borderColor: c.up, borderColor0: c.down },
-          markArea: { silent: true, itemStyle: { color: c.warn, opacity: 0.08 }, label: { color: c.muted, fontSize: 10, position: 'insideTop' }, data: [[{ name: `${d.rangeMinutes}-min range`, xAxis: 0 }, { xAxis: Math.min(rangeEndIdx, cats.length - 1) }]] },
           markLine: Number.isFinite(e.high)
             ? {
                 symbol: 'none',
                 silent: true,
                 label: { color: c.ink, fontSize: 10, formatter: '{b}', position: 'insideEndTop' },
                 data: [
-                  { name: `Range high ${formatIndian(e.high)}`, yAxis: e.high, lineStyle: { color: c.up, type: 'dashed', width: 1.5 } },
-                  { name: `Range low ${formatIndian(e.low)}`, yAxis: e.low, lineStyle: { color: c.down, type: 'dashed', width: 1.5 } },
+                  { name: `${d.rangeMinutes}-min range high ${formatIndian(e.high, dec(e.high))}`, yAxis: e.high, lineStyle: { color: c.up, type: 'dashed', width: 1.5 } },
+                  { name: `${d.rangeMinutes}-min range low ${formatIndian(e.low, dec(e.low))}`, yAxis: e.low, lineStyle: { color: c.down, type: 'dashed', width: 1.5 } },
                 ],
               }
             : undefined,
@@ -118,7 +142,7 @@ export default function Orb() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-xs text-muted">{d.symbol} · {d.date} · {d.live ? 'live' : 'full session'}</div>
-                    <div className="mt-1"><TrendBadge trend={e.trend} whipsaw={e.whipsaw} reentered={e.reentered} large /></div>
+                    <div className="mt-1"><TrendBadge trend={e.trend} whipsaw={e.whipsaw} reentered={e.reentered} pending={e.pending} large /></div>
                     <div className={cx('mt-1 text-sm font-medium', e.trend === 'up' ? 'text-up' : e.trend === 'down' ? 'text-down' : 'text-muted')}>{d.summary}</div>
                   </div>
                   <div className="text-right">
@@ -133,7 +157,7 @@ export default function Orb() {
                 <Stat label="Range width" value={`${formatIndian(e.width)} pts`} sub={`${e.widthPct.toFixed(2)}%`} />
                 <Stat label="Price vs range" value={e.position === 'above' ? 'Above high' : e.position === 'below' ? 'Below low' : 'Inside'} tone={e.position === 'above' ? 'up' : e.position === 'below' ? 'down' : undefined} />
                 <Stat label="First break" value={first ? `${first.direction === 'up' ? '▲ Up' : '▼ Down'} ${formatSessionTime(first.ts)}` : e.complete ? 'None yet' : '—'} sub={first ? `at ${formatIndian(first.price)}` : undefined} tone={first ? (first.direction === 'up' ? 'up' : 'down') : undefined} />
-                <Stat label="Day high / low" value={`${formatIndian(d.dayHigh, 0)} / ${formatIndian(d.dayLow, 0)}`} sub={`${e.crossings.length} range exits`} />
+                <Stat label="Day high / low" value={`${formatIndian(d.dayHigh, dec(d.dayHigh))} / ${formatIndian(d.dayLow, dec(d.dayLow))}`} sub={`${e.crossings.length} range exits`} />
               </div>
               <Card title={`${d.symbol} candles with opening range`} actions={<Segmented size="xs" value={tf} onChange={setTf} options={[{ value: 1, label: '1m' }, { value: 3, label: '3m' }, { value: 5, label: '5m' }, { value: 15, label: '15m' }]} />}>
                 <Chart option={option} height={420} />
@@ -177,7 +201,7 @@ export default function Orb() {
                 { key: 'high', label: 'Range high', num: true, value: (r) => r.high, render: (r) => formatIndian(r.high), hideSm: true },
                 { key: 'low', label: 'Range low', num: true, value: (r) => r.low, render: (r) => formatIndian(r.low), hideSm: true },
                 { key: 'width', label: 'Width %', num: true, value: (r) => r.widthPct, render: (r) => r.widthPct.toFixed(2), hideSm: true },
-                { key: 'trend', label: 'Status', value: (r) => r.trend, render: (r) => <TrendBadge trend={r.trend} whipsaw={r.whipsaw} reentered={r.reentered} /> },
+                { key: 'trend', label: 'Status', value: (r) => r.trend, render: (r) => <TrendBadge trend={r.trend} whipsaw={r.whipsaw} reentered={r.reentered} pending={r.pending} /> },
                 { key: 'break', label: 'Last break', num: true, value: (r) => r.breakTs ?? 0, render: (r) => (r.breakTs ? formatSessionTime(r.breakTs) : '—') },
                 { key: 'beyond', label: 'Beyond level', num: true, value: (r) => r.beyondPct ?? -999, render: (r) => (r.beyondPct === null ? '—' : <Chg value={r.beyondPct} pct />) },
               ]}
@@ -204,7 +228,19 @@ export default function Orb() {
                   </thead>
                   <tbody>
                     {h.rows.map((r) => (
-                      <tr key={r.date} className="cursor-pointer" onClick={() => setDate(r.date)}>
+                      <tr
+                        key={r.date}
+                        tabIndex={0}
+                        aria-selected={r.date === date}
+                        className={cx('cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent', r.date === date && 'bg-accent/10')}
+                        onClick={() => openDay(r.date)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter' || ev.key === ' ') {
+                            ev.preventDefault();
+                            openDay(r.date);
+                          }
+                        }}
+                      >
                         <td>{r.date}</td>
                         <td className="num">{formatIndian(r.high)}</td>
                         <td className="num">{formatIndian(r.low)}</td>

@@ -174,15 +174,14 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     const byChange = [...stocks].sort((a, b) => b.spot.changePct - a.spot.changePct);
     const counts = { 'Long Build-up': 0, 'Short Build-up': 0, 'Short Covering': 0, 'Long Unwinding': 0, Neutral: 0 };
     for (const r of stocks) counts[r.buildUp]++;
-    const orbBySymbol = new Map(an.orbScan(ts).map((r) => [r.symbol, r]));
     const chains = ['NIFTY', 'BANKNIFTY', 'SENSEX'].map((s) => {
       const c = e.chain(s, undefined, ts);
-      const o = orbBySymbol.get(s)!;
-      const flow = svc.tools.orderFlow(s, { type: 'FUT' }, ts, { limit: 1 });
+      const o = an.orb(s, ts);
+      const flow = svc.tools.lastMinuteFlow(s, ts);
       return {
         symbol: s, expiry: c.expiry, pcr: c.pcr, maxPain: c.maxPain, atmIv: c.atmIv, ivChange: c.ivChange, support: c.support, resistance: c.resistance, spot: c.spot, daysToExpiry: c.daysToExpiry,
-        orb: { high: o.high, low: o.low, trend: o.trend, whipsaw: o.whipsaw, reentered: o.reentered, summary: o.summary },
-        flow: flow.lastMinute ? { buyPct: flow.lastMinute.buyPct, delta: flow.lastMinute.delta, sentiment: flow.lastMinute.sentiment, ts: flow.lastMinute.ts } : null,
+        orb: { high: o.evaluation.high, low: o.evaluation.low, trend: o.evaluation.trend, whipsaw: o.evaluation.whipsaw, reentered: o.evaluation.reentered, summary: o.summary },
+        flow: flow ? { buyPct: flow.buyPct, delta: flow.delta, sentiment: flow.sentiment, ts: flow.ts } : null,
       };
     });
     const p = e.parts(ts);
@@ -202,21 +201,40 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   /* ---------------------------- trend: opening range & order flow ---------------------------- */
 
-  const orbOpts = (q: Q) => ({ rangeMinutes: num(q.minutes, 15), rule: (q.rule === 'touch' ? 'touch' : 'close') as 'touch' | 'close' });
+  const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD');
+  const notFuture = (d: string | undefined) => {
+    if (d && d > svc.clock.info().date) throw Object.assign(new Error(`${d} is in the future`), { statusCode: 400 });
+    return d || undefined;
+  };
+  const orbQuery = z.object({
+    minutes: z.coerce.number().int().min(1).max(120).default(15),
+    rule: z.enum(['close', 'touch']).default('close'),
+    date: day.optional().or(z.literal('')),
+    days: z.coerce.number().int().min(1).max(250).default(20),
+  });
+  const flowQuery = z.object({
+    type: z.enum(['FUT', 'CE', 'PE']).default('FUT'),
+    strike: z.coerce.number().positive().optional(),
+    expiry: day.optional().or(z.literal('')),
+    date: day.optional().or(z.literal('')),
+    limit: z.coerce.number().int().min(1).max(375).default(60),
+  });
 
-  app.get('/api/orb', async (req) => an.orbScan(now(), orbOpts(qs(req))));
+  app.get('/api/orb', async (req) => {
+    const q = orbQuery.parse(qs(req));
+    return an.orbScan(now(), { rangeMinutes: q.minutes, rule: q.rule });
+  });
   app.get<{ Params: { symbol: string } }>('/api/orb/:symbol', async (req) => {
-    const q = qs(req);
-    return an.orb(req.params.symbol, now(), { ...orbOpts(q), date: q.date || undefined });
+    const q = orbQuery.parse(qs(req));
+    return an.orb(req.params.symbol, now(), { rangeMinutes: q.minutes, rule: q.rule, date: notFuture(q.date) });
   });
   app.get<{ Params: { symbol: string } }>('/api/orb/:symbol/history', async (req) => {
-    const q = qs(req);
-    return an.orbHistory(req.params.symbol, num(q.days, 20), now(), orbOpts(q));
+    const q = orbQuery.parse(qs(req));
+    return an.orbHistory(req.params.symbol, q.days, now(), { rangeMinutes: q.minutes, rule: q.rule });
   });
   app.get<{ Params: { symbol: string } }>('/api/order-flow/:symbol', async (req) => {
-    const q = qs(req);
-    const type = q.type === 'CE' || q.type === 'PE' ? q.type : 'FUT';
-    return svc.tools.orderFlow(req.params.symbol, { type, strike: q.strike ? num(q.strike, 0) : undefined, expiry: q.expiry || undefined }, now(), { date: q.date || undefined, limit: num(q.limit, 60) });
+    const q = flowQuery.parse(qs(req));
+    return svc.tools.orderFlow(req.params.symbol, { type: q.type, strike: q.strike, expiry: q.expiry || undefined }, now(), { date: notFuture(q.date), limit: q.limit });
   });
 
   /* ---------------------------- open interest ---------------------------- */

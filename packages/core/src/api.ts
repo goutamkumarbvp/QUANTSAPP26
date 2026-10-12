@@ -644,6 +644,8 @@ export interface OrbScanRow {
   whipsaw: boolean;
   reentered: boolean;
   position: 'above' | 'inside' | 'below';
+  /** Live price beyond a level without a confirmed break yet. */
+  pending: 'up' | 'down' | null;
   /** Latest break (start of the confirming 1-minute candle). */
   breakTs: number | null;
   breakPrice: number | null;
@@ -706,6 +708,9 @@ export interface OrderFlowResponse {
   /** Completed minutes, oldest first (the most recent `limit`). */
   minutes: OrderFlowMinute[];
   signal: string;
+  /** Contracts listed on that session (for pickers when viewing a past date). */
+  expiries: string[];
+  strikes: number[];
 }
 
 /* ------------------------------- websocket ------------------------------- */

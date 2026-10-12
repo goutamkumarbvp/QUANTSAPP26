@@ -121,6 +121,16 @@ const TRADING_DAYS_PER_YEAR = 252;
 
 const TYPE_CODE = { CE: 1, PE: 2, FUT: 3 } as const;
 
+/** Second of the minute for a minute fraction, robust to floating-point error (45.99999… → 46). */
+function secondOf(frac: number): number {
+  return Math.min(59, Math.floor(frac * 60 + 1e-6));
+}
+
+/** Per-second micro-structure noise: uniform with unit variance (cheap — wicks sample it a lot). */
+function microNoise(seed: number, a: number, b: number, c: number, d: number): number {
+  return (hashU(seed, a, b, c, d) * 2 - 1) * Math.sqrt(3);
+}
+
 function monthlyRuleOf(rule: ExpiryRule): ExpiryRule {
   return rule.endsWith('thu') ? 'monthly-thu' : 'monthly-tue';
 }
@@ -136,6 +146,7 @@ export class MarketEngine {
   private readonly symIds = new Map<string, number>();
   private readonly marketNoiseCache = new Lru<number, Float64Array>(400);
   private readonly pathCache = new Lru<string, Float64Array>(6000);
+  private readonly wickCache = new Lru<string, { hi: Float64Array; lo: Float64Array }>(3000);
   private readonly expiryCache = new Lru<string, string[]>(4000);
   private readonly strikeCache = new Lru<string, number[]>(6000);
   private readonly dayFactorCache = new Lru<string, number>(400_000);
@@ -345,30 +356,95 @@ export class MarketEngine {
     return roundTick(P[j] + (P[j + 1] - P[j]) * frac);
   }
 
+  /**
+   * Traded price inside minute j at fraction `frac` ∈ [0, 1) of the minute, using second `sec`'s
+   * micro-structure noise. This is the live LTP process; candles' wicks are built from it.
+   */
+  private microPrice(P: Float64Array, inst: Instrument, dayIdx: number, j: number, frac: number, sec: number): number {
+    const base = P[j] + (P[j + 1] - P[j]) * frac;
+    const micro = base * (inst.vol / Math.sqrt(252 * M)) * 0.3 * Math.sin(Math.PI * frac) * microNoise(this.seed, this.symId(inst.symbol), dayIdx, j, sec);
+    return roundTick(base + micro);
+  }
+
   /** Live spot including second-level micro-structure noise. */
   spot(symbol: string, ts: number): number {
     const p = this.parts(ts);
     if (p.m >= M) return this.bar(symbol, p.dayIdx).close;
-    const P = this.path(symbol, p.dayIdx);
     const j = Math.floor(p.m);
     const frac = p.m - j;
-    const base = P[j] + (P[j + 1] - P[j]) * frac;
-    const inst = this.inst(symbol);
-    const sec = Math.floor(frac * 60);
-    const micro = base * (inst.vol / Math.sqrt(252 * M)) * 0.3 * Math.sin(Math.PI * frac) * hashN(this.seed, this.symId(symbol), p.dayIdx, j, sec);
-    return roundTick(base + micro);
+    return this.microPrice(this.path(symbol, p.dayIdx), this.inst(symbol), p.dayIdx, j, frac, secondOf(frac));
   }
 
-  dayStats(symbol: string, dayIdx: number, uptoMinute: number): { open: number; high: number; low: number; close: number } {
+  /** High/low of minute j over its first `secs` seconds of trading (60 = the whole minute). */
+  private wickOf(symbol: string, dayIdx: number, j: number, secs: number): [number, number] {
+    const P = this.path(symbol, dayIdx);
+    const inst = this.inst(symbol);
+    const amp = (inst.vol / Math.sqrt(252 * M)) * 0.3;
+    const sid = this.symId(symbol);
+    const p0 = P[j];
+    const dp = P[j + 1] - P[j];
+    let hi = roundTick(p0);
+    let lo = hi;
+    for (let s = 0; s < secs; s++) {
+      // Same formula as microPrice(), inlined: the noise is fixed within a second and the
+      // envelope is smooth, so each second's extremes sit at its two ends.
+      const h = amp * microNoise(this.seed, sid, dayIdx, j, s);
+      for (let k = 0; k < 2; k++) {
+        const frac = k === 0 ? s / 60 : (s + 1) / 60 - 1e-7;
+        const base = p0 + dp * frac;
+        const v = roundTick(base + base * h * Math.sin(Math.PI * frac));
+        if (v > hi) hi = v;
+        if (v < lo) lo = v;
+      }
+    }
+    if (secs >= 60) {
+      const end = roundTick(P[j + 1]);
+      if (end > hi) hi = end;
+      if (end < lo) lo = end;
+    }
+    return [hi, lo];
+  }
+
+  /** Intra-minute highs and lows of every minute of a session (index j = minute j → j+1). */
+  minuteWicks(symbol: string, dayIdx: number): { hi: Float64Array; lo: Float64Array } {
+    return this.wickCache.getOrCreate(`${symbol}|${dayIdx}`, () => {
+      const hi = new Float64Array(M);
+      const lo = new Float64Array(M);
+      for (let j = 0; j < M; j++) [hi[j], lo[j]] = this.wickOf(symbol, dayIdx, j, 60);
+      return { hi, lo };
+    });
+  }
+
+  /** Running high/low of the minute in progress at `ts` (including the live price). */
+  partialWick(symbol: string, ts: number): { minute: number; high: number; low: number } | null {
+    const p = this.parts(ts);
+    if (p.m >= M) return null;
+    const j = Math.floor(p.m);
+    // Every second that has fully traded, plus the live price of the current one.
+    const [hi, lo] = this.wickOf(symbol, p.dayIdx, j, secondOf(p.m - j));
+    const live = this.spot(symbol, ts);
+    return { minute: j, high: Math.max(hi, live), low: Math.min(lo, live) };
+  }
+
+  /** Session open/high/low/close up to `uptoMinute`, with intra-minute highs and lows. */
+  dayStats(symbol: string, dayIdx: number, uptoMinute: number, liveTs?: number): { open: number; high: number; low: number; close: number } {
     const P = this.path(symbol, dayIdx);
     const last = Math.min(M, Math.floor(uptoMinute));
-    let hi = P[0];
-    let lo = P[0];
-    for (let j = 1; j <= last; j++) {
-      if (P[j] > hi) hi = P[j];
-      if (P[j] < lo) lo = P[j];
+    const w = this.minuteWicks(symbol, dayIdx);
+    let hi = roundTick(P[last]);
+    let lo = hi;
+    for (let j = 0; j < last; j++) {
+      if (w.hi[j] > hi) hi = w.hi[j];
+      if (w.lo[j] < lo) lo = w.lo[j];
     }
-    return { open: P[0], high: roundTick(hi), low: roundTick(lo), close: roundTick(P[last]) };
+    if (liveTs !== undefined) {
+      const pw = this.partialWick(symbol, liveTs);
+      if (pw && pw.minute === last && this.parts(liveTs).dayIdx === dayIdx) {
+        hi = Math.max(hi, pw.high);
+        lo = Math.min(lo, pw.low);
+      }
+    }
+    return { open: P[0], high: hi, low: lo, close: roundTick(P[last]) };
   }
 
   /* ------------------------------------------------------------------ */
@@ -671,8 +747,9 @@ export class MarketEngine {
     const lot = inst.lotSize;
     const P = this.path(symbol, dayIdx);
     const end = Math.min(M, to);
-    const pEnd = end === Math.floor(end) ? P[end] : P[Math.floor(end)] + (P[Math.min(M, Math.floor(end) + 1)] - P[Math.floor(end)]) * (end - Math.floor(end));
-    const move = Math.log(pEnd / P[j]);
+    // The buy share comes from the whole minute's move, so the split of a minute in progress
+    // only ever grows (it never re-allocates volume that already traded).
+    const move = Math.log(P[Math.min(M, j + 1)] / P[j]);
     let volume: number;
     let close: number;
     let sign: 1 | -1 = 1;
@@ -702,7 +779,7 @@ export class MarketEngine {
     const p = this.parts(ts);
     const bar = this.bar(symbol, p.dayIdx);
     const ltp = this.spot(symbol, ts);
-    const st = this.dayStats(symbol, p.dayIdx, p.m);
+    const st = this.dayStats(symbol, p.dayIdx, p.m, ts);
     const futExp = this.futureExpiries(symbol, ts)[0];
     const fut = this.futurePrice(symbol, futExp, ts);
     const prevFutTs = this.tsOf(Math.max(0, p.dayIdx - 1), M);
