@@ -260,13 +260,14 @@ describe('historical', () => {
     expect(parseKotakTimestamp('2026-08-20 09:15:00')).toBe(Date.UTC(2026, 7, 20, 3, 45)); // zone-less = IST
     expect(parseKotakTimestamp('2026-08-20')).toBe(Date.UTC(2026, 7, 19, 18, 30));
     expect(parseKotakTimestamp(1787197500)).toBe(1787197500000);
+    // The sample's 7th column (13667775 on a cash stock) is the unpopulated "Phase 1" OI slot: ignored.
     expect(parseCandles(HISTORICAL)).toEqual([
-      { ts: Date.UTC(2026, 7, 20, 3, 45), open: 12009.9, high: 12019.35, low: 12001.25, close: 12001.5, volume: 163275, oi: 13667775 },
-      { ts: Date.UTC(2026, 7, 20, 3, 46), open: 12001, high: 12003, low: 11998.25, close: 12001, volume: 105750, oi: 13667775 },
+      { ts: Date.UTC(2026, 7, 20, 3, 45), open: 12009.9, high: 12019.35, low: 12001.25, close: 12001.5, volume: 163275 },
+      { ts: Date.UTC(2026, 7, 20, 3, 46), open: 12001, high: 12003, low: 11998.25, close: 12001, volume: 105750 },
     ]);
   });
 
-  it('drops unpopulated OI and malformed rows; accepts the legacy parallel-array shape', () => {
+  it('never reports candle OI, drops malformed rows; accepts the legacy parallel-array shape', () => {
     const rows = parseCandles({ data: { candles: [['2026-08-20T09:15:00+0530', 1, 2, 0.5, 1.5, 10, 0], ['bad', 1, 1, 1, 1, 1, null], ['2026-08-20T09:16:00+0530', 1, 2, 0.5, null, 10, null]] } });
     expect(rows).toEqual([{ ts: Date.UTC(2026, 7, 20, 3, 45), open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }]);
     const legacy = parseCandles({ data: { t: ['2026-08-20T09:16:00+0530', '2026-08-20T09:15:00+0530'], o: [2, 1], h: [3, 2], l: [1, 0.5], c: [2.5, 1.5], v: [5, 10] } });

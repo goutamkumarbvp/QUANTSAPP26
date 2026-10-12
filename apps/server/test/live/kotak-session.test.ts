@@ -151,14 +151,14 @@ describe('KotakSession login', () => {
   });
 
   it('never exposes secrets in status() or error messages', async () => {
-    const echo = { status: 'error', message: `Bad request for ${CREDS.mobileNumber} with key ${CREDS.consumerKey}` };
+    const echo = { status: 'error', message: `Bad request for ${CREDS.mobileNumber} (${CREDS.mobileNumber.slice(3)}, UCC ${CREDS.ucc}) with key ${CREDS.consumerKey}` };
     const { session } = setup(() => ({ body: [] }), { login: () => ({ status: 400, body: echo }) });
     const err = (await session.login().catch((e: unknown) => e)) as Error;
     const ok = setup(() => ({ body: [] }));
     await ok.session.login();
     const creds = ok.session.feedCredentials()!;
     for (const text of [err.message, JSON.stringify(session.status()), JSON.stringify(ok.session.status())]) {
-      for (const secret of [CREDS.consumerKey, CREDS.mpin, CREDS.totpSecret, CREDS.mobileNumber, creds.token, creds.sid]) expect(text).not.toContain(secret);
+      for (const secret of [CREDS.consumerKey, CREDS.mpin, CREDS.totpSecret, CREDS.mobileNumber, CREDS.mobileNumber.slice(3), CREDS.ucc, creds.token, creds.sid]) expect(text).not.toContain(secret);
     }
   });
 });
@@ -252,6 +252,39 @@ describe('KotakSession requests', () => {
     await expect(long.session.request('h', { kind: 'market', lane: 'slow' })).rejects.toMatchObject({ kind: 'rate-limit', retryAfterMs: 600_000 });
     expect(long.session.limiter.stats().pausedUntil.slow).toBe(long.env.clock + 600_000);
     expect(long.apiCalls().length).toBe(1);
+
+    // While the lane is held, further calls fail fast (no queue that would hang for the whole
+    // pause and burst afterwards). A slow pause does not hold 'general'; a general pause holds both.
+    await expect(long.session.request('h2', { kind: 'market', lane: 'slow' })).rejects.toMatchObject({ kind: 'rate-limit', message: expect.stringContaining('paused 600 s') });
+    expect(long.apiCalls().length).toBe(1);
+    expect(long.session.limiter.pausedMs('general')).toBe(0);
+    long.session.limiter.pause('general', 60_000);
+    await expect(long.session.request('g', { kind: 'market' })).rejects.toMatchObject({ kind: 'rate-limit' });
+    expect(long.apiCalls().length).toBe(1);
+  });
+
+  it('a long general pause also holds logins (fails fast instead of parking every caller)', async () => {
+    const { ff, session } = setup(() => ({ body: {} }));
+    session.limiter.pause('general', 10 * 60_000);
+    await expect(session.request('a', { kind: 'market' })).rejects.toMatchObject({ kind: 'rate-limit' });
+    expect(ff.calls.length).toBe(0);
+    expect(session.status().loginBlockedUntil).toBeUndefined(); // not counted as a login failure
+  });
+
+  it('maps a body that fails mid-read to a network KotakError (a NoLiveData)', async () => {
+    const { session } = setup(() => ({ body: {} }), {
+      deps: {
+        fetch: async (url: string) => {
+          if (url.endsWith('tradeApiLogin')) return new Response(JSON.stringify(loginOk()));
+          if (url.endsWith('tradeApiValidate')) return new Response(JSON.stringify(validateOk()));
+          const body = new ReadableStream({ pull: (c) => c.error(new Error('socket hang up')) });
+          return new Response(body, { status: 200 });
+        },
+      },
+    });
+    const err = await session.request('a', { kind: 'market' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoLiveData);
+    expect(err).toMatchObject({ kind: 'network', message: expect.stringContaining('socket hang up') });
   });
 });
 

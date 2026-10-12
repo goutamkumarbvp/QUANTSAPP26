@@ -139,6 +139,13 @@ describe('NSE F&O UDiFF bhavcopy', () => {
     expect(() => parseFoUdiff(csv, { exchange: 'NSE', file: 'fo.csv' })).toThrow('fo.csv: required column "OpnIntrst" is missing');
   });
 
+  it('needs NewBrdLotQty when volume is in contracts (else only untraded rows would survive)', () => {
+    const csv = NSE_0915.replace('NewBrdLotQty', 'LotSize');
+    expect(() => parseFoUdiff(csv, { exchange: 'NSE', file: 'fo.csv' })).toThrow('fo.csv: required column "NewBrdLotQty" is missing');
+    // BSE volume is in units, so the lot size is optional there.
+    expect(parseFoUdiff(BSE_0430.replace('NewBrdLotQty', 'LotSize'), { exchange: 'BSE' }).options).toHaveLength(1);
+  });
+
   it('rejects a file of another date and skips rows of another exchange', () => {
     expect(() => parseFoUdiff(NSE_0915, { exchange: 'NSE', expectedDate: '2026-09-16' })).toThrow(/dated 2026-09-15, expected 2026-09-16/);
     expect(() => parseFoUdiff(NSE_0915, { exchange: 'BSE' })).toThrow(/no usable data rows/);

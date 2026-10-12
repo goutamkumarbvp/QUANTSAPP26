@@ -171,7 +171,22 @@ describe('Recorder: minute bars', () => {
     tick(FUT, t(9, 20, 1), { ltp: 0, volume: 600 });
     at(t(9, 30));
     expect(writer.of(FUT)).toEqual([{ ts: t(9, 15), open: 100, high: 100, low: 100, close: 100, volume: 100, buyVolume: 0, sellVolume: 0, unclassified: 100 }]);
-    expect(rec.stats().stateOnly).toEqual({ otherDate: 1, outsideSession: 1, noPrice: 1, stale: 1, ahead: 1 });
+    expect(rec.stats().stateOnly).toEqual({ otherDate: 1, outsideSession: 1, noPrice: 1, oldTrade: 0, stale: 1, ahead: 1 });
+  });
+
+  it('does not turn the previous session\'s last trade into a bar (fresh LUT, LTT another day)', () => {
+    const { rec, writer, tick, at } = setup();
+    const k = opt('CE', 25_500);
+    // Snapshot at 09:15: quote is fresh, but the LTP is yesterday's last trade.
+    tick(k, t(9, 15, 3), { ltp: 42, ltt: ist('2026-10-09', 15, 29, 40), volume: 0, oi: 9_000, bid: 40, ask: 44 });
+    tick(k, t(9, 17, 3), { ltp: 42, ltt: ist('2026-10-09', 15, 29, 40), volume: 0, bid: 41, ask: 43 });
+    at(t(9, 20));
+    expect(writer.of(k)).toEqual([]);
+    expect(rec.stats().stateOnly.oldTrade).toBe(2);
+    // First trade today: a bar, with the volume measured from the baseline set by the snapshots.
+    tick(k, t(9, 21, 7), { ltp: 43, ltt: t(9, 21, 7), volume: 75 });
+    at(t(9, 23));
+    expect(writer.of(k)).toEqual([{ ts: t(9, 21), open: 43, high: 43, low: 43, close: 43, volume: 75, buyVolume: 75, sellVolume: 0, unclassified: 0, oi: 9_000, bid: 41, ask: 43 }]);
   });
 
   it('folds a tick for an already written minute into the next open minute', () => {
@@ -254,16 +269,23 @@ describe('Recorder: chain aggregates', () => {
     expect(rec.stats().chainSkipped.noSpot).toBe(1);
     tick(SPOT, t(10, 1, 3), { ltp: 25_040 });
     at(t(10, 2, 2));
-    expect(writer.chains[0].rec).toMatchObject({ ts: t(10, 1), atmStrike: 25_050, ceOi: 10, peOi: 0, pcr: 0, maxPain: null });
-    // Only a call and the spot are live: forward = spot carried at r, IV of that call.
-    const T = timeToExpiry(EXP, t(10, 2));
-    expect(writer.chains[0].rec.atmIv).toBeCloseTo(black76Iv('CE', 120, 25_040 * Math.exp(R * T), 25_000, T, R) as number, 12);
+    // Calls only: put OI is unknown, so no aggregate (never peOi 0 / PCR 0).
+    expect(writer.chains).toHaveLength(0);
+    expect(rec.stats().chainSkipped.noOi).toBe(1);
+    tick(opt('PE', 25_100), t(10, 2, 4), { ltp: 95, oi: 4 });
+    at(t(10, 3, 2));
+    expect(writer.chains[0].rec).toMatchObject({ ts: t(10, 2), atmStrike: 25_050, ceOi: 10, peOi: 4, pcr: 0.4, maxPain: null });
+    // No strike has both premiums: forward = spot carried at r (≈25,077), so the strike with a
+    // premium nearest it is the 25,100 put.
+    const T = timeToExpiry(EXP, t(10, 3));
+    const F = 25_040 * Math.exp(R * T);
+    expect(writer.chains[0].rec.atmIv).toBeCloseTo(black76Iv('PE', 95, F, 25_100, T, R) as number, 12);
 
     rec.trackChain('BANKNIFTY', '2026-10-27');
-    tick({ symbol: 'BANKNIFTY', kind: 'SPOT' }, t(10, 2, 3), { ltp: 56_000 });
-    at(t(10, 3, 2));
+    tick({ symbol: 'BANKNIFTY', kind: 'SPOT' }, t(10, 3, 3), { ltp: 56_000 });
+    at(t(10, 4, 2));
     expect(writer.chains.filter((c) => c.symbol === 'BANKNIFTY')).toHaveLength(0);
-    expect(rec.stats().chainSkipped.noOi).toBeGreaterThanOrEqual(1);
+    expect(rec.stats().chainSkipped.noOi).toBeGreaterThanOrEqual(2);
   });
 });
 

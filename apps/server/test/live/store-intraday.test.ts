@@ -128,6 +128,17 @@ describe('IntradayFiles', () => {
     expect(c.bars(SPOT, D).map((r) => r.close)).toEqual([1, 2, 4]);
   });
 
+  it('keeps a complete last record that only lost its newline', () => {
+    const a = new IntradayFiles({ dataDir: dir });
+    a.writeMinutes([{ key: SPOT, rec: bar(t(10, 0), 1) }]);
+    const file = path.join(dir, 'market', D, 'bars', 'NIFTY', 'SPOT.jsonl');
+    fs.appendFileSync(file, JSON.stringify(bar(t(10, 1), 2))); // crash just before the '\n'
+
+    const b = new IntradayFiles({ dataDir: dir });
+    b.writeMinutes([{ key: SPOT, rec: bar(t(10, 2), 3) }]);
+    expect(new IntradayFiles({ dataDir: dir }).bars(SPOT, D).map((r) => r.close)).toEqual([1, 2, 3]);
+  });
+
   it('merges two records of the same minute (restart inside a minute)', () => {
     const s = new IntradayFiles({ dataDir: dir });
     const k = opt('CE', 25_000);
@@ -150,6 +161,29 @@ describe('IntradayFiles', () => {
     expect(new IntradayFiles({ dataDir: dir }).recordedKeys(D)).toEqual([mm]);
     expect(() => s.bars(SPOT, '2026-10-1')).toThrow(/invalid date/);
     expect(() => s.writeMinutes([{ key: SPOT, rec: bar(t(10, 0), Number.NaN) }])).toThrow(/invalid minute record/);
+  });
+
+  it('writes the valid items of a batch when one item is invalid, then reports it', () => {
+    const s = new IntradayFiles({ dataDir: dir });
+    const badKey: InstrumentKey = { symbol: 'NIFTY', kind: 'CE', expiry: EXP }; // no strike
+    expect(() =>
+      s.writeMinutes([
+        { key: SPOT, rec: bar(t(10, 0), 25_000) },
+        { key: badKey, rec: bar(t(10, 0), 120) },
+        { key: FUT_OCT, rec: bar(t(10, 0), 25_100) },
+      ]),
+    ).toThrow(/invalid strike/);
+    const again = new IntradayFiles({ dataDir: dir });
+    expect(again.bars(SPOT, D).map((r) => r.close)).toEqual([25_000]);
+    expect(again.bars(FUT_OCT, D).map((r) => r.close)).toEqual([25_100]);
+    expect(() =>
+      s.writeChainMinutes([
+        { symbol: 'NIFTY', expiry: 'bad', rec: { ts: t(10, 0), spot: 1, ceOi: 1, peOi: 1, ceVolume: 1, peVolume: 1, pcr: 1, maxPain: null, atmStrike: 1, atmIv: null } },
+        { symbol: 'NIFTY', expiry: EXP, rec: { ts: t(10, 0), spot: 1, ceOi: 1, peOi: 1, ceVolume: 1, peVolume: 1, pcr: 1, maxPain: null, atmStrike: 1, atmIv: null } },
+        { symbol: 'NIFTY', expiry: EXP, rec: { ts: t(10, 1), spot: Number.NaN } as unknown as ChainMinute },
+      ]),
+    ).toThrow(/2 chain minute writes failed/);
+    expect(again.chainSeries('NIFTY', EXP, D).map((r) => r.ts)).toEqual([t(10, 0)]);
   });
 
   it('prunes dates older than the retention window', () => {

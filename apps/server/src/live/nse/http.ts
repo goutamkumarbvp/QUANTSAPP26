@@ -211,6 +211,11 @@ export class NseHttp {
       const res = await this.sendWithRetry(req.url, this.headers(req.url, 'json', req.warmupUrl));
       if (res.status === 404) return { status: 'not-published', url: req.url, httpStatus: 404 };
       if (res.status === 401 || res.status === 403 || res.status === 429) {
+        // A 429 asking for a longer pause than we back off is a rate limit, not a cookie problem.
+        const ra = res.status === 429 ? retryAfterMs(res.headers.get('retry-after'), this.now()) : undefined;
+        if (ra !== undefined && ra > this.maxBackoffMs) {
+          throw new NseError(`${label}: rate limited (HTTP 429, Retry-After ${Math.round(ra / 1000)} s)`, 'blocked', req.url, res.status);
+        }
         if (!rewarmed) {
           rewarmed = true;
           this.log.info(`${label}: HTTP ${res.status}, re-warming cookies once`);
@@ -287,7 +292,9 @@ export class NseHttp {
       }
       let wait = Math.min(this.maxBackoffMs, this.backoffMs * 2 ** attempt);
       const ra = res ? retryAfterMs(res.headers.get('retry-after'), this.now()) : undefined;
-      if (ra !== undefined) wait = Math.min(this.maxBackoffMs, Math.max(wait, ra));
+      // Honour Retry-After (DESIGN.md §1.5): when it asks for more than maxBackoffMs, stop instead of retrying early.
+      if (ra !== undefined && ra > this.maxBackoffMs) return res!;
+      if (ra !== undefined) wait = Math.max(wait, ra);
       this.log.warn(`${fileLabel(url)}: ${err ? err.message : `HTTP ${res!.status}`}; retry ${attempt + 1}/${this.retries} in ${Math.round(wait / 1000)} s`);
       await this.sleep(wait);
     }

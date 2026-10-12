@@ -88,10 +88,12 @@ export async function fetchFiiDii(http: NseHttp, opts: { nseOnlyFallback?: boole
 
 /**
  * The app's FiiDiiDay; null when the NIFTY close/change of the same date is not known (the caller
- * then leaves the day out instead of showing a made-up NIFTY value).
+ * then leaves the day out instead of showing a made-up NIFTY value). The endpoint serves only the
+ * latest session, so a NIFTY close of another date is refused rather than joined.
  */
-export function toFiiDiiDay(flows: FiiDiiFlows, nifty: { close: number; changePct?: number } | undefined): FiiDiiDay | null {
-  if (!nifty || !Number.isFinite(nifty.close) || nifty.close <= 0) return null;
+export function toFiiDiiDay(flows: FiiDiiFlows, nifty: { date: string; close: number; changePct?: number } | undefined): FiiDiiDay | null {
+  if (!nifty || nifty.date !== flows.date) return null;
+  if (!Number.isFinite(nifty.close) || nifty.close <= 0) return null;
   if (nifty.changePct === undefined || !Number.isFinite(nifty.changePct)) return null;
   const { scope: _scope, ...v } = flows;
   return { ...v, niftyClose: nifty.close, niftyChangePct: nifty.changePct };

@@ -271,6 +271,17 @@ describe('ScripMaster', () => {
     const c = harness(dir, { ...ALL, nse_fo: { status: 503, text: 'busy' } });
     await expect(c.sm.refresh(DATE)).rejects.toThrow(/nse_fo download failed: HTTP 503/);
 
+    // A body cut off mid-download is a NoLiveData, not a raw stream error.
+    const cut = harness(dir, ALL, {
+      extra: {
+        fetch: async (url: string) =>
+          url.includes('/nse_fo') ? new Response(new ReadableStream({ pull: (ctl) => ctl.error(new Error('ECONNRESET')) })) : new Response(ALL[(['nse_cm', 'bse_cm', 'bse_fo'] as const).find((s) => url.includes(`/${s}`))!]!.text),
+      },
+    });
+    const err = await cut.sm.refresh(DATE).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoLiveData);
+    expect((err as Error).message).toMatch(/nse_fo download failed: ECONNRESET/);
+
     // Same instance, next day's files are bad: the refresh fails but the loaded master stays usable.
     const served: Files = { ...ALL };
     const ok = harness(dir, served);

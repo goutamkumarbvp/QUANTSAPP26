@@ -525,7 +525,12 @@ export class ScripMaster implements ReferenceData {
       throw new NoLiveData(`Scrip master ${seg} download failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (!res.ok) throw new NoLiveData(`Scrip master ${seg} download failed: HTTP ${res.status}`);
-    return res.text();
+    try {
+      return await res.text();
+    } catch (e) {
+      // A body cut off or timed out mid-download is a failed download, not a crash.
+      throw new NoLiveData(`Scrip master ${seg} download failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   private async prune(current: string) {

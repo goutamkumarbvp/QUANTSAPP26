@@ -55,7 +55,7 @@ describe('ind_close_all', () => {
       return [c[5], ...c.slice(0, 5), ...c.slice(6)].join(',');
     });
     const moved = parseIndCloseAll('﻿' + lines.join('\r\n'));
-    expect(niftyCloseOf(moved)).toEqual({ close: 25145.5, changePct: -0.32 });
+    expect(niftyCloseOf(moved)).toEqual({ date: '2025-10-14', close: 25145.5, changePct: -0.32 });
     expect(() => parseIndCloseAll(CSV.replace('Closing Index Value', 'Close'), { file: 'ind.csv' })).toThrow('ind.csv: required column "Closing Index Value" is missing');
     expect(() => parseIndCloseAll(CSV, { expectedDate: '2025-10-15' })).toThrow(/expected 2025-10-15/);
   });

@@ -395,6 +395,10 @@ export class SFeedClient {
   async close(): Promise<void> {
     this.stopped = true;
     this.clearTimer('reconnectTimer');
+    // A real socket reports its close asynchronously: no auth timeout, 1119 grace or late frame may
+    // turn into an auth failure (and a re-login) or a subscribe while the close is in flight.
+    this.clearTimer('phaseTimer');
+    this.clearTimer('graceTimer');
     const s = this.socket;
     if (!s) {
       this.lastError = undefined;
@@ -655,6 +659,7 @@ export class SFeedClient {
   }
 
   private onMessage(data: Uint8Array | string, isBinary: boolean): void {
+    if (this.stopped) return;
     this.alive = true;
     if (typeof data === 'string') this.onText(data);
     else if (isBinary) this.onBinary(data);
@@ -674,6 +679,8 @@ export class SFeedClient {
         else if (!this.authenticated && !this.graceTimer) {
           // 1119 "does not by itself indicate success" (official §3) yet is what production sends
           // (SDK fixture): succeed unless 1120 or a close follows within the grace (critic C9).
+          // It is an auth response, so the grace replaces the 15 s "no response" timeout.
+          this.clearTimer('phaseTimer');
           this.graceTimer = setTimeout(() => {
             this.graceTimer = null;
             this.markAuthenticated('1119');

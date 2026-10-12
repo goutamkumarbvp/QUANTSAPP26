@@ -251,6 +251,11 @@ export function parseFoUdiff(text: string, opts: FoParseOptions): FoBhavcopy {
     }
     volumeUnit = wanted;
   }
+  // Contracts → units needs the per-row lot size; without the column every traded row would be dropped
+  // and only untraded rows returned (a silently biased file).
+  if (volumeUnit === 'contracts' && !t.has('NewBrdLotQty')) {
+    throw new NseError(`${file}: required column "NewBrdLotQty" is missing (TtlTradgVol is in contracts)`, 'format');
+  }
 
   const options: BhavOption[] = [];
   const futures: BhavFuture[] = [];

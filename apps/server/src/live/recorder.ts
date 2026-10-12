@@ -12,8 +12,9 @@
  *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
  *    estimate, and only meaningful if the feed is per trade (critic U4).
  * Minute bucket = the tick's exchange timestamp (critic U7: LUT/LTT, epoch seconds on the wire).
- * Ticks dated another day, outside 09:15–15:30, without a price, or whose timestamp is further than
- * maxLag/maxLead from the clock (re-sent snapshots, skew) update state only. A tick for a minute
+ * Ticks dated another day, outside 09:15–15:30, without a price, whose LTT is another day (no trade
+ * yet today), or whose timestamp is further than maxLag/maxLead from the clock (re-sent snapshots,
+ * skew) update state only. A tick for a minute
  * that was already written is folded into the next open minute instead of rewriting history.
  */
 import { maxPain } from '@q26/core';
@@ -57,8 +58,8 @@ export interface RecorderStats {
   minutesWritten: number;
   chainMinutesWritten: number;
   /** Ticks that updated state only, by reason. */
-  stateOnly: { otherDate: number; outsideSession: number; noPrice: number; stale: number; ahead: number };
-  /** Chain minutes not written, by reason. */
+  stateOnly: { otherDate: number; outsideSession: number; noPrice: number; oldTrade: number; stale: number; ahead: number };
+  /** Chain minutes not written, by reason (noOi: no OI yet on the CE or the PE side). */
   chainSkipped: { noSpot: number; noOi: number };
   writeErrors: number;
   lastError?: string;
@@ -136,7 +137,7 @@ export class Recorder implements LiveBarSource {
     openBars: 0,
     minutesWritten: 0,
     chainMinutesWritten: 0,
-    stateOnly: { otherDate: 0, outsideSession: 0, noPrice: 0, stale: 0, ahead: 0 },
+    stateOnly: { otherDate: 0, outsideSession: 0, noPrice: 0, oldTrade: 0, stale: 0, ahead: 0 },
     chainSkipped: { noSpot: 0, noOi: 0 },
     writeErrors: 0,
   };
@@ -261,6 +262,9 @@ export class Recorder implements LiveBarSource {
 
     // Bar.
     if (!isPos(q.ltp)) return void this.st.stateOnly.noPrice++;
+    // A fresh packet (LUT today) can still carry the previous session's last trade (LTT another
+    // day, before the first trade today): that price is not a trade of this minute.
+    if (isNum(q.ltt) && calendar.session(q.ltt).date !== today) return void this.st.stateOnly.oldTrade++;
     if (q.ts < now - this.maxLagMs) return void this.st.stateOnly.stale++;
     if (q.ts > now + this.maxLeadMs) return void this.st.stateOnly.ahead++;
     if (at.status !== 'open') return void this.st.stateOnly.outsideSession++;
@@ -366,17 +370,19 @@ export class Recorder implements LiveBarSource {
     let peOi = 0;
     let ceVolume = 0;
     let peVolume = 0;
-    let oiSeen = 0;
+    let ceSeen = 0;
+    let peSeen = 0;
     const painRows: { strike: number; ceOI: number; peOI: number }[] = [];
     for (const row of rows.values()) {
-      if (row.ce?.oi !== undefined) (ceOi += row.ce.oi), oiSeen++;
-      if (row.pe?.oi !== undefined) (peOi += row.pe.oi), oiSeen++;
+      if (row.ce?.oi !== undefined) (ceOi += row.ce.oi), ceSeen++;
+      if (row.pe?.oi !== undefined) (peOi += row.pe.oi), peSeen++;
       ceVolume += row.ce?.vol ?? 0;
       peVolume += row.pe?.vol ?? 0;
       // Max pain only over strikes whose OI is known on both sides.
       if (row.ce?.oi !== undefined && row.pe?.oi !== undefined) painRows.push({ strike: row.strike, ceOI: row.ce.oi, peOI: row.pe.oi });
     }
-    if (!oiSeen) {
+    // Both sides must have reported OI: an unseen side would be written as ceOi/peOi 0 and PCR 0/∞.
+    if (!ceSeen || !peSeen) {
       this.st.chainSkipped.noOi++;
       return null;
     }

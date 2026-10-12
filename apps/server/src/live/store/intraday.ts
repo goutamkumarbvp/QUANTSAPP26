@@ -10,7 +10,8 @@
  * Each file is append-only JSONL, one minute per line, so a full day of ~3,000 instruments is ~3,000
  * small files: one bar series is one ~40 KB read, one chain is one directory of its strikes.
  * Crash safety: a write is a single append of whole lines; a torn last line is skipped on read and
- * trimmed before the next append, so earlier minutes are never lost. Two records of the same minute
+ * trimmed before the next append (a complete record that only lost its '\n' is kept), so earlier
+ * minutes are never lost. Two records of the same minute
  * (a restart inside a minute) are merged on read.
  */
 import fs from 'node:fs';
@@ -174,7 +175,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   private readonly root: string;
   private readonly cacheMax: number;
   /** path → parsed records (LRU by insertion order). */
-  private readonly cache = new Map<string, MinuteRecord[] | ChainMinute[]>();
+  private readonly cache = new Map<string, { ts: number }[]>();
   /** Files this process has already checked/repaired for a torn tail. */
   private readonly repaired = new Set<string>();
   private live: LiveBarSource | null = null;
@@ -216,7 +217,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
     return v as T[];
   }
 
-  private cacheSet(p: string, v: MinuteRecord[] | ChainMinute[]): void {
+  private cacheSet(p: string, v: { ts: number }[]): void {
     this.cache.delete(p);
     this.cache.set(p, v);
     while (this.cache.size > this.cacheMax) {
@@ -291,7 +292,13 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
         }
         end = start;
       }
-      fs.ftruncateSync(fd, cut);
+      // A tail that parses is a whole record that only lost its '\n' (records are flat objects, so a
+      // cut one never parses): keep it and terminate it; otherwise cut the torn fragment.
+      const tail = Buffer.alloc(size - cut);
+      fs.readSync(fd, tail, 0, tail.length, cut);
+      const [record] = parseLines(tail.toString('utf8'));
+      if (toMinuteRecord(record) ?? toChainMinute(record)) fs.writeSync(fd, '\n', size);
+      else fs.ftruncateSync(fd, cut);
     } finally {
       fs.closeSync(fd);
     }
@@ -299,42 +306,73 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
 
   private append(p: string, lines: string[]): void {
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    this.repairTail(p);
-    fs.appendFileSync(p, lines.join(''));
+    try {
+      this.repairTail(p);
+      fs.appendFileSync(p, lines.join(''));
+    } catch (e) {
+      this.repaired.delete(p); // a failed repair/append may have left a torn tail: re-check next time
+      throw e;
+    }
+  }
+
+  /**
+   * Group valid items by file and append each group. One bad item or one failing file must not
+   * drop the other instruments of the batch (the recorder flushes every quiet instrument in one
+   * call): those are written, and the first error is rethrown at the end.
+   */
+  private appendGroups<T extends { ts: number }>(
+    items: readonly { rec: unknown; label: () => string; file: (date: string) => string }[],
+    clean: (v: unknown) => T | undefined,
+    normalise: (list: T[]) => T[],
+    what: string,
+  ): void {
+    const errors: string[] = [];
+    let firstError: unknown;
+    const groups = new Map<string, T[]>();
+    for (const item of items) {
+      try {
+        const rec = clean(item.rec);
+        if (!rec) throw new Error(`invalid ${what} for ${item.label()}`);
+        const p = item.file(istParts(rec.ts).date);
+        let g = groups.get(p);
+        if (!g) groups.set(p, (g = []));
+        g.push(rec);
+      } catch (e) {
+        firstError ??= e;
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    for (const [p, recs] of groups) {
+      try {
+        this.append(p, recs.map((r) => `${JSON.stringify(r)}\n`));
+      } catch (e) {
+        firstError ??= e;
+        errors.push(e instanceof Error ? e.message : String(e));
+        continue;
+      }
+      const cached = this.cacheGet<T>(p);
+      if (cached) this.cacheSet(p, normalise([...cached, ...recs]));
+    }
+    if (errors.length === 1) throw firstError;
+    if (errors.length > 1) throw new Error(`${errors.length} ${what} writes failed: ${errors.slice(0, 5).join('; ')}`);
   }
 
   writeMinutes(items: readonly { key: InstrumentKey; rec: MinuteRecord }[]): void {
-    const groups = new Map<string, MinuteRecord[]>();
-    for (const { key, rec } of items) {
-      const clean = toMinuteRecord(rec);
-      if (!clean) throw new Error(`invalid minute record for ${keyId(key)}`);
-      const p = this.barPath(key, istParts(clean.ts).date);
-      let g = groups.get(p);
-      if (!g) groups.set(p, (g = []));
-      g.push(clean);
-    }
-    for (const [p, recs] of groups) {
-      this.append(p, recs.map((r) => `${JSON.stringify(r)}\n`));
-      const cached = this.cacheGet<MinuteRecord>(p);
-      if (cached) this.cacheSet(p, normaliseBars([...cached, ...recs]));
-    }
+    this.appendGroups(
+      items.map(({ key, rec }) => ({ rec, label: () => keyId(key), file: (date: string) => this.barPath(key, date) })),
+      toMinuteRecord,
+      normaliseBars,
+      'minute record',
+    );
   }
 
   writeChainMinutes(items: readonly { symbol: string; expiry: string; rec: ChainMinute }[]): void {
-    const groups = new Map<string, ChainMinute[]>();
-    for (const { symbol, expiry, rec } of items) {
-      const clean = toChainMinute(rec);
-      if (!clean) throw new Error(`invalid chain minute for ${symbol} ${expiry}`);
-      const p = this.chainPath(symbol, expiry, istParts(clean.ts).date);
-      let g = groups.get(p);
-      if (!g) groups.set(p, (g = []));
-      g.push(clean);
-    }
-    for (const [p, recs] of groups) {
-      this.append(p, recs.map((r) => `${JSON.stringify(r)}\n`));
-      const cached = this.cacheGet<ChainMinute>(p);
-      if (cached) this.cacheSet(p, normaliseChain([...cached, ...recs]));
-    }
+    this.appendGroups(
+      items.map(({ symbol, expiry, rec }) => ({ rec, label: () => `${symbol} ${expiry}`, file: (date: string) => this.chainPath(symbol, expiry, date) })),
+      toChainMinute,
+      normaliseChain,
+      'chain minute',
+    );
   }
 
   /** Remove date directories older than `retentionDays` calendar days before `today`. */

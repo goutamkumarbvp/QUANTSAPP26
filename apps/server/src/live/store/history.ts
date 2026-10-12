@@ -84,9 +84,10 @@ const OPT_KEYS: readonly (keyof DailyOption)[] = ['date', 'expiry', 'strike', 't
  *  - nearest expiry with at least one calendar day left after `date`;
  *  - only contracts that traded that day (volume > 0): NSE prints the previous close for untraded
  *    contracts and a theoretical SttlmPric (nse-bse-public-data.md §2), so neither is a premium;
- *  - forward: that expiry's future (settle, else close), else put-call parity at the strike nearest
+ *  - forward: that expiry's traded future (settle, else close), else put-call parity at the strike nearest
  *    the underlying close, else the underlying close carried at r;
- *  - IV: Black-76 average of CE/PE at the strike nearest the forward (pricing.atmIvOf).
+ *  - ATM strike: nearest the underlying close (nearest the forward when there is no close);
+ *  - IV: Black-76 (off that forward) average of CE/PE at the ATM strike (pricing.atmIvOf).
  */
 export function eodAtmIv(input: { date: string; underlying?: number; options: readonly DailyOption[]; futures: readonly DailyFuture[]; r: number }): CachedIv {
   const { date, options, futures, r } = input;
@@ -105,12 +106,13 @@ export function eodAtmIv(input: { date: string; underlying?: number; options: re
     else if (o.type === 'PE') row.pe = o.close;
   }
   const rows = [...byStrike.values()];
-  const fut = futures.find((f) => f.expiry === expiry);
+  // Same rule for the future: an untraded one carries a previous/theoretical price, not a market forward.
+  const fut = futures.find((f) => f.expiry === expiry && f.volume > 0);
   const future = fut ? (isPos(fut.settle) ? fut.settle : isPos(fut.close) ? fut.close : undefined) : undefined;
   const T = timeToExpiry(expiry, istTs(date, MARKET_CLOSE_MIN));
   const fwd = forwardOf({ spot, future, rows }, T, r);
   if (!fwd) return null;
-  const atm = atmIvOf(rows, fwd.forward, T, r);
+  const atm = atmIvOf(rows, fwd.forward, T, r, spot ?? fwd.forward);
   return atm ? { iv: atm.iv, expiry } : null;
 }
 

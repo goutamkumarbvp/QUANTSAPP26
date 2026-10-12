@@ -180,6 +180,20 @@ describe('NseHttp JSON API', () => {
     await expect(b.http.getJson({ url: API, warmupUrl: PAGE })).rejects.toMatchObject({ kind: 'format' });
   });
 
+  it('honours a Retry-After longer than the backoff cap: no early retries, no re-warm', async () => {
+    const slow = () => new Response('slow', { status: 429, headers: { 'retry-after': '600' } });
+    const { http, calls } = testHttp({ [PAGE]: html(200), [API]: slow });
+    await expect(http.getJson({ url: API, warmupUrl: PAGE })).rejects.toMatchObject({ kind: 'blocked', httpStatus: 429, message: expect.stringContaining('Retry-After 600 s') });
+    expect(calls.map((c) => c.url)).toEqual([PAGE, API]);
+  });
+
+  it('a short Retry-After is waited out', async () => {
+    const { http, calls, clock } = testHttp({ [PAGE]: html(200), [API]: [text('slow', 429, [['retry-after', '5']]), json([])] });
+    expect((await http.getJson({ url: API, warmupUrl: PAGE })).status).toBe('ok');
+    expect(calls.map((c) => c.url)).toEqual([PAGE, API, API]);
+    expect(clock.sleeps).toContain(5000);
+  });
+
   it('drops a cookie the server expires', async () => {
     const { http, calls } = testHttp({ [PAGE]: [html(200, ['a=1', 'b=2']), html(200, ['a=; Max-Age=0'])], [API]: json({}) });
     await http.warmUp(PAGE);

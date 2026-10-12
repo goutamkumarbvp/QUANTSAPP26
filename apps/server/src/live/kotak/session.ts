@@ -248,7 +248,8 @@ export class KotakSession {
   /**
    * One TOTP login + MPIN validate attempt (shared by concurrent callers). Throws KotakError
    * kind 'login' on failure, or immediately while automatic logins are blocked after failures
-   * (`force` skips the failure back-off but never a 429 back-off).
+   * (`force` skips the failure back-off but never a 429 back-off), and kind 'rate-limit' while
+   * the shared limiter is paused for longer than `maxInlineRetryWaitMs`.
    */
   login(opts: { force?: boolean } = {}): Promise<void> {
     if (this.loginInFlight) return this.loginInFlight;
@@ -257,6 +258,11 @@ export class KotakSession {
       return Promise.reject(
         new KotakError(`Kotak login on hold until ${new Date(this.blockedUntil).toISOString()} after: ${this.lastError ?? 'previous failure'}`, 'login'),
       );
+    }
+    // A long 429 pause would otherwise park the login (and every caller waiting on it) for hours.
+    const held = this.limiter.pausedMs('general');
+    if (held > this.maxInlineRetryWaitMs) {
+      return Promise.reject(new KotakError(`Kotak login held for ${Math.ceil(held / 1000)} s: Kotak REST is paused after a rate limit`, 'rate-limit', undefined, undefined, held));
     }
     this.loginInFlight = this.doLogin().finally(() => {
       this.loginInFlight = null;
@@ -478,8 +484,15 @@ export class KotakSession {
     const lane = opts.lane ?? 'general';
 
     for (let attempt = 0; ; attempt++) {
+      // Fail fast while a 429 holds the lane for long (multi-hour lockouts, kotak-rest-auth.md §5):
+      // queuing would hang callers for the whole pause and release a burst of stale calls after it.
+      const held = this.limiter.pausedMs(lane);
+      if (held > this.maxInlineRetryWaitMs) {
+        throw new KotakError(`Kotak rate limit on ${label}; paused ${Math.ceil(held / 1000)} s`, 'rate-limit', undefined, undefined, held);
+      }
       await this.limiter.acquire(lane, opts.signal);
       let res: Response;
+      let text: string;
       try {
         const timeout = AbortSignal.timeout(this.timeoutMs);
         res = await this.fetchFn(url, {
@@ -489,11 +502,13 @@ export class KotakSession {
           // AbortSignal.any needs Node ≥ 20.3; without it the caller's signal still stops the queue wait.
           signal: opts.signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([opts.signal, timeout]) : timeout,
         });
+        // The body read can still time out or be cut off: that is a network error too, not a crash.
+        text = await res.text();
       } catch (e) {
         throw new KotakError(`Kotak ${label}: network error (${this.scrub(e instanceof Error ? e.message : String(e))})`, 'network');
       }
       this.noteRateHeaders(res.headers);
-      const body = parseJson(await res.text());
+      const body = parseJson(text);
       const stCode = stCodeOf(body);
       const msg = () => this.scrub(kotakErrorMessage(body) ?? `HTTP ${res.status}`);
 
@@ -568,6 +583,8 @@ export class KotakSession {
 
   private scrub(text: string): string {
     const s = this.session;
-    return scrubSecrets(text, [this.creds.consumerKey, this.creds.totpSecret, this.creds.mpin, this.creds.mobileNumber, s?.token, s?.sid]);
+    // The UCC is a credential too (DESIGN.md §1.4); servers may echo the mobile without its +91.
+    const national = this.creds.mobileNumber.startsWith('+91') ? this.creds.mobileNumber.slice(3) : undefined;
+    return scrubSecrets(text, [this.creds.consumerKey, this.creds.totpSecret, this.creds.mpin, this.creds.mobileNumber, national, this.creds.ucc, s?.token, s?.sid]);
   }
 }

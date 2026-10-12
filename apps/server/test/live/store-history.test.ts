@@ -107,14 +107,14 @@ describe('HistoryFiles', () => {
     const s = new HistoryFiles({ dataDir: dir, r: R });
     const strikes = [24_800, 24_900, 25_000, 25_100, 25_200];
     const options = [
-      ...pricedChain('NIFTY', date, '2026-10-20', 25_040, (K, t) => (K === 25_000 ? (t === 'CE' ? 0.11 : 0.13) : 0.12), strikes),
+      ...pricedChain('NIFTY', date, '2026-10-20', 25_040, (K) => (K === 24_900 ? 0.12 : 0.15), strikes),
       // Expiring today: excluded (no day left), even though it traded.
       optRow('NIFTY', date, date, 25_000, 'CE', 5),
       optRow('NIFTY', date, date, 25_000, 'PE', 3),
     ];
     s.writeFo(date, { options });
     s.writeDailyBars('index', date, [{ symbol: 'NIFTY', date, open: 24_900, high: 25_100, low: 24_880, close: 24_905 }]);
-    // Underlying 24,905 → parity at 24,900 gives F = 25,040; ATM by forward = 25,000 → (0.11 + 0.13) / 2.
+    // Underlying 24,905 → parity at 24,900 gives F = 25,040; ATM by underlying = 24,900 → 0.12 (ATM by forward would be 25,000 → 0.15).
     const out = s.dailyAtmIv('NIFTY', '2026-10-01', '2026-10-31');
     expect(out).toHaveLength(1);
     expect(out[0].date).toBe(date);
@@ -125,15 +125,21 @@ describe('HistoryFiles', () => {
   it('uses the same-expiry future settle as the forward and skips untraded strikes', () => {
     const date = '2026-10-13';
     const strikes = [24_900, 25_000, 25_100];
-    const options = pricedChain('BANKNIFTY', date, '2026-10-27', 25_100, () => 0.15, strikes).map((o) =>
+    const options = pricedChain('BANKNIFTY', date, '2026-10-27', 25_100, (K) => (K === 24_900 ? 0.15 : 0.2), strikes).map((o) =>
       // 25,100 did not trade: NSE prints a carried close and a theoretical settle; neither may be used.
       o.strike === 25_100 ? { ...o, close: 999, volume: 0 } : o,
     );
     const futures = [fut('BANKNIFTY', date, '2026-10-27', 25_090, { settle: 25_100 })];
-    const iv = eodAtmIv({ date, underlying: 25_000, options, futures, r: R });
+    const iv = eodAtmIv({ date, underlying: 24_920, options, futures, r: R });
     expect(iv?.expiry).toBe('2026-10-27');
-    expect(iv?.iv).toBeCloseTo(0.15, 6); // ATM by forward 25,100 → nearest traded strike 25,000
+    expect(iv?.iv).toBeCloseTo(0.15, 6); // ATM by underlying 24,920 → 24,900, priced off F = 25,100
+    // Without an underlying close: forward 25,100 for both the price and the ATM → nearest traded 25,000.
+    expect(eodAtmIv({ date, options, futures, r: R })?.iv).toBeCloseTo(0.2, 6);
     expect(eodAtmIv({ date, options: [], futures, r: R })).toBeNull();
+    // An untraded future (carried close / theoretical settle) is not a forward: parity is used instead.
+    const untraded = [fut('BANKNIFTY', date, '2026-10-27', 26_000, { settle: 26_000, volume: 0 })];
+    const viaParity = pricedChain('BANKNIFTY', date, '2026-10-27', 25_100, () => 0.18, strikes);
+    expect(eodAtmIv({ date, underlying: 24_920, options: viaParity, futures: untraded, r: R })?.iv).toBeCloseTo(0.18, 6);
   });
 
   it('caches daily ATM IV on disk and recomputes when inputs change', () => {

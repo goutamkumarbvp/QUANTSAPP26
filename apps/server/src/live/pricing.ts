@@ -103,17 +103,19 @@ export function black76Greeks(type: OptKind, F: number, K: number, T: number, r:
 }
 
 /**
- * ATM IV: the strike nearest the forward among strikes with both premiums (any premium when no
- * strike has both); the average of the CE/PE IVs that solve there. Null when none solves.
+ * ATM IV: the strike nearest `atm` (default the forward) among strikes with both premiums (any
+ * premium when no strike has both); the average of the CE/PE IVs that solve there, priced off F.
+ * Null when none solves.
  */
-export function atmIvOf(rows: readonly PremiumRow[], F: number, T: number, r: number): { iv: number; strike: number } | null {
+export function atmIvOf(rows: readonly PremiumRow[], F: number, T: number, r: number, atm: number = F): { iv: number; strike: number } | null {
   if (!isPos(F) || !(T > 0)) return null;
+  const ref = isPos(atm) ? atm : F;
   const both = rows.filter((row) => isPos(row.strike) && isPos(row.ce) && isPos(row.pe));
   const pool = both.length ? both : rows.filter((row) => isPos(row.strike) && (isPos(row.ce) || isPos(row.pe)));
   if (!pool.length) return null;
   let best = pool[0];
   for (const row of pool) {
-    const d = Math.abs(row.strike - F) - Math.abs(best.strike - F);
+    const d = Math.abs(row.strike - ref) - Math.abs(best.strike - ref);
     if (d < 0 || (d === 0 && row.strike < best.strike)) best = row;
   }
   const ivs: number[] = [];

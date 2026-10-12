@@ -146,6 +146,12 @@ export class RateLimiter {
     this.pump();
   }
 
+  /** Remaining pause (ms) a new request on `lane` would wait for ('general' holds both lanes). */
+  pausedMs(lane: Lane = 'general'): number {
+    const until = Math.max(this.pausedUntil.general, lane === 'slow' ? this.pausedUntil.slow : 0);
+    return Math.max(0, until - this.timers.now());
+  }
+
   /** Reject every queued and future request (server shutdown). */
   abort(reason = 'Kotak REST limiter shut down'): void {
     this.closed = reason;

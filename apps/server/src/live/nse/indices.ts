@@ -111,10 +111,10 @@ export function indexClose(file: IndexCloseFile, symbol: string): IndexClose | u
   return file.closes.find((c) => c.symbol === symbol.toUpperCase());
 }
 
-/** NIFTY close and change % for FiiDiiDay / ParticipantDay (§5 "Mapping"); undefined when not in the file. */
-export function niftyCloseOf(file: IndexCloseFile): { close: number; changePct?: number } | undefined {
+/** NIFTY close and change % (with their date) for FiiDiiDay / ParticipantDay (§5 "Mapping"); undefined when not in the file. */
+export function niftyCloseOf(file: IndexCloseFile): { date: string; close: number; changePct?: number } | undefined {
   const n = indexClose(file, 'NIFTY');
-  return n ? { close: n.close, changePct: n.changePct } : undefined;
+  return n ? { date: n.date, close: n.close, changePct: n.changePct } : undefined;
 }
 
 /** Plain DailyBar of one index (drops the extra file columns). */

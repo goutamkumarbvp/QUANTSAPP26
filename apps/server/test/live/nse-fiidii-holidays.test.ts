@@ -62,7 +62,7 @@ describe('FII/DII', () => {
 
   it('builds FiiDiiDay only with the same day\'s real NIFTY close and change', () => {
     const flows = parseFiiDii(FIIDII);
-    expect(toFiiDiiDay(flows, { close: 25145.5, changePct: -0.32 })).toEqual({
+    expect(toFiiDiiDay(flows, { date: '2026-10-09', close: 25145.5, changePct: -0.32 })).toEqual({
       date: '2026-10-09',
       fiiBuy: 9876.5,
       fiiSell: 11000,
@@ -74,8 +74,10 @@ describe('FII/DII', () => {
       niftyChangePct: -0.32,
     });
     expect(toFiiDiiDay(flows, undefined)).toBeNull();
-    expect(toFiiDiiDay(flows, { close: 25145.5 })).toBeNull();
-    expect(toFiiDiiDay(flows, { close: Number.NaN, changePct: 1 })).toBeNull();
+    expect(toFiiDiiDay(flows, { date: '2026-10-09', close: 25145.5 })).toBeNull();
+    expect(toFiiDiiDay(flows, { date: '2026-10-09', close: Number.NaN, changePct: 1 })).toBeNull();
+    // A NIFTY close of another session is never joined (the endpoint serves only the latest day).
+    expect(toFiiDiiDay(flows, { date: '2026-10-08', close: 25145.5, changePct: -0.32 })).toBeNull();
   });
 });
 

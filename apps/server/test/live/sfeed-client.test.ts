@@ -187,6 +187,19 @@ describe('SFeedClient authentication', () => {
     expect(h.authErrors).toEqual([]);
   });
 
+  it('a late 1119 is an auth response: the 15 s timeout does not cut its grace short', () => {
+    const h = harness();
+    h.client.connect();
+    h.last().open();
+    vi.advanceTimersByTime(13_000);
+    h.last().text(AUTH_1119);
+    vi.advanceTimersByTime(2_999);
+    expect(h.authErrors).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(h.client.health().authenticated).toBe(true);
+    expect(h.authErrors).toEqual([]);
+  });
+
   it('authenticates at once when 1117 follows 1119', () => {
     const h = harness();
     h.client.connect();
@@ -630,6 +643,34 @@ describe('SFeedClient reconnect and keepalive', () => {
     await done;
     expect(s.terminated).toBe(true);
     expect(h.client.health().connected).toBe(false);
+  });
+
+  it('close() during the handshake ignores late auth frames and timers while the close is in flight', async () => {
+    // A real `ws` socket reports its close event asynchronously; frames and timers can fire meanwhile.
+    for (const late of ['1120', 'timeout', '1119'] as const) {
+      const h = harness();
+      h.client.subscribe([scrip('1')]);
+      h.client.connect();
+      const s = h.last();
+      s.close = (code, reason) => {
+        s.closeCalls.push([code, reason]);
+      };
+      s.open();
+      // 1119 grace ends at 3 s and the auth timeout at 15 s: both fall inside the 2 s close window.
+      if (late === '1119') s.text(AUTH_1119);
+      vi.advanceTimersByTime(late === '1119' ? 2_500 : 14_000);
+      const done = h.client.close();
+      if (late === '1120') s.text(AUTH_1120);
+      vi.advanceTimersByTime(1_999);
+      expect(h.authErrors).toEqual([]);
+      expect(h.client.health().authenticated).toBe(false);
+      expect(s.control()).toEqual([]);
+      vi.advanceTimersByTime(1);
+      await done;
+      vi.advanceTimersByTime(60_000);
+      expect(h.authErrors).toEqual([]);
+      expect(h.sockets).toHaveLength(1);
+    }
   });
 
   it('connect() right after an un-awaited close() finishes that close first', async () => {

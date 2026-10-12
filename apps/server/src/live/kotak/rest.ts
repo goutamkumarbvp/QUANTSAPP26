@@ -433,6 +433,11 @@ export const HIST_MAX_DAYS: Record<HistInterval, number> = {
   W: 180,
 };
 
+/**
+ * One candle. There is deliberately no OI: the row's 7th position is "Phase 1: not yet populated"
+ * (historical-data.md; maintainer, issue #39), and the official sample even carries a non-zero
+ * value there for a cash stock (nse_cm|1333), which cannot have OI. Re-add once Kotak ships it.
+ */
 export interface KotakCandle {
   ts: number;
   open: number;
@@ -440,8 +445,6 @@ export interface KotakCandle {
   low: number;
   close: number;
   volume: number;
-  /** Only when positive: the backend does not populate OI yet ("Phase 1"). */
-  oi?: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -477,7 +480,7 @@ export function parseKotakTimestamp(v: unknown): number | undefined {
   return Number.isFinite(t) ? t : undefined;
 }
 
-function candleFrom(ts: unknown, o: unknown, h: unknown, l: unknown, c: unknown, v: unknown, oi: unknown): KotakCandle | null {
+function candleFrom(ts: unknown, o: unknown, h: unknown, l: unknown, c: unknown, v: unknown): KotakCandle | null {
   const t = parseKotakTimestamp(ts);
   const open = pos(o);
   const high = pos(h);
@@ -485,8 +488,7 @@ function candleFrom(ts: unknown, o: unknown, h: unknown, l: unknown, c: unknown,
   const close = pos(c);
   const volume = nonNeg(v);
   if (t === undefined || open === undefined || high === undefined || low === undefined || close === undefined || volume === undefined) return null;
-  const oin = pos(oi);
-  return compact<KotakCandle>({ ts: t, open, high, low, close, volume, oi: oin });
+  return { ts: t, open, high, low, close, volume };
 }
 
 const pick = (o: Json, keys: string[]): unknown => {
@@ -499,10 +501,10 @@ const H_KEYS = ['high', 'h'];
 const L_KEYS = ['low', 'l'];
 const C_KEYS = ['close', 'c'];
 const V_KEYS = ['volume', 'vol', 'v'];
-const OI_KEYS = ['oi', 'openInterest', 'open_interest'];
 
 /**
- * Documented shape: `{status:'success', data:{candles:[[ts,o,h,l,c,v,oi],…]}}`. Also accepted
+ * Documented shape: `{status:'success', data:{candles:[[ts,o,h,l,c,v,oi],…]}}` (oi ignored, see
+ * KotakCandle). Also accepted
  * (defensively): object rows, and the legacy parallel-array shape `{data:{t:[],o:[],…}}`
  * (named in historical_data.md as the previous format; its exact keys are not documented).
  */
@@ -513,9 +515,9 @@ export function parseCandles(body: unknown): KotakCandle[] {
   if (Array.isArray(d.candles)) {
     for (const r of d.candles) {
       const c = Array.isArray(r)
-        ? candleFrom(r[0], r[1], r[2], r[3], r[4], r[5], r[6])
+        ? candleFrom(r[0], r[1], r[2], r[3], r[4], r[5])
         : isObj(r)
-          ? candleFrom(pick(r, TS_KEYS), pick(r, O_KEYS), pick(r, H_KEYS), pick(r, L_KEYS), pick(r, C_KEYS), pick(r, V_KEYS), pick(r, OI_KEYS))
+          ? candleFrom(pick(r, TS_KEYS), pick(r, O_KEYS), pick(r, H_KEYS), pick(r, L_KEYS), pick(r, C_KEYS), pick(r, V_KEYS))
           : null;
       if (c) out.push(c);
     }
@@ -523,11 +525,10 @@ export function parseCandles(body: unknown): KotakCandle[] {
     const cols = [TS_KEYS, O_KEYS, H_KEYS, L_KEYS, C_KEYS, V_KEYS].map((ks) => pick(d, ks));
     if (!cols.every(Array.isArray)) throw new KotakError('Kotak historical: unexpected response shape', 'protocol');
     const [ts, o, h, l, c, v] = cols as unknown[][];
-    const oi = pick(d, OI_KEYS);
     const n = ts.length;
     if ([o, h, l, c, v].some((a) => a.length !== n)) throw new KotakError('Kotak historical: parallel arrays of different lengths', 'protocol');
     for (let i = 0; i < n; i++) {
-      const candle = candleFrom(ts[i], o[i], h[i], l[i], c[i], v[i], Array.isArray(oi) ? oi[i] : undefined);
+      const candle = candleFrom(ts[i], o[i], h[i], l[i], c[i], v[i]);
       if (candle) out.push(candle);
     }
   }
