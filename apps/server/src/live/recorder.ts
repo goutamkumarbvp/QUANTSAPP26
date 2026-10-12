@@ -1,0 +1,509 @@
+/**
+ * Recorder (DESIGN.md §1.3, app-dependency-map.md §12): turns live ticks into per-minute records
+ * and per-minute chain aggregates in the intraday store. It records only what it sees: a minute
+ * without ticks is not written (gaps stay gaps), the first tick of an instrument only sets the
+ * cumulative-volume baseline, and nothing is carried into minutes that had no ticks.
+ *
+ * Per instrument and minute:
+ *  - OHLC from LTP; volume = Δ cumulative session volume between ticks (decreases ignored; the
+ *    baseline is the highest volume seen today, so out-of-order packets are not double counted);
+ *  - oi / bid / ask / total buy & sell qty / ATP = last value seen;
+ *  - each positive Δvolume is classified with the quote rule against the bid/ask seen BEFORE the
+ *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
+ *    estimate, and only meaningful if the feed is per trade (critic U4).
+ * Minute bucket = the tick's exchange timestamp (critic U7: LUT/LTT, epoch seconds on the wire).
+ * Ticks dated another day, outside 09:15–15:30, without a price, or whose timestamp is further than
+ * maxLag/maxLead from the clock (re-sent snapshots, skew) update state only. A tick for a minute
+ * that was already written is folded into the next open minute instead of rewriting history.
+ */
+import { maxPain } from '@q26/core';
+import { chainAtmIv } from './pricing';
+import type { IntradayWriter, LiveBarSource } from './store/intraday';
+import { keyId } from './types';
+import type { ChainMinute, ChainRowLive, InstrumentKey, LiveMarket, LiveQuote, MinuteRecord, Pricing, RawChain, ReferenceData, SessionClock, TradingCalendar } from './types';
+
+const MINUTE_MS = 60_000;
+
+export interface RecorderTimers {
+  setInterval(fn: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+export interface RecorderOptions {
+  live: Pick<LiveMarket, 'onTick'> & Partial<Pick<LiveMarket, 'quote'>>;
+  writer: IntradayWriter;
+  /** Only `r` is used: ATM IV is solved on the recorded minute-close premiums (pricing.chainAtmIv). */
+  pricing: Pick<Pricing, 'r'>;
+  calendar: TradingCalendar;
+  clock: SessionClock;
+  /** Listed strikes for the ATM strike (strikes seen in ticks when absent / not loaded). */
+  ref?: Pick<ReferenceData, 'strikes'>;
+  /** Flush poll interval, default 1,000 ms. */
+  flushIntervalMs?: number;
+  /** The timer writes a minute once the clock is this far past its end, default 1,500 ms. */
+  graceMs?: number;
+  /** Ticks older than clock − maxLagMs are state-only, default 60 s. */
+  maxLagMs?: number;
+  /** Ticks newer than clock + maxLeadMs are state-only, default 60 s. */
+  maxLeadMs?: number;
+  timers?: RecorderTimers;
+  onError?: (e: unknown) => void;
+}
+
+export interface RecorderStats {
+  date: string | null;
+  instruments: number;
+  openBars: number;
+  minutesWritten: number;
+  chainMinutesWritten: number;
+  /** Ticks that updated state only, by reason. */
+  stateOnly: { otherDate: number; outsideSession: number; noPrice: number; stale: number; ahead: number };
+  /** Chain minutes not written, by reason. */
+  chainSkipped: { noSpot: number; noOi: number };
+  writeErrors: number;
+  lastError?: string;
+}
+
+export interface SessionSummary {
+  date: string;
+  instruments: number;
+  minutesWritten: number;
+  chainMinutesWritten: number;
+}
+
+/** Latest known values at the end of a clock minute (for chain aggregates). */
+interface Snap {
+  m: number;
+  ltp?: number;
+  oi?: number;
+  vol?: number;
+}
+
+interface Inst {
+  key: InstrumentKey;
+  id: string;
+  bar: MinuteRecord | null;
+  /** ts of the last written minute. */
+  lastWritten: number;
+  /** Highest cumulative volume seen today (baseline). */
+  cumVol?: number;
+  tracksVolume: boolean;
+  ltp?: number;
+  oi?: number;
+  bid?: number;
+  ask?: number;
+  totalBuyQty?: number;
+  totalSellQty?: number;
+  atp?: number;
+  snaps: Snap[];
+}
+
+interface ChainReg {
+  symbol: string;
+  expiry: string;
+  options: Set<Inst>;
+}
+
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isPos = (v: unknown): v is number => isNum(v) && v > 0;
+const minuteOf = (ts: number): number => Math.floor(ts / MINUTE_MS) * MINUTE_MS;
+
+const realTimers: RecorderTimers = {
+  setInterval: (fn, ms) => {
+    const h = setInterval(fn, ms);
+    h.unref?.();
+    return h;
+  },
+  clearInterval: (h) => clearInterval(h as ReturnType<typeof setInterval>),
+};
+
+export class Recorder implements LiveBarSource {
+  private readonly insts = new Map<string, Inst>();
+  private readonly chains = new Map<string, ChainReg>();
+  /** Chains registered with trackChain(); they survive day resets. */
+  private readonly tracked = new Map<string, { symbol: string; expiry: string }>();
+  private date: string | null = null;
+  private lastChainTs = -Infinity;
+  private unsubscribe: (() => void) | null = null;
+  private timer: unknown = null;
+  private readonly graceMs: number;
+  private readonly maxLagMs: number;
+  private readonly maxLeadMs: number;
+  private readonly timers: RecorderTimers;
+  private readonly st: RecorderStats = {
+    date: null,
+    instruments: 0,
+    openBars: 0,
+    minutesWritten: 0,
+    chainMinutesWritten: 0,
+    stateOnly: { otherDate: 0, outsideSession: 0, noPrice: 0, stale: 0, ahead: 0 },
+    chainSkipped: { noSpot: 0, noOi: 0 },
+    writeErrors: 0,
+  };
+  private sessionWritten = { minutes: 0, chains: 0 };
+
+  constructor(private readonly opts: RecorderOptions) {
+    this.graceMs = opts.graceMs ?? 1500;
+    this.maxLagMs = opts.maxLagMs ?? 60_000;
+    this.maxLeadMs = opts.maxLeadMs ?? 60_000;
+    this.timers = opts.timers ?? realTimers;
+  }
+
+  /* ---------------------------------- lifecycle ---------------------------------- */
+
+  /** Subscribe to ticks and start the flush timer (idempotent). */
+  start(): void {
+    if (!this.unsubscribe) this.unsubscribe = this.opts.live.onTick((q) => this.onTick(q));
+    if (this.timer === null) this.timer = this.timers.setInterval(() => this.flushDue(), this.opts.flushIntervalMs ?? 1000);
+  }
+
+  /** Write everything in progress (a partial minute is merged with its continuation on read) and detach. */
+  stop(): SessionSummary | null {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    if (this.timer !== null) this.timers.clearInterval(this.timer);
+    this.timer = null;
+    return this.date ? this.endSession() : null;
+  }
+
+  /**
+   * Session-open hook (~09:00 IST): ends a previous date still open, resets per-day state, applies
+   * store retention and starts recording. Calling it again for the active date is a no-op.
+   */
+  startSession(date?: string): void {
+    const d = date ?? this.opts.calendar.session(this.opts.clock.now()).date;
+    if (this.date !== d) {
+      if (this.date) this.endSession();
+      this.resetDay(d);
+    }
+    try {
+      this.opts.writer.prune?.(d);
+    } catch (e) {
+      this.fail(e);
+    }
+    this.start();
+  }
+
+  /** Session-close hook (after 15:30 IST): writes every open minute and the last chain minute, then clears the day. */
+  endSession(): SessionSummary | null {
+    const date = this.date;
+    if (!date) return null;
+    const items: { key: InstrumentKey; rec: MinuteRecord }[] = [];
+    for (const inst of this.insts.values()) {
+      const rec = this.takeBar(inst);
+      if (rec) items.push({ key: inst.key, rec });
+    }
+    this.write(items);
+    // Chain aggregate of the last minute that started at or before now (and inside the session).
+    const now = this.opts.clock.now();
+    const last = minuteOf(Math.min(now, this.opts.calendar.ts(date, 375)) - 1);
+    if (last > this.lastChainTs && this.inSession(last, date)) this.writeChains(last);
+    const summary: SessionSummary = { date, instruments: this.insts.size, minutesWritten: this.sessionWritten.minutes, chainMinutesWritten: this.sessionWritten.chains };
+    this.resetDay(null);
+    return summary;
+  }
+
+  /** Aggregate this chain every minute even before its first tick. */
+  trackChain(symbol: string, expiry: string): void {
+    this.tracked.set(`${symbol}|${expiry}`, { symbol, expiry });
+    this.chainReg(symbol, expiry);
+  }
+
+  /* ---------------------------------- reads ---------------------------------- */
+
+  liveBar(key: InstrumentKey): MinuteRecord | null {
+    const bar = this.insts.get(keyId(key))?.bar;
+    return bar ? { ...bar } : null;
+  }
+
+  stats(): RecorderStats {
+    let open = 0;
+    for (const i of this.insts.values()) if (i.bar) open++;
+    return { ...this.st, date: this.date, instruments: this.insts.size, openBars: open, stateOnly: { ...this.st.stateOnly }, chainSkipped: { ...this.st.chainSkipped } };
+  }
+
+  /* ---------------------------------- ticks ---------------------------------- */
+
+  onTick(q: LiveQuote): void {
+    const { calendar, clock } = this.opts;
+    const now = clock.now();
+    const today = calendar.session(now).date;
+    const at = calendar.session(q.ts);
+    // A packet stamped another day (e.g. yesterday's snapshot) must not touch today's baselines.
+    if (at.date !== today) {
+      this.st.stateOnly.otherDate++;
+      return;
+    }
+    if (this.date !== today) {
+      if (this.date) this.endSession();
+      this.resetDay(today);
+    }
+    const inst = this.inst(q.key);
+
+    // State: classification uses the quote seen BEFORE this tick.
+    const prevBid = inst.bid;
+    const prevAsk = inst.ask;
+    let dv = 0;
+    if (isNum(q.volume) && q.volume >= 0) {
+      inst.tracksVolume = true;
+      if (inst.cumVol !== undefined && q.volume > inst.cumVol) dv = q.volume - inst.cumVol;
+      if (inst.cumVol === undefined || q.volume > inst.cumVol) inst.cumVol = q.volume;
+    }
+    if (isPos(q.ltp)) inst.ltp = q.ltp;
+    if (isNum(q.oi) && q.oi >= 0) inst.oi = q.oi;
+    if (isPos(q.bid)) inst.bid = q.bid;
+    if (isPos(q.ask)) inst.ask = q.ask;
+    if (isNum(q.totalBuyQty) && q.totalBuyQty >= 0) inst.totalBuyQty = q.totalBuyQty;
+    if (isNum(q.totalSellQty) && q.totalSellQty >= 0) inst.totalSellQty = q.totalSellQty;
+    if (isPos(q.atp)) inst.atp = q.atp;
+    this.snap(inst, now);
+    if ((q.key.kind === 'CE' || q.key.kind === 'PE') && q.key.expiry) this.chainReg(q.key.symbol, q.key.expiry).options.add(inst);
+
+    // Bar.
+    if (!isPos(q.ltp)) return void this.st.stateOnly.noPrice++;
+    if (q.ts < now - this.maxLagMs) return void this.st.stateOnly.stale++;
+    if (q.ts > now + this.maxLeadMs) return void this.st.stateOnly.ahead++;
+    if (at.status !== 'open') return void this.st.stateOnly.outsideSession++;
+    let m = minuteOf(q.ts);
+    if (inst.bar && inst.bar.ts > m) m = inst.bar.ts;
+    if (inst.lastWritten + MINUTE_MS > m) m = inst.lastWritten + MINUTE_MS;
+    if (!this.inSession(m, today)) return void this.st.stateOnly.outsideSession++;
+
+    if (inst.bar && m > inst.bar.ts) {
+      const done = this.takeBar(inst);
+      if (done) this.write([{ key: inst.key, rec: done }]);
+    }
+    let bar = inst.bar;
+    if (!bar) bar = inst.bar = { ts: m, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp, volume: 0 };
+    bar.high = Math.max(bar.high, q.ltp);
+    bar.low = Math.min(bar.low, q.ltp);
+    bar.close = q.ltp;
+    if (inst.tracksVolume && bar.buyVolume === undefined) {
+      bar.buyVolume = 0;
+      bar.sellVolume = 0;
+      bar.unclassified = 0;
+    }
+    if (dv > 0) {
+      bar.volume += dv;
+      const sane = isPos(prevBid) && isPos(prevAsk) && prevBid < prevAsk;
+      if (sane && q.ltp >= prevAsk) bar.buyVolume = (bar.buyVolume ?? 0) + dv;
+      else if (sane && q.ltp <= prevBid) bar.sellVolume = (bar.sellVolume ?? 0) + dv;
+      else bar.unclassified = (bar.unclassified ?? 0) + dv;
+    }
+    if (inst.oi !== undefined) bar.oi = inst.oi;
+    if (inst.bid !== undefined) bar.bid = inst.bid;
+    if (inst.ask !== undefined) bar.ask = inst.ask;
+    if (inst.totalBuyQty !== undefined) bar.totalBuyQty = inst.totalBuyQty;
+    if (inst.totalSellQty !== undefined) bar.totalSellQty = inst.totalSellQty;
+    if (inst.atp !== undefined) bar.atp = inst.atp;
+  }
+
+  /* ---------------------------------- timer ---------------------------------- */
+
+  /**
+   * Runs every second: writes minutes whose end + grace has passed (quiet instruments), the chain
+   * aggregates of the minute that just completed, and closes a date the clock has left.
+   */
+  flushDue(now: number = this.opts.clock.now()): void {
+    if (!this.date) return;
+    const items: { key: InstrumentKey; rec: MinuteRecord }[] = [];
+    for (const inst of this.insts.values()) {
+      if (inst.bar && inst.bar.ts + MINUTE_MS + this.graceMs <= now) {
+        const rec = this.takeBar(inst);
+        if (rec) items.push({ key: inst.key, rec });
+      }
+    }
+    this.write(items);
+    const x = minuteOf(now - MINUTE_MS - this.graceMs);
+    if (x > this.lastChainTs && this.inSession(x, this.date)) this.writeChains(x);
+    if (this.opts.calendar.session(now).date !== this.date) this.endSession();
+  }
+
+  /* ---------------------------------- chains ---------------------------------- */
+
+  private writeChains(x: number): void {
+    this.lastChainTs = x;
+    const out: { symbol: string; expiry: string; rec: ChainMinute }[] = [];
+    for (const reg of this.chains.values()) {
+      const rec = this.chainMinute(reg, x);
+      if (rec) out.push({ symbol: reg.symbol, expiry: reg.expiry, rec });
+    }
+    if (!out.length) return;
+    try {
+      this.opts.writer.writeChainMinutes(out);
+      this.st.chainMinutesWritten += out.length;
+      this.sessionWritten.chains += out.length;
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  /** Aggregate of one chain as of the end of minute x, from the latest values known by then. */
+  private chainMinute(reg: ChainReg, x: number): ChainMinute | null {
+    const { symbol, expiry } = reg;
+    const spotInst = this.insts.get(keyId({ symbol, kind: 'SPOT' }));
+    let spot = spotInst ? snapAt(spotInst, x)?.ltp : undefined;
+    if (spot === undefined) {
+      // No spot ticks reached the recorder: the latest live spot of the same day (≤ a few seconds after x).
+      const q = this.opts.live.quote?.({ symbol, kind: 'SPOT' });
+      if (q && isPos(q.ltp) && this.opts.calendar.session(q.ts).date === this.date) spot = q.ltp;
+    }
+    if (spot === undefined) {
+      this.st.chainSkipped.noSpot++;
+      return null;
+    }
+    const rows = new Map<number, { strike: number; ce?: Snap; pe?: Snap }>();
+    for (const inst of reg.options) {
+      const s = snapAt(inst, x);
+      const k = inst.key.strike;
+      if (!s || k === undefined) continue;
+      let row = rows.get(k);
+      if (!row) rows.set(k, (row = { strike: k }));
+      if (inst.key.kind === 'CE') row.ce = s;
+      else row.pe = s;
+    }
+    let ceOi = 0;
+    let peOi = 0;
+    let ceVolume = 0;
+    let peVolume = 0;
+    let oiSeen = 0;
+    const painRows: { strike: number; ceOI: number; peOI: number }[] = [];
+    for (const row of rows.values()) {
+      if (row.ce?.oi !== undefined) (ceOi += row.ce.oi), oiSeen++;
+      if (row.pe?.oi !== undefined) (peOi += row.pe.oi), oiSeen++;
+      ceVolume += row.ce?.vol ?? 0;
+      peVolume += row.pe?.vol ?? 0;
+      // Max pain only over strikes whose OI is known on both sides.
+      if (row.ce?.oi !== undefined && row.pe?.oi !== undefined) painRows.push({ strike: row.strike, ceOI: row.ce.oi, peOI: row.pe.oi });
+    }
+    if (!oiSeen) {
+      this.st.chainSkipped.noOi++;
+      return null;
+    }
+    const mp = painRows.length ? maxPain(painRows).maxPain : NaN;
+    const strikes = this.listedStrikes(symbol, expiry) ?? [...rows.keys()];
+    let atmStrike = strikes[0];
+    for (const k of strikes) if (Math.abs(k - spot) < Math.abs(atmStrike - spot) || (Math.abs(k - spot) === Math.abs(atmStrike - spot) && k < atmStrike)) atmStrike = k;
+
+    // ATM IV on the minute-close premiums (same-expiry future, else parity, else spot).
+    const futInst = this.insts.get(keyId({ symbol, kind: 'FUT', expiry }));
+    const fut = futInst ? snapAt(futInst, x)?.ltp : undefined;
+    const quote = (key: InstrumentKey, ltp: number | undefined): LiveQuote | undefined => (ltp === undefined ? undefined : { key, ts: x, ltp });
+    const chain: RawChain = {
+      symbol,
+      expiry,
+      ts: x + MINUTE_MS,
+      spot: quote({ symbol, kind: 'SPOT' }, spot),
+      future: quote({ symbol, kind: 'FUT', expiry }, fut),
+      rows: [...rows.values()].map((row): ChainRowLive => ({
+        strike: row.strike,
+        ce: quote({ symbol, kind: 'CE', expiry, strike: row.strike }, row.ce?.ltp),
+        pe: quote({ symbol, kind: 'PE', expiry, strike: row.strike }, row.pe?.ltp),
+      })),
+    };
+    const iv = chainAtmIv(chain, this.opts.pricing.r, x + MINUTE_MS);
+    return {
+      ts: x,
+      spot,
+      ceOi,
+      peOi,
+      ceVolume,
+      peVolume,
+      pcr: ceOi > 0 ? peOi / ceOi : null,
+      maxPain: Number.isFinite(mp) ? mp : null,
+      atmStrike,
+      atmIv: iv ? iv.iv : null,
+    };
+  }
+
+  private listedStrikes(symbol: string, expiry: string): number[] | undefined {
+    try {
+      const s = this.opts.ref?.strikes(symbol, expiry);
+      return s && s.length ? s : undefined;
+    } catch {
+      return undefined; // master not loaded: fall back to the strikes seen
+    }
+  }
+
+  /* ---------------------------------- internals -------------------------------- */
+
+  private inSession(ts: number, date: string): boolean {
+    const s = this.opts.calendar.session(ts);
+    return s.status === 'open' && s.date === date;
+  }
+
+  private inst(key: InstrumentKey): Inst {
+    const id = keyId(key);
+    let inst = this.insts.get(id);
+    if (!inst) {
+      inst = { key: { ...key }, id, bar: null, lastWritten: -Infinity, tracksVolume: false, snaps: [] };
+      this.insts.set(id, inst);
+    }
+    return inst;
+  }
+
+  private chainReg(symbol: string, expiry: string): ChainReg {
+    const id = `${symbol}|${expiry}`;
+    let reg = this.chains.get(id);
+    if (!reg) {
+      reg = { symbol, expiry, options: new Set() };
+      for (const inst of this.insts.values()) {
+        if ((inst.key.kind === 'CE' || inst.key.kind === 'PE') && inst.key.symbol === symbol && inst.key.expiry === expiry) reg.options.add(inst);
+      }
+      this.chains.set(id, reg);
+    }
+    return reg;
+  }
+
+  /** Record the latest values under the current clock minute (keeps the last 3 minutes). */
+  private snap(inst: Inst, now: number): void {
+    const m = minuteOf(now);
+    const s: Snap = { m, ltp: inst.ltp, oi: inst.oi, vol: inst.cumVol };
+    const last = inst.snaps[inst.snaps.length - 1];
+    if (last && last.m >= m) inst.snaps[inst.snaps.length - 1] = { ...s, m: last.m };
+    else {
+      inst.snaps.push(s);
+      if (inst.snaps.length > 3) inst.snaps.shift();
+    }
+  }
+
+  private takeBar(inst: Inst): MinuteRecord | null {
+    const rec = inst.bar;
+    if (!rec) return null;
+    inst.bar = null;
+    inst.lastWritten = rec.ts;
+    return rec;
+  }
+
+  private write(items: { key: InstrumentKey; rec: MinuteRecord }[]): void {
+    if (!items.length) return;
+    try {
+      this.opts.writer.writeMinutes(items);
+      this.st.minutesWritten += items.length;
+      this.sessionWritten.minutes += items.length;
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  private fail(e: unknown): void {
+    this.st.writeErrors++;
+    this.st.lastError = e instanceof Error ? e.message : String(e);
+    this.opts.onError?.(e);
+  }
+
+  private resetDay(date: string | null): void {
+    this.insts.clear();
+    this.chains.clear();
+    for (const t of this.tracked.values()) this.chainReg(t.symbol, t.expiry);
+    this.date = date;
+    this.lastChainTs = -Infinity;
+    this.sessionWritten = { minutes: 0, chains: 0 };
+  }
+}
+
+/** Latest snapshot at or before the end of minute x. */
+function snapAt(inst: Inst, x: number): Snap | undefined {
+  for (let i = inst.snaps.length - 1; i >= 0; i--) if (inst.snaps[i].m <= x) return inst.snaps[i];
+  return undefined;
+}

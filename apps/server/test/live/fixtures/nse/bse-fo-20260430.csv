@@ -1,0 +1,2 @@
+TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4
+2026-04-30,2026-04-30,FO,BSE,IDO,842625,,SENSEX,,2026-06-25,2026-06-25,78000.00,CE,SENSEX26JUN78000CE,1500.00,1982.60,1500.00,1969.30,1963.40,2300.00,76913.50,1969.30,2320,1860,2940,234310908.00,143,F1,20,,,,,
