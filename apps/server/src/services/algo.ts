@@ -29,6 +29,7 @@ import type { MarketClock } from '../market/clock';
 import type { MarketEngine } from '../market/engine';
 import type { Db } from '../store/db';
 import type { Notifier } from './alerts';
+import type { Pricer } from './pricer';
 import type { PaperBroker } from './trading';
 
 const OPEN_MIN = 555; // 09:15
@@ -88,6 +89,7 @@ export class AlgoService {
     private readonly broker: PaperBroker,
     private readonly notifier: Notifier,
     private readonly clock: MarketClock,
+    private readonly pricer: Pricer,
   ) {}
 
   /* ------------------------------- catalogue ------------------------------- */
@@ -334,15 +336,22 @@ export class AlgoService {
 
   create(uid: string, input: AlgoRunInput): AlgoRunView {
     const algo = this.algo(input.algoId);
-    const params = this.params(algo, input.params ?? {});
+    const preset = input.presetId ? ALGO_PRESETS.find((x) => x.id === input.presetId) : undefined;
+    if (input.presetId && !preset) throw httpError(404, `Unknown preset ${input.presetId}`);
+    if (preset && preset.algoId !== algo.id) throw httpError(400, `Preset ${preset.id} belongs to algo ${preset.algoId}`);
+    // A preset's own values fill anything the request leaves out (or blank).
+    const given = Object.fromEntries(Object.entries(input.params ?? {}).filter(([, v]) => v !== undefined && v !== ''));
+    const params = this.params(algo, { ...(preset?.params ?? {}), ...given });
     const runs = this.runs(uid);
     if (runs.filter((r) => r.status === 'running').length >= MAX_RUNNING) throw httpError(400, `At most ${MAX_RUNNING} algos can run at once — stop one first`);
-    const preset = input.presetId ? ALGO_PRESETS.find((x) => x.id === input.presetId) : undefined;
+    // Keep the preset's name only while its settings are unchanged.
+    const asPreset = preset && JSON.stringify(this.params(algo, preset.params)) === JSON.stringify(params);
+    const autoName = asPreset ? preset!.name : algo.label?.(params) ?? algo.name;
     const run: StoredAlgoRun = {
       id: `ALG-${randomUUID().slice(0, 8).toUpperCase()}`,
       algoId: algo.id,
-      presetId: preset?.id,
-      name: (input.name ?? '').trim() || preset?.name || algo.name,
+      presetId: asPreset ? preset!.id : undefined,
+      name: (input.name ?? '').trim() || autoName,
       params,
       status: 'running',
       createdAt: this.clock.now(),
@@ -444,9 +453,16 @@ export class AlgoService {
       let day = run.day;
       if (day && day.date !== parts.date) {
         if (!day.closed) {
-          // The session ended without the algo's exit running (server down): flatten at today's prices.
+          // The session ended without the algo's exit running (server down): flatten at today's
+          // prices — or, if the contracts expired meanwhile, at their settlement price (the broker
+          // settles expired positions itself, so no order is placed for them).
           const snap = this.snapshot(String(run.params.symbol), day.expiry, parts.dayIdx, { ts });
-          const ev = algo.squareOff(run.params, day.state, snap, this.liveFill(uid, run, day), `Missed the ${String(run.params.exitTime ?? 'exit')} exit on ${day.date}`);
+          const expired = day.expiry < parts.date;
+          const fill: FillFn = expired
+            ? (o) => this.pricer.price({ symbol: String(run.params.symbol), type: o.type, strike: o.strike, expiry: day!.expiry }, ts).ltp
+            : this.liveFill(uid, run, day);
+          const why = `Missed the ${String(run.params.exitTime ?? 'exit')} exit on ${day.date}${expired ? ' — contracts expired, closed at settlement' : ''}`;
+          const ev = algo.squareOff(run.params, day.state, snap, fill, why);
           this.record(uid, run, day, [ev]);
           this.closeDay(run, day, snap);
         }

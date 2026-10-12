@@ -274,3 +274,33 @@ describe('Strategy 3 (starting premium ₹50)', () => {
     expect(ev[0].message).toMatch(pe2.strike === pe.strike ? /kept/ : /sold/);
   });
 });
+
+describe('Strategy 3 rolls the opposite leg to the strike nearest the new level', () => {
+  const P50 = ALGO_PRESETS.find((p) => p.id === 'strategy-3-rs50')!.params as unknown as PremiumLadderParams;
+  it('buys back the old put and sells the OTM put nearest ₹75', () => {
+    const r = runner(P50);
+    r.at(market(25050, 560));
+    const ce = r.s.legs.CE!;
+    const pe0 = r.s.legs.PE!;
+    expect([ce.strike, pe0.strike]).toEqual([25200, 24900]);
+    const bump = 76 - market(25050, 561).premium('CE', ce.strike)!;
+    const snap = market(25050, 561, { [`CE${ce.strike}`]: bump });
+    const ev = r.at(snap);
+    expect(ev[0].kind).toBe('ADJUSTMENT');
+    expect(r.s.level).toBe(75);
+    expect(ev[0].fills.map((f) => `${f.side} ${f.type} ${f.strike}`)).toEqual(['BUY PE 24900', 'SELL PE 25000']);
+    expect(r.s.legs.CE!.strike).toBe(ce.strike); // the triggering call stays
+    // 25000 PE is OTM (spot 25050) and nearer ₹75 than any other eligible put
+    for (const k of snap.strikes) {
+      if (k % 100 || k >= 25050) continue;
+      expect(Math.abs(snap.premium('PE', k)! - 75)).toBeGreaterThanOrEqual(Math.abs(snap.premium('PE', 25000)! - 75));
+    }
+  });
+
+  it('describes the trigger mode, the premium tolerance and the strike fallback', () => {
+    expect(ladderRules({ ...P50, triggerOn: 'same' }).join(' ')).toMatch(/only the leg that triggered last/);
+    expect(ladderRules({ ...P50, maxGapPct: 20 }).join(' ')).toMatch(/within ±20% of the target/);
+    expect(ladderRules({ symbol: 'FINNIFTY', strikeMultiple: '' as unknown as number }).join(' ')).toMatch(/Any listed FINNIFTY strike/);
+    expect(premiumLadder.label!({ ...P50, startPremium: 30 })).toBe('Premium ladder · ₹30 start');
+  });
+});

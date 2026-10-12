@@ -219,19 +219,24 @@ export function ladderLevels(startPremium: number, stepPct: number, count = 4): 
 /** Plain-language rules for a parameter set (shown in the Algo panel; defaults = Strategy 2). */
 export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) && v !== '' && v != null ? Number(v) : d);
+  const symbol = p.symbol || 'NIFTY';
   const start = num(p.startPremium, 20);
   const step = num(p.stepPct, 50);
-  const mult = num(p.strikeMultiple, 100);
+  // Same fallback as the server: NIFTY trades 100s; other symbols any listed strike.
+  const mult = num(p.strikeMultiple, symbol === 'NIFTY' ? 100 : 0);
+  const gap = num(p.maxGapPct, 50);
   const entry = p.entryTime || '09:20';
   const exit = p.exitTime || '15:25';
-  const symbol = p.symbol || 'NIFTY';
   const levels = ladderLevels(start, step).map((x) => `₹${x}`).join(' → ');
+  const strikes = mult > 0 ? `${symbol} strikes must be multiples of ${mult}.` : `Any listed ${symbol} strike may be used.`;
   return [
-    `Entry at ${entry}: sell one CE and one PE, both OTM, with premiums closest to the starting premium (₹${r2(start)}).${mult > 0 ? ` ${symbol} strikes must be multiples of ${mult}.` : ''}`,
+    `Entry at ${entry}: sell one CE and one PE, both OTM, with premiums closest to the starting premium (₹${r2(start)}). ${strikes}`,
     `Adjustment ladder: levels at +${step}% steps — ${levels} → … with no limit.`,
-    'When a leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
+    p.triggerOn === 'same'
+      ? 'When a leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. After the first adjustment only the leg that triggered last can trigger the next level. A jump through several levels goes straight to the highest one reached.'
+      : 'When either leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
     'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
-    'If no eligible OTM strike is available for a required entry or adjustment, square off all positions and stop trading for the day.',
+    `If no eligible OTM strike is available for a required entry or adjustment (one whose premium is within ±${gap}% of the target), square off all positions and stop trading for the day.`,
     `Exit: square off everything at ${exit} regardless of profit or loss.`,
   ];
 }
@@ -242,6 +247,7 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
   description: 'Sell an OTM call and put at a target premium; each time either leg gains another 50%, roll the other leg to the new premium level.',
   rules: ladderRules({}),
   describeRules: (p) => ladderRules(p),
+  label: (p) => `Premium ladder · ₹${r2(p.startPremium)} start${p.symbol !== 'NIFTY' ? ` · ${p.symbol}` : ''}`,
   params: [
     { key: 'symbol', label: 'Underlying', type: 'symbol' },
     { key: 'expiry', label: 'Expiry', type: 'select', options: [{ value: 'current', label: 'Current (nearest)' }, { value: 'next', label: 'Next' }] },

@@ -118,6 +118,33 @@ describe('Strategy 3 (starting premium ₹50)', () => {
     expect(p.params).toMatchObject({ symbol: 'NIFTY', startPremium: 50, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25' });
   });
 
+  it('replays sessions obeying every rule from ₹50', async () => {
+    for (const date of ['2026-10-01', '2026-10-05', '2026-10-08']) {
+      const d = (await call<AlgoBacktestDay>('POST', '/api/algos/premium-ladder/backtest', { params: { symbol: 'NIFTY', startPremium: 50 }, date })).body;
+      const spotAt = (ts: number) => d.series.find((p) => p.ts === ts)!.spot;
+      let level = 50;
+      for (const e of d.events) {
+        for (const f of e.fills) {
+          if (f.side !== 'SELL') continue;
+          expect(f.strike % 100).toBe(0);
+          if (f.type === 'CE') expect(f.strike).toBeGreaterThan(spotAt(e.ts));
+          else expect(f.strike).toBeLessThan(spotAt(e.ts));
+        }
+        if (e.kind === 'ADJUSTMENT' && e.fills.length) {
+          const next = Number(e.data!.level);
+          const n = Math.log(next / 50) / Math.log(1.5);
+          expect(Math.abs(n - Math.round(n))).toBeLessThan(1e-6);
+          expect(next).toBeGreaterThan(level);
+          level = next;
+          expect(e.fills.map((f) => f.side)).toEqual(['BUY', 'SELL']);
+          expect(e.fills[0].type).toBe(e.fills[1].type); // the same (opposite) side is rolled
+        }
+      }
+      const fills = d.events.flatMap((e) => e.fills);
+      expect(fills.filter((f) => f.side === 'BUY').length).toBe(fills.filter((f) => f.side === 'SELL').length);
+    }
+  });
+
   it('backtests with ₹50 entries and a 50 → 75 → 112.5 ladder', async () => {
     const r = await call<AlgoBacktestRange>('POST', '/api/algos/premium-ladder/backtest-range', { params: { symbol: 'NIFTY', startPremium: 50 }, days: 30 });
     expect(r.status).toBe(200);
@@ -135,6 +162,26 @@ describe('Strategy 3 (starting premium ₹50)', () => {
       const e20 = d20.events.find((e) => e.kind === 'ENTRY')!;
       const ce = (ev: typeof entry) => ev.fills.find((f) => f.type === 'CE')!.strike;
       expect(ce(entry)).toBeLessThan(ce(e20)); // ₹50 sits closer to the money than ₹20
+    }
+  });
+});
+
+describe('presets on deployment', () => {
+  it('fills missing settings from the preset and keeps its name only while unchanged', async () => {
+    const preset = (await call<AlgoRunView>('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { symbol: 'NIFTY', lots: 1 } })).body;
+    expect(preset.params.startPremium).toBe(50);
+    expect(preset.name).toBe('Strategy 3 · Starting premium ₹50');
+    expect(preset.presetId).toBe('strategy-3-rs50');
+    const blank = (await call<AlgoRunView>('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: '' } })).body;
+    expect(blank.params.startPremium).toBe(50);
+    const edited = (await call<AlgoRunView>('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: 30 } })).body;
+    expect(edited.params.startPremium).toBe(30);
+    expect(edited.name).toBe('Premium ladder · ₹30 start');
+    expect(edited.presetId).toBeUndefined();
+    expect((await call('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 'nope', params: {} })).status).toBe(404);
+    for (const r of [preset, blank, edited]) {
+      await call('POST', `/api/algo-runs/${r.id}/stop`, {});
+      await call('DELETE', `/api/algo-runs/${r.id}`);
     }
   });
 });
@@ -221,5 +268,38 @@ describe('live paper deployment', () => {
     token = saved;
     expect((await call('POST', '/api/algo-runs', { algoId: 'premium-ladder', params: { lots: 0 } })).status).toBe(400);
     expect((await call('POST', '/api/algo-runs', { algoId: 'nope', params: {} })).status).toBe(404);
+  });
+});
+
+describe('missed exit across an expiry', () => {
+  it('closes the legs at settlement and agrees with the broker', async () => {
+    let w = Date.now();
+    // Tue 6-Oct-2026 is a NIFTY weekly expiry.
+    const s2 = createServices(loadConfig({ persist: false, simStart: '2026-10-06T09:18', authSecret: 'test' }), { now: () => w });
+    const uid = 'expiry-user';
+    // A wide premium tolerance keeps the ladder open into the close on expiry day.
+    const run = s2.algos.create(uid, { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { maxGapPct: 100 } });
+    const step = (m: number) => {
+      w += m * 60_000;
+      s2.broker.tick();
+      s2.algos.tick();
+    };
+    for (let i = 0; i < 180; i++) step(2); // → 15:18
+    const before = s2.algos.get(uid, run.id);
+    expect(before.today?.phase).toBe('active');
+    expect(before.today!.expiry).toBe('2026-10-06');
+    expect(before.today!.legs).toHaveLength(2);
+    w += 3 * 60 * 60_000; // server paused through the close → next session
+    s2.broker.tick();
+    s2.algos.tick();
+    const after = s2.algos.get(uid, run.id);
+    const day = after.history.find((d) => d.date === '2026-10-06')!;
+    expect(day.exitReason).toMatch(/expired, closed at settlement/);
+    const pos = s2.broker.positions(uid).filter((p) => p.expiry === '2026-10-06');
+    expect(pos.every((p) => p.netQty === 0)).toBe(true);
+    const brokerPnl = pos.reduce((a, p) => a + p.pnl, 0);
+    expect(Math.abs(day.pnl - brokerPnl)).toBeLessThanOrEqual(1);
+    expect(s2.broker.orders(uid).filter((o) => o.status === 'REJECTED')).toHaveLength(0);
+    s2.stop();
   });
 });

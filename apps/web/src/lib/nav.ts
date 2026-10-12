@@ -73,7 +73,7 @@ export const NAV: NavGroup[] = [
   {
     title: 'Algo',
     items: [
-      { to: '/algo', label: 'Algo Strategies', icon: '🤖', desc: 'Backtest and deploy rule-based strategies (Strategy 2 · ₹20 premium ladder)' },
+      { to: '/algo', label: 'Algo Strategies', icon: '🤖', desc: 'Backtest and deploy rule-based strategies (Strategy 2 · ₹20 and Strategy 3 · ₹50 premium ladders)' },
     ],
   },
   {

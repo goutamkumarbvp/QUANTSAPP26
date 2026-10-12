@@ -97,6 +97,8 @@ export interface AlgoDefinition<P = Record<string, unknown>, S = unknown> {
   level?(s: S): number | null;
   /** The rules in plain language for a given parameter set (falls back to `rules`). */
   describeRules?(p: Partial<P>): string[];
+  /** A short name for a custom parameter set (used when a run's settings differ from its preset). */
+  label?(p: P): string;
 }
 
 /** A named, ready-to-run parameter set of an algo (e.g. "Strategy 2 — ₹20", "Strategy 3 — ₹50"). */

@@ -50,7 +50,7 @@ export function createServices(config: AppConfig, opts: { now?: () => number } =
   const strategies = new StrategyManager(engine, db, pricer, now);
   const alerts = new AlertService(engine, db, pricer, strategies, notifier, now, analytics, tools);
   const watchlists = new Watchlists(db, pricer, now);
-  const algos = new AlgoService(engine, db, broker, notifier, clock);
+  const algos = new AlgoService(engine, db, broker, notifier, clock, pricer);
   const timers: NodeJS.Timeout[] = [];
   return {
     config, clock, engine, flows, analytics, tools, pricer, db, auth, notifier, broker, strategies, alerts, watchlists, algos, orderListeners,
