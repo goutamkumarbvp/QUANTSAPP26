@@ -42,7 +42,7 @@ docker run -p 8787:8787 -v q26-data:/app/apps/server/data q26-options
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
 | Trade | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts |
-| Algo | Algo Strategies panel — backtest (one day / many days) and deploy rule-based algos on the paper account; first algo: Strategy 2 (₹20 premium ladder) |
+| Algo | Algo Strategies panel — backtest (one day / many days) and deploy rule-based algos on the paper account; algos: Strategy 2 (₹20 premium ladder) and Strategy 3 (₹50 premium ladder) |
 | Scanners | 20 F&O scanners, Unusual option activity, Order-book analytics |
 | More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
 
@@ -72,7 +72,8 @@ Highlights:
   everything at 15:25. Backtest any past session minute by minute (charts, trade log, charges) or the last 20–250
   sessions (win rate, drawdown, equity curve), then deploy it on the paper account: it trades through the paper
   broker every 2 seconds (MIS orders tagged `algo:<id>`), sends notifications, and runs every trading day until
-  stopped.
+  stopped. **Strategy 3 · starting premium ₹50** uses exactly the same rules from ₹50 premiums
+  (₹50 → ₹75 → ₹112.5 → ₹168.75 …), i.e. strikes closer to the money.
 - **Live updates** — WebSocket ticker and notifications; analytics views poll every few seconds.
 - **Installable PWA** — mobile-first layout with bottom tabs, dark/light themes, offline app shell.
 

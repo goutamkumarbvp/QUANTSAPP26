@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  algoById,
   formatDate,
   formatExpiry,
   formatINR,
@@ -485,7 +486,7 @@ export default function Algo() {
               {algo && (
                 <Card title="Rules">
                   <ol className="list-decimal space-y-1.5 pl-4 text-xs">
-                    {algo.rules.map((r, i) => (
+                    {(algoById(algo.id)?.describeRules?.(params) ?? algo.rules).map((r, i) => (
                       <li key={i}>{r}</li>
                     ))}
                   </ol>

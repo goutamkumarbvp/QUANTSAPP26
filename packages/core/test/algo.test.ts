@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALGO_PRESETS,
   ALGOS,
   algoById,
+  ladderLevels,
+  ladderRules,
   isOtm,
   ladderLevel,
   premiumLadder,
@@ -213,5 +216,61 @@ describe('premium ladder (Strategy 2)', () => {
     expect(premiumLadder.validate({ ...P, lots: 0 })).toMatch(/Lots/);
     expect(algoById('premium-ladder')).toBe(premiumLadder);
     expect(totalCharges([{ side: 'SELL', price: 20, lots: 1 }], 65)).toBeGreaterThan(20);
+  });
+});
+
+describe('Strategy 3 (starting premium ₹50)', () => {
+  const P50 = ALGO_PRESETS.find((p) => p.id === 'strategy-3-rs50')!.params as unknown as PremiumLadderParams;
+  const P20 = ALGO_PRESETS.find((p) => p.id === 'strategy-2-rs20')!.params as unknown as PremiumLadderParams;
+
+  it('differs from Strategy 2 only in the starting premium', () => {
+    expect(P50.startPremium).toBe(50);
+    expect({ ...P50, startPremium: 20 }).toEqual(P20);
+    expect(premiumLadder.validate(P50)).toBeNull();
+  });
+
+  it('describes its own ladder', () => {
+    expect(ladderLevels(50, 50)).toEqual([50, 75, 112.5, 168.75]);
+    const rules = ladderRules(P50).join(' ');
+    expect(rules).toMatch(/closest to the starting premium \(₹50\)/);
+    expect(rules).toMatch(/₹50 → ₹75 → ₹112.5 → ₹168.75/);
+    expect(rules).toMatch(/multiples of 100/);
+    expect(ladderRules(P20).join(' ')).toMatch(/₹20 → ₹30 → ₹45 → ₹67.5/);
+  });
+
+  it('enters nearer the money at ~₹50 and adjusts at ₹75', () => {
+    const r = runner(P50);
+    r.at(market(25000, 560));
+    const ce = r.s.legs.CE!;
+    const pe = r.s.legs.PE!;
+    expect(r.s.level).toBe(50);
+    expect(ce.strike % 100).toBe(0);
+    expect(ce.strike).toBeGreaterThan(25000);
+    expect(pe.strike).toBeLessThan(25000);
+    // nearest-to-₹50 strike: no eligible strike is closer to 50
+    const snap = market(25000, 560);
+    for (const k of snap.strikes) {
+      if (k % 100 || k <= 25000) continue;
+      expect(Math.abs(snap.premium('CE', k)! - 50)).toBeGreaterThanOrEqual(Math.abs(ce.entryPrice - 50) - 1e-9);
+    }
+    // the ₹20 version sells further out of the money
+    const r20 = runner(P20);
+    r20.at(market(25000, 560));
+    expect(ce.strike).toBeLessThan(r20.s.legs.CE!.strike);
+    // CE trades at ₹76 → level ₹75, PE rolled near ₹75
+    const bump = 76 - market(25000, 561).premium('CE', ce.strike)!;
+    const ev = r.at(market(25000, 561, { [`CE${ce.strike}`]: bump }));
+    expect(ev[0].kind).toBe('ADJUSTMENT');
+    expect(r.s.level).toBe(75);
+    // The put is moved to (or kept at, if it already is) the OTM strike nearest ₹75.
+    const pe2 = r.s.legs.PE!;
+    expect(pe2.strike).toBeGreaterThanOrEqual(pe.strike);
+    expect(pe2.strike).toBeLessThan(25000);
+    const s1 = market(25000, 561, { [`CE${ce.strike}`]: bump });
+    for (const k of s1.strikes) {
+      if (k % 100 || k >= 25000) continue;
+      expect(Math.abs(s1.premium('PE', k)! - 75)).toBeGreaterThanOrEqual(Math.abs(s1.premium('PE', pe2.strike)! - 75) - 1e-9);
+    }
+    expect(ev[0].message).toMatch(pe2.strike === pe.strike ? /kept/ : /sold/);
   });
 });

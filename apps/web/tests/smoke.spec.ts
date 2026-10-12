@@ -113,3 +113,14 @@ test('algo panel: backtest, deploy on paper, stop', async ({ page }) => {
   await expect(page.getByText(/No algo deployed yet/)).toBeVisible({ timeout: 15_000 });
   expect(errors).toEqual([]);
 });
+
+test('algo panel: Strategy 3 (₹50) has its own rules and backtest', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/algo');
+  await page.getByRole('button', { name: /Strategy 3 · Starting premium ₹50/ }).click();
+  await expect(page.getByText('₹50 → ₹75 → ₹112.5 → ₹168.75', { exact: false })).toBeVisible();
+  await expect(page.getByLabel('Starting premium ₹')).toHaveValue('50');
+  await page.getByRole('tab', { name: 'Backtest · one day' }).click();
+  await expect(page.getByText('Trade log')).toBeVisible({ timeout: 20_000 });
+  expect(errors).toEqual([]);
+});

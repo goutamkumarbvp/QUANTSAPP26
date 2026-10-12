@@ -110,6 +110,35 @@ describe('algo catalogue and backtests', () => {
   });
 });
 
+describe('Strategy 3 (starting premium ₹50)', () => {
+  it('is in the catalogue next to Strategy 2', async () => {
+    const c = (await call<AlgoCatalog>('GET', '/api/algos')).body;
+    const p = c.presets.find((x) => x.id === 'strategy-3-rs50')!;
+    expect(p.name).toBe('Strategy 3 · Starting premium ₹50');
+    expect(p.params).toMatchObject({ symbol: 'NIFTY', startPremium: 50, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25' });
+  });
+
+  it('backtests with ₹50 entries and a 50 → 75 → 112.5 ladder', async () => {
+    const r = await call<AlgoBacktestRange>('POST', '/api/algos/premium-ladder/backtest-range', { params: { symbol: 'NIFTY', startPremium: 50 }, days: 30 });
+    expect(r.status).toBe(200);
+    expect(r.body.stats.tradedDays).toBeGreaterThan(20);
+    for (const d of r.body.days.filter((x) => x.maxLevel > 0)) {
+      // every level reached is 50 × 1.5^n
+      const n = Math.log(d.maxLevel / 50) / Math.log(1.5);
+      expect(Math.abs(n - Math.round(n))).toBeLessThan(1e-9);
+    }
+    const day = (await call<AlgoBacktestDay>('POST', '/api/algos/premium-ladder/backtest', { params: { symbol: 'NIFTY', startPremium: 50 }, date: '2026-10-08' })).body;
+    const entry = day.events.find((e) => e.kind === 'ENTRY');
+    if (entry) {
+      for (const f of entry.fills) expect(Math.abs(f.price - 50) / 50).toBeLessThanOrEqual(0.5);
+      const d20 = (await call<AlgoBacktestDay>('POST', '/api/algos/premium-ladder/backtest', { params: { symbol: 'NIFTY' }, date: '2026-10-08' })).body;
+      const e20 = d20.events.find((e) => e.kind === 'ENTRY')!;
+      const ce = (ev: typeof entry) => ev.fills.find((f) => f.type === 'CE')!.strike;
+      expect(ce(entry)).toBeLessThan(ce(e20)); // ₹50 sits closer to the money than ₹20
+    }
+  });
+});
+
 describe('live paper deployment', () => {
   let run: AlgoRunView;
 

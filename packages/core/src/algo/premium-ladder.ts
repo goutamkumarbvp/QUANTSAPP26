@@ -2,7 +2,7 @@
  * "Premium ladder" short strangle (Strategy 2).
  *
  *  1. At the entry time sell one OTM CE and one OTM PE whose premiums are closest to the
- *     starting premium (₹20), using only strikes that are multiples of `strikeMultiple`
+ *     starting premium (₹20 in Strategy 2, ₹50 in Strategy 3), using only strikes that are multiples of `strikeMultiple`
  *     (100 for NIFTY).
  *  2. The ladder starts at the starting premium. When a leg's premium reaches the next rung
  *     (+50 %: 20 → 30 → 45 → 67.5 …) the opposite leg is bought back and re-sold at the OTM
@@ -205,18 +205,43 @@ function eventData(s: PremiumLadderState, snap: AlgoSnapshot): Record<string, nu
   };
 }
 
+/** The ladder's first rungs for a starting premium, e.g. 20 → "₹20 → ₹30 → ₹45 → ₹67.5". */
+export function ladderLevels(startPremium: number, stepPct: number, count = 4): number[] {
+  const out: number[] = [];
+  let l = startPremium;
+  for (let i = 0; i < count; i++) {
+    out.push(r2(l));
+    l *= 1 + stepPct / 100;
+  }
+  return out;
+}
+
+/** Plain-language rules for a parameter set (shown in the Algo panel; defaults = Strategy 2). */
+export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
+  const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) && v !== '' && v != null ? Number(v) : d);
+  const start = num(p.startPremium, 20);
+  const step = num(p.stepPct, 50);
+  const mult = num(p.strikeMultiple, 100);
+  const entry = p.entryTime || '09:20';
+  const exit = p.exitTime || '15:25';
+  const symbol = p.symbol || 'NIFTY';
+  const levels = ladderLevels(start, step).map((x) => `₹${x}`).join(' → ');
+  return [
+    `Entry at ${entry}: sell one CE and one PE, both OTM, with premiums closest to the starting premium (₹${r2(start)}).${mult > 0 ? ` ${symbol} strikes must be multiples of ${mult}.` : ''}`,
+    `Adjustment ladder: levels at +${step}% steps — ${levels} → … with no limit.`,
+    'When a leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
+    'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
+    'If no eligible OTM strike is available for a required entry or adjustment, square off all positions and stop trading for the day.',
+    `Exit: square off everything at ${exit} regardless of profit or loss.`,
+  ];
+}
+
 export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderState> = {
   id: 'premium-ladder',
   name: 'Premium ladder short strangle',
   description: 'Sell an OTM call and put at a target premium; each time either leg gains another 50%, roll the other leg to the new premium level.',
-  rules: [
-    'Entry at 09:20: sell one CE and one PE, both OTM, with premiums closest to the starting premium (₹20). NIFTY strikes must be multiples of 100.',
-    'Adjustment ladder: rungs at +50% steps — ₹20 → ₹30 → ₹45 → ₹67.5 → … with no limit.',
-    'When a leg’s premium reaches the next rung, buy back the opposite leg and sell the OTM strike whose premium is nearest that rung. A jump through several rungs goes straight to the highest one reached.',
-    'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
-    'If no eligible OTM strike is available for a required entry or adjustment, square off all positions and stop trading for the day.',
-    'Exit: square off everything at 15:25 regardless of profit or loss.',
-  ],
+  rules: ladderRules({}),
+  describeRules: (p) => ladderRules(p),
   params: [
     { key: 'symbol', label: 'Underlying', type: 'symbol' },
     { key: 'expiry', label: 'Expiry', type: 'select', options: [{ value: 'current', label: 'Current (nearest)' }, { value: 'next', label: 'Next' }] },
@@ -406,6 +431,14 @@ export const ALGO_PRESETS: AlgoPreset[] = [
     name: 'Strategy 2 · Starting premium ₹20',
     summary: 'NIFTY short strangle at ₹20 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (20 → 30 → 45 …); stop if no OTM strike; exit 15:25.',
     params: { symbol: 'NIFTY', expiry: 'current', lots: 1, startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true },
+  },
+  {
+    // Same rules as Strategy 2, starting from ₹50 premiums (closer to the money).
+    id: 'strategy-3-rs50',
+    algoId: 'premium-ladder',
+    name: 'Strategy 3 · Starting premium ₹50',
+    summary: 'NIFTY short strangle at ₹50 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (50 → 75 → 112.5 …); stop if no OTM strike; exit 15:25.',
+    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, startPremium: 50, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true },
   },
 ];
 
