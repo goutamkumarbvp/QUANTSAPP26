@@ -91,7 +91,7 @@ const U_PROFILE: Float64Array = (() => {
   let s = 0;
   for (let j = 1; j <= M; j++) {
     // Indian opens absorb overnight news: the first ~15 minutes carry ~11% of the day's variance.
-    u[j] = 1 + 3 * Math.exp(-(j - 1) / 15) + 0.7 * Math.exp(-(M - j) / 22);
+    u[j] = 1 + 3.6 * Math.exp(-(j - 1) / 15) + 0.7 * Math.exp(-(M - j) / 22);
     s += u[j];
   }
   for (let j = 1; j <= M; j++) u[j] /= s;
@@ -99,7 +99,25 @@ const U_PROFILE: Float64Array = (() => {
 })();
 
 /** Intraday realised vol relative to close-to-close vol (intraday noise mean-reverts by the close). */
-const INTRADAY_VOL_FACTOR = 1.1;
+const INTRADAY_VOL_FACTOR = 1.0;
+
+/**
+ * Realised close-to-close vol relative to the instrument's nominal `vol`. Below 1 so that implied
+ * vol (≈ `baseIv`) carries the usual premium over realised vol, as in Indian index options.
+ */
+const REALISED_VOL_RATIO = 0.92;
+
+/** Overnight gap = GAP_BETA·(day return) + GAP_NOISE·σ·ε — about 15% of daily variance. */
+const GAP_BETA = 0.15;
+const GAP_NOISE = 0.35;
+
+/**
+ * Options decay in trading time: each session carries (1 − OVERNIGHT_SHARE) of a trading day's
+ * variance spread evenly over its minutes, each overnight/weekend gap OVERNIGHT_SHARE. Premiums
+ * therefore lose value through the session, as they do on NSE, instead of mostly overnight.
+ */
+const OVERNIGHT_SHARE = 0.12;
+const TRADING_DAYS_PER_YEAR = 252;
 
 const TYPE_CODE = { CE: 1, PE: 2, FUT: 3 } as const;
 
@@ -160,6 +178,20 @@ export class MarketEngine {
       mkt[i] = eps;
       hArr[i] = h;
     }
+    // Normalise so the market factor has unit variance and h averages 1: realised vol then
+    // matches the instrument's calibrated vol instead of being inflated by fat tails.
+    let m2 = 0;
+    let hMean = 0;
+    for (let i = 0; i < N; i++) {
+      m2 += mkt[i] * mkt[i];
+      hMean += hArr[i];
+    }
+    m2 /= N;
+    hMean /= N;
+    for (let i = 0; i < N; i++) {
+      mkt[i] /= Math.sqrt(m2);
+      hArr[i] /= hMean;
+    }
     const sectors = new Map<string, Float64Array>();
     const sectorSeries = (key: string) => {
       let arr = sectors.get(key);
@@ -173,8 +205,8 @@ export class MarketEngine {
     };
     const niftyVol = universe.find((u) => u.symbol === 'NIFTY')?.vol ?? 0.12;
     for (const inst of universe) {
-      const sd = inst.vol / Math.sqrt(252);
-      const sm = niftyVol / Math.sqrt(252);
+      const sd = (inst.vol * REALISED_VOL_RATIO) / Math.sqrt(252);
+      const sm = (niftyVol * REALISED_VOL_RATIO) / Math.sqrt(252);
       const a = inst.symbol === 'NIFTY' ? 1 : Math.min(inst.kind === 'index' ? 0.995 : 0.85, Math.max(0, (inst.beta * sm) / sd));
       const key = sectorKey(inst);
       const b = key === 'Market' ? 0 : inst.sectorLoad * Math.sqrt(1 - a * a);
@@ -191,12 +223,13 @@ export class MarketEngine {
         const z = rng.normal() * Math.sqrt(0.5 + 0.5 * hArr[i]);
         const r = sd * (a * mkt[i] + b * (sec ? sec[i] : 0) + c * z) + drift - 0.006 * (logP - trend(i));
         const prevClose = roundTick(Math.exp(logP));
-        const gap = 0.3 * r + 0.12 * sd * rng.normal();
+        const gap = GAP_BETA * r + GAP_NOISE * sd * rng.normal();
         logP += r;
         const close = roundTick(Math.exp(logP));
         const open = roundTick(prevClose * Math.exp(gap));
         const hEff = a * a * hArr[i] + (1 - a * a);
-        const ivTarget = inst.baseIv * (0.8 + 0.2 * Math.sqrt(hEff));
+        // Implied vol follows the volatility regime so it stays a little above realised vol.
+        const ivTarget = inst.baseIv * (0.35 + 0.65 * Math.sqrt(hEff));
         const logIv = Math.log(iv) + 0.1 * (Math.log(ivTarget) - Math.log(iv)) - 2.6 * r + 0.035 * rng.normal();
         const ivNew = Math.min(3 * inst.baseIv, Math.max(0.55 * inst.baseIv, Math.exp(logIv)));
         const lf = Math.log(foi) + 0.04 * (Math.log(inst.futOi) - Math.log(foi)) + 0.035 * rng.normal();
@@ -289,7 +322,7 @@ export class MarketEngine {
         w += Math.sqrt(U_PROFILE[j]) * rng.normal();
         C[j] = rho * Wm[j] + k * w;
       }
-      const sigma = (inst.vol / Math.sqrt(252)) * Math.sqrt(bar.h) * INTRADAY_VOL_FACTOR;
+      const sigma = this.pathSigma(inst, bar);
       const lo = Math.log(bar.open);
       const lc = Math.log(bar.close);
       const P = new Float64Array(M + 1);
@@ -497,14 +530,17 @@ export class MarketEngine {
     return Math.max(0, Math.round((daily * cum) / inst.lotSize)) * inst.lotSize;
   }
 
-  /** Smile-adjusted implied vol for a strike. */
-  optionIv(ctx: ContractCtx, type: 'CE' | 'PE', strike: number, spot: number, T: number, atmBase: number, dayIdx: number): number {
+  /**
+   * Smile-adjusted implied vol for a strike, in trading time (see OVERNIGHT_SHARE). `T` is
+   * calendar years (carry, term structure); `Tvar` the trading-time years that set the variance.
+   */
+  optionIv(ctx: ContractCtx, type: 'CE' | 'PE', strike: number, spot: number, T: number, atmBase: number, dayIdx: number, Tvar = T): number {
     const inst = ctx.inst;
     const F = spot * Math.exp((this.r - inst.divYield) * T);
     const tDays = T * 365;
-    const term = 0.95 + 0.07 * Math.min(1, tDays / 60) + (tDays < 1 ? 0.1 * (1 - tDays) : 0);
+    const term = 0.95 + 0.07 * Math.min(1, tDays / 60);
     const atm = atmBase * term;
-    const sd = atm * Math.sqrt(Math.max(T, 0.5 / 365));
+    const sd = atm * Math.sqrt(Math.max(Tvar, 0.25 / TRADING_DAYS_PER_YEAR));
     const x = Math.max(-6.5, Math.min(6.5, Math.log(strike / F) / sd));
     const smile = 1 + inst.skew * x + inst.smile * x * x;
     // Smooth (low-frequency in strike) daily distortion keeps the curve market-like without
@@ -515,14 +551,32 @@ export class MarketEngine {
     return Math.max(0.3 * atm, atm * smile + wave + jitter);
   }
 
+  /** Trading-time years from a session point to the close of the contract's expiry day. */
+  tradingYears(ctx: ContractCtx, dayIdx: number, m: number): number {
+    const pos = dayIdx + OVERNIGHT_SHARE + (1 - OVERNIGHT_SHARE) * Math.min(1, Math.max(0, m / M));
+    return Math.max(0, ctx.expiryIdx + 1 - pos) / TRADING_DAYS_PER_YEAR;
+  }
+
+  /**
+   * Implied vol quoted on calendar time (what Black-Scholes with calendar T needs to reproduce
+   * the trading-time premium). It drifts down through each session and jumps up after
+   * overnights and weekends, like quoted IVs of weekly options.
+   */
+  quotedIv(ctx: ContractCtx, type: 'CE' | 'PE', strike: number, spot: number, at: number, dayIdx: number, m: number): number {
+    const T = yearsBetween(at, ctx.expTs);
+    const Tvar = this.tradingYears(ctx, dayIdx, m);
+    const iv = this.optionIv(ctx, type, strike, spot, T, this.atmIvAt(ctx.inst.symbol, dayIdx, m), dayIdx, Tvar);
+    if (!(T > 0)) return iv;
+    return iv * Math.max(0.2, Math.min(5, Math.sqrt(Tvar / T)));
+  }
+
   /** Option premium & IV at an exact session minute (for series) or live ts. */
   optionAt(ctx: ContractCtx, type: 'CE' | 'PE', strike: number, ts: number, opts: { minute?: { dayIdx: number; m: number } } = {}): OptionPoint {
     const p = opts.minute ? { dayIdx: opts.minute.dayIdx, m: opts.minute.m } : this.parts(ts);
     const at = opts.minute ? this.tsOf(p.dayIdx, p.m) : ts;
     const S = opts.minute ? this.spotAt(ctx.inst.symbol, p.dayIdx, p.m) : this.spot(ctx.inst.symbol, ts);
     const T = yearsBetween(at, ctx.expTs);
-    const atm = this.atmIvAt(ctx.inst.symbol, p.dayIdx, p.m);
-    const iv = this.optionIv(ctx, type, strike, S, T, atm, p.dayIdx);
+    const iv = this.quotedIv(ctx, type, strike, S, at, p.dayIdx, p.m);
     const g = bsGreeks(type, S, strike, T, this.r, iv, ctx.inst.divYield);
     return { ltp: Math.max(0.05, roundTick(g.price)), iv, spot: S, T };
   }
@@ -582,11 +636,14 @@ export class MarketEngine {
     return 0.35 * hashN(this.symId(symbol), dayIdx, Math.floor(minute / 2), 3);
   }
 
+  /** Session-wide std-dev scale of the intraday path. */
+  private pathSigma(inst: Instrument, bar: DailyBar): number {
+    return ((inst.vol * REALISED_VOL_RATIO) / Math.sqrt(252)) * Math.sqrt(bar.h) * INTRADAY_VOL_FACTOR;
+  }
+
   /** Std-dev of the underlying's log move over session minute j → j+1. */
   private minuteSigma(symbol: string, dayIdx: number, j: number): number {
-    const inst = this.inst(symbol);
-    const bar = this.bar(symbol, dayIdx);
-    return (inst.vol / Math.sqrt(252)) * Math.sqrt(bar.h) * INTRADAY_VOL_FACTOR * Math.sqrt(U_PROFILE[Math.min(M, Math.max(1, j + 1))]);
+    return this.pathSigma(this.inst(symbol), this.bar(symbol, dayIdx)) * Math.sqrt(U_PROFILE[Math.min(M, Math.max(1, j + 1))]);
   }
 
   /**

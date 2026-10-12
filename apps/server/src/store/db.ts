@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AlertDef, Notification, Order, SavedStrategy, Trade, UserSettings, Watchlist } from '@q26/core';
+import type { StoredAlgoRun } from '../services/algo';
 
 export interface StoredUser {
   id: string;
@@ -28,6 +29,7 @@ export interface DbShape {
   alerts: Record<string, AlertDef[]>;
   notifications: Record<string, Notification[]>;
   watchlists: Record<string, Watchlist[]>;
+  algoRuns: Record<string, StoredAlgoRun[]>;
 }
 
 const empty = (): DbShape => ({
@@ -40,6 +42,7 @@ const empty = (): DbShape => ({
   alerts: {},
   notifications: {},
   watchlists: {},
+  algoRuns: {},
 });
 
 export class Db {

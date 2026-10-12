@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatINR, formatIndian, type Funds, type InstrumentType, type Order, type Position, type Trade } from '@q26/core';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
@@ -135,7 +136,7 @@ export default function Positions() {
                     {rows.map((o) => (
                       <tr key={o.id}>
                         <td className="text-muted">{formatDateTime(o.createdAt)}</td>
-                        <td className="font-medium">{o.instrument}</td>
+                        <td className="font-medium">{o.instrument}{o.tag?.startsWith('algo:') && <Link to="/algo" className="ml-1.5" title={`Placed by algo ${o.tag.slice(5)}`}><Pill tone="accent">Algo</Pill></Link>}</td>
                         <td className={o.side === 'BUY' ? 'text-up' : 'text-down'}>{o.side}</td>
                         <td className="num">{o.quantity}</td>
                         <td>{o.orderType} · {o.product}</td>

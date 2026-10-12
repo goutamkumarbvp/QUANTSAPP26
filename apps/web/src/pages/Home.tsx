@@ -129,7 +129,7 @@ function FlowsChart({ days }: { days: FiiDiiDay[] }) {
 
 export default function Home() {
   const q = useLive<Dashboard>(['dashboard'], '/dashboard', 5000);
-  const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/orb', '/order-flow', '/builder', '/optimizer', '/oi/strikes', '/straddle', '/scanners'].includes(i.to));
+  const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/orb', '/order-flow', '/algo', '/builder', '/optimizer', '/oi/strikes', '/straddle'].includes(i.to));
   return (
     <div className="space-y-3">
       <PageHeader title="Market Overview" subtitle="Indices, derivatives snapshot, movers and institutional flows" />

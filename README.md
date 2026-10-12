@@ -32,7 +32,7 @@ docker build -t q26-options .
 docker run -p 8787:8787 -v q26-data:/app/apps/server/data q26-options
 ```
 
-## Features (37 screens)
+## Features (38 screens)
 
 | Area | Screens |
 |---|---|
@@ -42,6 +42,7 @@ docker run -p 8787:8787 -v q26-data:/app/apps/server/data q26-options
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
 | Trade | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts |
+| Algo | Algo Strategies panel — backtest (one day / many days) and deploy rule-based algos on the paper account; first algo: Strategy 2 (₹20 premium ladder) |
 | Scanners | 20 F&O scanners, Unusual option activity, Order-book analytics |
 | More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
 
@@ -63,6 +64,15 @@ Highlights:
 - **1-minute order flow** — each minute's traded volume of a future or option is split into aggressive buy vs
   sell volume (delta, buy %, cumulative delta) with the last completed minute, the minute in progress,
   last-5-minute and session totals; also shown in Order Book Analytics, on the dashboard and as an alert.
+- **Algo Strategies** — a separate panel for automated strategies, built so new algos plug in (each algo is a
+  pure state machine in `packages/core/src/algo`, registered in `ALGOS`). The first one is **Strategy 2 · starting
+  premium ₹20**: at 09:20 sell an OTM CE and PE nearest ₹20 (NIFTY strikes in multiples of 100); each time either
+  leg's premium climbs another 50% (₹20 → ₹30 → ₹45 → ₹67.5 …, no limit) buy back the opposite leg and sell the OTM
+  strike nearest the new level; if no eligible OTM strike exists, square off and stop for the day; square off
+  everything at 15:25. Backtest any past session minute by minute (charts, trade log, charges) or the last 20–250
+  sessions (win rate, drawdown, equity curve), then deploy it on the paper account: it trades through the paper
+  broker every 2 seconds (MIS orders tagged `algo:<id>`), sends notifications, and runs every trading day until
+  stopped.
 - **Live updates** — WebSocket ticker and notifications; analytics views poll every few seconds.
 - **Installable PWA** — mobile-first layout with bottom tabs, dark/light themes, offline app shell.
 
@@ -135,9 +145,10 @@ and add the generated Digital Asset Links file at `/.well-known/assetlinks.json`
 All endpoints are under `/api`. Market data: `meta`, `quotes`, `indices`, `expiries/:symbol`, `chain/:symbol`,
 `futures/:symbol`, `candles/:symbol`, `dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`,
 `oi/futures`, `oi/breadth`, `participants`, `fii-dii`, `vol/{iv-chart,skew,surface,cone}/:symbol`, `vol/table`,
-`straddle/:symbol`, `orb`, `orb/:symbol`, `orb/:symbol/history`, `order-flow/:symbol`, `strategy-chart` (POST), `optimizer` (POST), `recap` (POST), `scanners[/:id]`, `unusual`,
+`straddle/:symbol`, `orb`, `orb/:symbol`, `orb/:symbol/history`, `order-flow/:symbol`, `algos`, `algos/:id/defaults`,
+`algos/:id/backtest` (POST), `algos/:id/backtest-range` (POST), `strategy-chart` (POST), `optimizer` (POST), `recap` (POST), `scanners[/:id]`, `unusual`,
 `synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`, `strategies`, `broker/*`,
-`alerts`, `notifications`, `watchlists`. WebSocket: `/ws` (ticks, notifications, order updates).
+`alerts`, `notifications`, `watchlists`, `algo-runs` (list/deploy, `:id/stop`, delete). WebSocket: `/ws` (ticks, notifications, order updates).
 
 ## Disclaimer
 

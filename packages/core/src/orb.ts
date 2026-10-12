@@ -52,6 +52,11 @@ export interface OrbEvaluation {
   position: 'above' | 'inside' | 'below';
   /** Trending, but price has come back inside the range (possible failed breakout). */
   reentered: boolean;
+  /**
+   * The live price is beyond a level in a direction that is not (yet) a confirmed break — e.g.
+   * the minute in progress is above the high but has not closed there. Always null for 'touch'.
+   */
+  pending: 'up' | 'down' | null;
   last: number;
   /** % distance from the latest price to each level (positive = level is above price). */
   toHighPct: number;
@@ -113,6 +118,7 @@ export function evaluateOpeningRange(
   const firstDown = dedup.find((b) => b.direction === 'down') ?? null;
   const trend: OrbTrend = !complete ? 'forming' : dedup.length ? dedup[dedup.length - 1].direction : 'sideways';
   const position = !Number.isFinite(last) || !complete ? 'inside' : last > high ? 'above' : last < low ? 'below' : 'inside';
+  const pending = position === 'above' && trend !== 'up' ? 'up' : position === 'below' && trend !== 'down' ? 'down' : null;
   const width = high - low;
   return {
     rangeMinutes,
@@ -130,6 +136,7 @@ export function evaluateOpeningRange(
     whipsaw: !!firstUp && !!firstDown,
     position,
     reentered: (trend === 'up' || trend === 'down') && position === 'inside',
+    pending,
     last,
     toHighPct: last > 0 ? ((high - last) / last) * 100 : NaN,
     toLowPct: last > 0 ? ((low - last) / last) * 100 : NaN,
@@ -142,10 +149,14 @@ export function describeOrb(e: OrbEvaluation): string {
     case 'forming':
       return `Opening range forming (first ${e.rangeMinutes} min)`;
     case 'sideways':
+      if (e.pending === 'up') return 'Testing the range high — break not confirmed yet';
+      if (e.pending === 'down') return 'Testing the range low — break not confirmed yet';
       return 'Inside opening range — not trending';
     case 'up':
+      if (e.pending === 'down') return 'Broke above range, now below the range low (reversal not confirmed yet)';
       return e.reentered ? 'Broke above range, now back inside (failed breakout?)' : e.whipsaw ? 'Trending up after a whipsaw' : 'Trending up — opening range high broken';
     case 'down':
+      if (e.pending === 'up') return 'Broke below range, now above the range high (reversal not confirmed yet)';
       return e.reentered ? 'Broke below range, now back inside (failed breakdown?)' : e.whipsaw ? 'Trending down after a whipsaw' : 'Trending down — opening range low broken';
   }
 }
@@ -166,8 +177,9 @@ export interface FlowSummary {
   sellVolume: number;
   volume: number;
   delta: number;
+  /** Buy share of volume (%); 50 when nothing traded — check `volume` / sentiment 'No trades'. */
   buyPct: number;
-  sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced';
+  sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced' | 'No trades';
 }
 
 /** Aggregate aggressive buy vs sell volume. Balanced band is ±5 percentage points around 50%. */
@@ -180,6 +192,6 @@ export function summariseFlow(minutes: readonly FlowMinute[], balancedBand = 5):
   }
   const volume = buy + sell;
   const buyPct = volume > 0 ? (buy / volume) * 100 : 50;
-  const sentiment = buyPct >= 50 + balancedBand ? 'Buyers dominant' : buyPct <= 50 - balancedBand ? 'Sellers dominant' : 'Balanced';
+  const sentiment = volume === 0 ? 'No trades' : buyPct >= 50 + balancedBand ? 'Buyers dominant' : buyPct <= 50 - balancedBand ? 'Sellers dominant' : 'Balanced';
   return { buyVolume: buy, sellVolume: sell, volume, delta: buy - sell, buyPct, sentiment };
 }

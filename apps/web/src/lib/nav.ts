@@ -71,6 +71,12 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
+    title: 'Algo',
+    items: [
+      { to: '/algo', label: 'Algo Strategies', icon: '🤖', desc: 'Backtest and deploy rule-based strategies (Strategy 2 · ₹20 premium ladder)' },
+    ],
+  },
+  {
     title: 'Scanners',
     items: [
       { to: '/scanners', label: 'F&O Scanners', icon: '⌕', desc: 'Build-up, OI, price, IV and option scans' },

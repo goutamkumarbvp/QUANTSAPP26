@@ -34,6 +34,23 @@ describe('opening range breakout', () => {
     expect(describeOrb(e)).toMatch(/not trending/);
   });
 
+  it('flags an unconfirmed move beyond a level during the minute in progress', () => {
+    // Inside the range, then the live (partial) minute trades above the high.
+    const testing = evaluateOpeningRange(barsFrom([...RANGE, 101.5, 102.6]), { rangeMinutes: 15, lastIsPartial: true });
+    expect(testing.trend).toBe('sideways');
+    expect(testing.position).toBe('above');
+    expect(testing.pending).toBe('up');
+    expect(describeOrb(testing)).toMatch(/Testing the range high/);
+    // Broke down, and the live minute is now above the high: not "trending down — low broken".
+    const rev = evaluateOpeningRange(barsFrom([...RANGE, 99.5, 101, 102.7]), { rangeMinutes: 15, lastIsPartial: true });
+    expect(rev.trend).toBe('down');
+    expect(rev.pending).toBe('up');
+    expect(rev.reentered).toBe(false);
+    expect(describeOrb(rev)).toMatch(/now above the range high/);
+    // Confirmed breaks carry no pending flag.
+    expect(evaluateOpeningRange(barsFrom([...RANGE, 103]), { rangeMinutes: 15 }).pending).toBeNull();
+  });
+
   it('marks an up-trend on a 1-minute close above the high', () => {
     const e = evaluateOpeningRange(barsFrom([...RANGE, 101.8, 102.4, 103]), { rangeMinutes: 15 });
     expect(e.trend).toBe('up');
@@ -101,5 +118,7 @@ describe('order flow summary', () => {
     expect(summariseFlow([{ ts: 0, volume: 100, buyVolume: 52, sellVolume: 48 }]).sentiment).toBe('Balanced');
     expect(summariseFlow([{ ts: 0, volume: 100, buyVolume: 40, sellVolume: 60 }]).sentiment).toBe('Sellers dominant');
     expect(summariseFlow([]).buyPct).toBe(50);
+    expect(summariseFlow([]).sentiment).toBe('No trades');
+    expect(summariseFlow([{ ts: 0, volume: 0, buyVolume: 0, sellVolume: 0 }]).sentiment).toBe('No trades');
   });
 });

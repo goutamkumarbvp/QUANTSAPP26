@@ -35,6 +35,8 @@ const ROUTES: [string, RegExp][] = [
   ['/orb', /Opening Range Breakout/],
   ['/order-flow', /Order Flow \(1-minute\)/],
   ['/learn/opening-range-order-flow', /Opening range breakout/],
+  ['/algo', /Algo Strategies/],
+  ['/learn/algo-premium-ladder', /premium ladder short strangle/],
   ['/calculators', /Calculators/],
   ['/learn', /Options Classroom/],
   ['/learn/greeks', /The Greeks/],
@@ -90,5 +92,24 @@ test('optimizer returns ranked strategies', async ({ page }) => {
   await page.getByRole('button', { name: /Find best strategies/ }).click();
   await expect(page.getByText(/Scanned [\d,]+ combinations/)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole('button', { name: /Open in builder/ })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('algo panel: backtest, deploy on paper, stop', async ({ page }) => {
+  const errors = watchErrors(page);
+  page.on('dialog', (d) => d.accept());
+  await page.goto('/algo');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Algo Strategies');
+  await expect(page.getByText('Strategy 2 · Starting premium ₹20').first()).toBeVisible();
+  await page.getByRole('tab', { name: 'Backtest · one day' }).click();
+  await expect(page.getByText('Trade log')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('tab', { name: 'Backtest · many days' }).click();
+  await expect(page.getByText('Daily net P&L and equity curve')).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Deploy on paper account' }).click();
+  await expect(page.getByText('● Running')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: 'Stop & square off' }).click();
+  await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: 'Delete' }).click();
+  await expect(page.getByText(/No algo deployed yet/)).toBeVisible({ timeout: 15_000 });
   expect(errors).toEqual([]);
 });

@@ -8,5 +8,6 @@ export * from './margin';
 export * from './strategies';
 export * from './optimizer';
 export * from './orb';
+export * from './algo';
 export * from './format';
 export * from './api';

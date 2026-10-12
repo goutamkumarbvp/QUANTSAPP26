@@ -6,6 +6,7 @@ import { FlowsModel } from '../market/flows';
 import { buildUniverse } from '../market/universe';
 import { Db } from '../store/db';
 import { AlertService, Notifier, Watchlists } from './alerts';
+import { AlgoService } from './algo';
 import { Analytics } from './analytics';
 import { MarketTools } from './market-tools';
 import { Pricer } from './pricer';
@@ -27,6 +28,7 @@ export interface Services {
   strategies: StrategyManager;
   alerts: AlertService;
   watchlists: Watchlists;
+  algos: AlgoService;
   orderListeners: Set<(uid: string, o: Order) => void>;
   start(): void;
   stop(): void;
@@ -48,12 +50,14 @@ export function createServices(config: AppConfig, opts: { now?: () => number } =
   const strategies = new StrategyManager(engine, db, pricer, now);
   const alerts = new AlertService(engine, db, pricer, strategies, notifier, now, analytics, tools);
   const watchlists = new Watchlists(db, pricer, now);
+  const algos = new AlgoService(engine, db, broker, notifier, clock);
   const timers: NodeJS.Timeout[] = [];
   return {
-    config, clock, engine, flows, analytics, tools, pricer, db, auth, notifier, broker, strategies, alerts, watchlists, orderListeners,
+    config, clock, engine, flows, analytics, tools, pricer, db, auth, notifier, broker, strategies, alerts, watchlists, algos, orderListeners,
     start() {
       timers.push(setInterval(() => broker.tick(), 1000));
       timers.push(setInterval(() => alerts.evaluate(), 3000));
+      timers.push(setInterval(() => algos.tick(), 2000));
     },
     stop() {
       timers.forEach(clearInterval);

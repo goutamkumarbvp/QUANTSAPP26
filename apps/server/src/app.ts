@@ -420,6 +420,31 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   });
   app.get<{ Params: { id: string } }>('/api/watchlists/:id/quotes', async (req) => svc.watchlists.quotes(requireUser(req).id, req.params.id));
 
+  /* ============================== algo strategies ============================== */
+
+  const algoParams = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({});
+  app.get('/api/algos', async () => svc.algos.catalog());
+  app.get<{ Params: { id: string } }>('/api/algos/:id/defaults', async (req) => svc.algos.defaults(req.params.id, qs(req).symbol ?? 'NIFTY'));
+  app.post<{ Params: { id: string } }>('/api/algos/:id/backtest', async (req) => {
+    const b = z.object({ params: algoParams, date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.body ?? {});
+    return svc.algos.backtestDay(req.params.id, b.params, b.date, now());
+  });
+  app.post<{ Params: { id: string } }>('/api/algos/:id/backtest-range', async (req) => {
+    const b = z.object({ params: algoParams, days: z.coerce.number().int().min(1).max(250).default(20) }).parse(req.body ?? {});
+    return svc.algos.backtestRange(req.params.id, b.params, b.days, now());
+  });
+  app.get('/api/algo-runs', async (req) => svc.algos.list(requireUser(req).id));
+  app.post('/api/algo-runs', async (req) => {
+    const b = z.object({ algoId: z.string().min(1), presetId: z.string().optional(), name: z.string().max(60).optional(), params: algoParams }).parse(req.body ?? {});
+    return svc.algos.create(requireUser(req).id, b);
+  });
+  app.get<{ Params: { id: string } }>('/api/algo-runs/:id', async (req) => svc.algos.get(requireUser(req).id, req.params.id));
+  app.post<{ Params: { id: string } }>('/api/algo-runs/:id/stop', async (req) => svc.algos.stop(requireUser(req).id, req.params.id));
+  app.delete<{ Params: { id: string } }>('/api/algo-runs/:id', async (req) => {
+    svc.algos.remove(requireUser(req).id, req.params.id);
+    return { ok: true };
+  });
+
   /* ============================== websocket ============================== */
 
   app.register(async (scope) => {

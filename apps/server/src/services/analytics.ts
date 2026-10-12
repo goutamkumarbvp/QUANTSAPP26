@@ -576,11 +576,9 @@ export class Analytics {
     const moneyness = [-10, -8, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 8, 10];
     const iv = expiries.map((ex) => {
       const ctx = e.contract(symbol, ex);
-      const T = yearsBetween(ts, ctx.expTs);
-      const atm = e.atmIvAt(symbol, p.dayIdx, p.m);
       return moneyness.map((mny) => {
         const K = spot * (1 + mny / 100);
-        return +(e.optionIv(ctx, K >= spot ? 'CE' : 'PE', K, spot, T, atm, p.dayIdx) * 100).toFixed(2);
+        return +(e.quotedIv(ctx, K >= spot ? 'CE' : 'PE', K, spot, ts, p.dayIdx, p.m) * 100).toFixed(2);
       });
     });
     return { symbol, spot, expiries, daysToExpiry: expiries.map((ex) => +((expiryTs(ex) - ts) / 86400000).toFixed(1)), moneyness, iv };

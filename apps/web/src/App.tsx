@@ -40,6 +40,7 @@ const Unusual = lazy(() => import('./pages/Unusual'));
 const OrderBook = lazy(() => import('./pages/OrderBook'));
 const Orb = lazy(() => import('./pages/Orb'));
 const OrderFlow = lazy(() => import('./pages/OrderFlow'));
+const Algo = lazy(() => import('./pages/Algo'));
 const Calculators = lazy(() => import('./pages/Calculators'));
 const Learn = lazy(() => import('./pages/Learn'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -106,6 +107,7 @@ export function App() {
             <Route path="/order-book" element={<OrderBook />} />
             <Route path="/orb" element={<Orb />} />
             <Route path="/order-flow" element={<OrderFlow />} />
+            <Route path="/algo" element={<Algo />} />
             <Route path="/calculators" element={<Calculators />} />
             <Route path="/learn" element={<Learn />} />
             <Route path="/learn/:slug" element={<Learn />} />
