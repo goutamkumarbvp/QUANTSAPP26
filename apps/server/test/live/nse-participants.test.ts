@@ -4,6 +4,7 @@
  * FII and Pro rows were elided in the research. Rows built here are marked CONSTRUCTED.
  */
 import { describe, expect, it } from 'vitest';
+import { NoLiveData } from '../../src/live/types';
 import { fetchParticipants, parseParticipantCsv, participantUrls, toParticipantDay } from '../../src/live/nse/participants';
 import { fixture, testHttp, text } from './nse-fake';
 
@@ -74,10 +75,21 @@ describe('participant-wise OI', () => {
     expect(() => parseParticipantCsv(csv)).toThrow(/no date/);
   });
 
-  it('builds ParticipantDay only with a real NIFTY close', () => {
+  it('builds ParticipantDay only with a real NIFTY close of the same date', () => {
     const f = parseParticipantCsv(CSV);
-    expect(toParticipantDay(f, 25145.5)).toEqual({ date: '2026-07-22', niftyClose: 25145.5, rows: [CLIENT] });
-    expect(() => toParticipantDay(f, Number.NaN)).toThrow(RangeError);
+    expect(toParticipantDay(f, { date: '2026-07-22', close: 25145.5 })).toEqual({ date: '2026-07-22', niftyClose: 25145.5, rows: [CLIENT] });
+    expect(toParticipantDay(f, undefined)).toBeNull();
+    expect(toParticipantDay(f, { date: '2026-07-22', close: Number.NaN })).toBeNull();
+    expect(toParticipantDay(f, { date: '2026-07-22', close: 0 })).toBeNull();
+    // The close of another session is never joined to this file's positions.
+    expect(toParticipantDay(f, { date: '2026-07-21', close: 25145.5 })).toBeNull();
+  });
+
+  it('every parse failure is NoLiveData (the file is not used), never a crash', () => {
+    for (const bad of ['<html>Not found</html>', '', 'Client Type\nClient,1,2\n', null as never]) {
+      expect(() => parseParticipantCsv(bad, { file: 'p.csv' })).toThrow(NoLiveData);
+    }
+    expect(() => parseParticipantCsv(null as never, { file: 'p.csv' })).toThrow(/p\.csv: unreadable/);
   });
 
   it('fetch tries the plain name, then the _b variant', async () => {

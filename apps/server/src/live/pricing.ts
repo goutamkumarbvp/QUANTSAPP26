@@ -11,10 +11,14 @@
  * and NoLiveData when none of them is live. Time to expiry is calendar time to 15:30 IST on the
  * expiry date (/365, core `yearsBetween`). There is no fallback IV anywhere: an unsolvable premium
  * gives null.
+ *
+ * Live quotes count only when they are of the current session date (outside session hours: also
+ * the most recent session's date), never yesterday's quotes during today's session. A past `ts`
+ * without an explicit forward gives null: the live quotes are newer than `ts` (no look-ahead).
  */
 import { bsGreeks, bsPrice, expiryTs, impliedVol, yearsBetween, type Greeks } from '@q26/core';
 import { NoLiveData } from './types';
-import type { ForwardEstimate, InstrumentKey, LiveQuote, OptKind, Pricing, RawChain, ReferenceData } from './types';
+import type { ForwardEstimate, InstrumentKey, LiveQuote, OptKind, Pricing, RawChain, ReferenceData, TradingCalendar } from './types';
 
 /* ------------------------------------------------------------------------------------------ */
 /* Pure helpers (shared by LivePricing, the recorder and the EOD store)                         */
@@ -41,21 +45,21 @@ export interface ForwardInputs {
 
 const isPos = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
 
-/** Carry r − q implied by F over S, NaN when it is undefined (no spot, or T = 0). */
-function carryOf(F: number, S: number | undefined, T: number): number {
-  return isPos(S) && T > 0 ? Math.log(F / S) / T : NaN;
+/** A forward price and where it came from (all Black-76 needs). */
+export interface ForwardPrice {
+  forward: number;
+  source: ForwardEstimate['source'];
 }
 
 /**
- * Forward of one expiry from live/official inputs (see the module comment for the order).
+ * Forward price of one expiry from live/official inputs (see the module comment for the order).
  * Parity uses the strike nearest spot that has both premiums; without a spot, the strike with the
  * smallest |C − P| (that is the strike nearest the forward). Returns null when nothing is usable.
- * `carry` is NaN when it cannot be implied (no spot, or T = 0).
  */
-export function forwardOf(input: ForwardInputs, T: number, r: number): ForwardEstimate | null {
+export function impliedForward(input: ForwardInputs, T: number, r: number): ForwardPrice | null {
   const t = Math.max(0, T);
   const S = isPos(input.spot) ? input.spot : undefined;
-  if (isPos(input.future)) return { forward: input.future, carry: carryOf(input.future, S, t), source: 'future' };
+  if (isPos(input.future)) return { forward: input.future, source: 'future' };
 
   const pairs = input.rows.filter((row) => isPos(row.strike) && isPos(row.ce) && isPos(row.pe));
   if (pairs.length) {
@@ -63,11 +67,22 @@ export function forwardOf(input: ForwardInputs, T: number, r: number): ForwardEs
     const ordered = [...pairs].sort((a, b) => score(a) - score(b) || a.strike - b.strike);
     for (const row of ordered) {
       const F = row.strike + Math.exp(r * t) * ((row.ce as number) - (row.pe as number));
-      if (isPos(F)) return { forward: F, carry: carryOf(F, S, t), source: 'parity' };
+      if (isPos(F)) return { forward: F, source: 'parity' };
     }
   }
-  if (S !== undefined) return { forward: S * Math.exp(r * t), carry: r, source: 'spot' };
+  if (S !== undefined) return { forward: S * Math.exp(r * t), source: 'spot' };
   return null;
+}
+
+/**
+ * Forward with the carry r − q it implies over spot, ln(F/S)/T ('spot' source: r by construction).
+ * Null when no forward is usable, and also when the carry cannot be implied (no live spot, or the
+ * expiry has no time left): the estimate is rejected rather than carrying a NaN.
+ */
+export function forwardOf(input: ForwardInputs, T: number, r: number): ForwardEstimate | null {
+  const f = impliedForward(input, T, r);
+  if (!f || !isPos(input.spot) || !(T > 0)) return null;
+  return { ...f, carry: f.source === 'spot' ? r : Math.log(f.forward / input.spot) / T };
 }
 
 /** Relative + absolute tolerance used to accept a solver result (repricing check). */
@@ -135,11 +150,11 @@ export function atmIvOf(rows: readonly PremiumRow[], F: number, T: number, r: nu
  * Forward and ATM IV of a RawChain (live or recorded with IntradayStore.chainAt) at `ts`. The
  * chain's future is used only when it is of the chain's own expiry.
  */
-export function chainAtmIv(chain: RawChain, r: number, ts: number = chain.ts): { iv: number; strike: number; forward: ForwardEstimate } | null {
+export function chainAtmIv(chain: RawChain, r: number, ts: number = chain.ts): { iv: number; strike: number; forward: ForwardPrice } | null {
   const T = timeToExpiry(chain.expiry, ts);
   const future = chain.future && chain.future.key.expiry === chain.expiry ? chain.future.ltp : undefined;
   const rows: PremiumRow[] = chain.rows.map((row) => ({ strike: row.strike, ce: row.ce?.ltp, pe: row.pe?.ltp }));
-  const forward = forwardOf({ spot: chain.spot?.ltp, future, rows }, T, r);
+  const forward = impliedForward({ spot: chain.spot?.ltp, future, rows }, T, r);
   if (!forward) return null;
   const atm = atmIvOf(rows, forward.forward, T, r);
   return atm ? { ...atm, forward } : null;
@@ -153,12 +168,21 @@ export interface LivePricingOptions {
   /** Risk-free rate (config input, critic §3 cross-cutting #2). */
   r: number;
   ref: ReferenceData;
+  /** Exchange calendar: which session date a quote belongs to. */
+  calendar: TradingCalendar;
   /** Latest live quote of an instrument (LiveMarket.quote). */
   getQuote: (key: InstrumentKey) => LiveQuote | undefined;
   now?: () => number;
-  /** Treat quotes older than this as not live (ms). Default: no age limit. */
+  /**
+   * Additionally treat quotes older than this as not live (ms). Without it the session rule alone
+   * applies: a quote counts only when it is of the current session date (outside session hours:
+   * also the most recent session's date).
+   */
   maxQuoteAgeMs?: number;
 }
+
+/** A `ts` this close to now is "now" (call overhead), not a past evaluation time. */
+export const LIVE_TS_SLACK_MS = 5_000;
 
 export class LivePricing implements Pricing {
   readonly r: number;
@@ -170,10 +194,23 @@ export class LivePricing implements Pricing {
     this.now = opts.now ?? (() => Date.now());
   }
 
-  /** Live price of an instrument, undefined when there is none (or it is too old). */
-  private price(key: InstrumentKey, now: number): number | undefined {
+  /**
+   * Session dates whose quotes are live at `now`: today; outside session hours also the most
+   * recent session (the previous trading day before 09:15 and on holidays, today after the close).
+   */
+  private liveDates(now: number): Set<string> {
+    const cal = this.opts.calendar;
+    const s = cal.session(now);
+    const dates = new Set([s.date]);
+    if (s.status !== 'open') dates.add(cal.isTradingDay(s.date) && now >= cal.ts(s.date, 0) ? s.date : cal.prev(s.date));
+    return dates;
+  }
+
+  /** Live price of an instrument, undefined when there is none (or it is not of a live date / too old). */
+  private price(key: InstrumentKey, now: number, dates: Set<string>): number | undefined {
     const q = this.opts.getQuote(key);
-    if (!q || !isPos(q.ltp)) return undefined;
+    if (!q || !isPos(q.ltp) || !Number.isFinite(q.ts)) return undefined;
+    if (!dates.has(this.opts.calendar.session(q.ts).date)) return undefined;
     if (this.opts.maxQuoteAgeMs !== undefined && now - q.ts > this.opts.maxQuoteAgeMs) return undefined;
     return q.ltp;
   }
@@ -188,40 +225,47 @@ export class LivePricing implements Pricing {
     }
   }
 
-  private premiumRows(symbol: string, expiry: string, now: number): PremiumRow[] {
+  private premiumRows(symbol: string, expiry: string, now: number, dates: Set<string>): PremiumRow[] {
     return this.strikes(symbol, expiry).map((strike) => ({
       strike,
-      ce: this.price({ symbol, kind: 'CE', expiry, strike }, now),
-      pe: this.price({ symbol, kind: 'PE', expiry, strike }, now),
+      ce: this.price({ symbol, kind: 'CE', expiry, strike }, now, dates),
+      pe: this.price({ symbol, kind: 'PE', expiry, strike }, now, dates),
     }));
   }
 
+  /** NoLiveData when no forward is live, when there is no live spot to imply the carry from, or once expired. */
   forward(symbol: string, expiry: string): ForwardEstimate {
     const now = this.now();
-    return this.forwardAt(symbol, expiry, now);
+    const dates = this.liveDates(now);
+    const T = timeToExpiry(expiry, now);
+    if (!(T > 0)) throw new NoLiveData(`${symbol} ${expiry} has expired: no forward`);
+    const inputs = this.forwardInputs(symbol, expiry, now, dates);
+    const f = forwardOf(inputs, T, this.r);
+    if (f) return f;
+    if (!impliedForward(inputs, T, this.r)) throw new NoLiveData(`No live future, put-call pair or spot price for ${symbol} ${expiry}`);
+    throw new NoLiveData(`No live spot price for ${symbol}: the carry of the ${expiry} forward cannot be implied`);
   }
 
-  private forwardAt(symbol: string, expiry: string, now: number): ForwardEstimate {
-    const T = timeToExpiry(expiry, now);
-    const spot = this.price({ symbol, kind: 'SPOT' }, now);
-    const future = this.price({ symbol, kind: 'FUT', expiry }, now);
+  private forwardInputs(symbol: string, expiry: string, now: number, dates: Set<string>): ForwardInputs {
+    const spot = this.price({ symbol, kind: 'SPOT' }, now, dates);
+    const future = this.price({ symbol, kind: 'FUT', expiry }, now, dates);
     // Parity needs the option quotes only when there is no same-expiry future.
-    const rows = future === undefined ? this.premiumRows(symbol, expiry, now) : [];
-    const f = forwardOf({ spot, future, rows }, T, this.r);
-    if (!f) throw new NoLiveData(`No live future, put-call pair or spot price for ${symbol} ${expiry}`);
-    return f;
+    const rows = future === undefined ? this.premiumRows(symbol, expiry, now, dates) : [];
+    return { spot, future, rows };
   }
 
   iv(input: { symbol: string; expiry: string; type: OptKind; strike: number; premium: number; ts?: number; forward?: number }): number | null {
-    const ts = input.ts ?? this.now();
-    const F = input.forward ?? this.tryForward(input.symbol, input.expiry, ts);
+    const now = this.now();
+    const ts = input.ts ?? now;
+    const F = input.forward ?? this.liveForward(input.symbol, input.expiry, ts, now);
     if (F === undefined) return null;
     return black76Iv(input.type, input.premium, F, input.strike, timeToExpiry(input.expiry, ts), this.r);
   }
 
   greeks(input: { symbol: string; expiry: string; type: OptKind; strike: number; iv: number; ts?: number; forward?: number }): Greeks | null {
-    const ts = input.ts ?? this.now();
-    const F = input.forward ?? this.tryForward(input.symbol, input.expiry, ts);
+    const now = this.now();
+    const ts = input.ts ?? now;
+    const F = input.forward ?? this.liveForward(input.symbol, input.expiry, ts, now);
     if (F === undefined) return null;
     return black76Greeks(input.type, F, input.strike, timeToExpiry(input.expiry, ts), this.r, input.iv);
   }
@@ -232,9 +276,10 @@ export class LivePricing implements Pricing {
     if (!exp) return null;
     const T = timeToExpiry(exp, now);
     if (!(T > 0)) return null;
-    const F = this.tryForward(symbol, exp, now);
+    const dates = this.liveDates(now);
+    const F = impliedForward(this.forwardInputs(symbol, exp, now, dates), T, this.r)?.forward;
     if (F === undefined) return null;
-    return atmIvOf(this.premiumRows(symbol, exp, now), F, T, this.r)?.iv ?? null;
+    return atmIvOf(this.premiumRows(symbol, exp, now, dates), F, T, this.r)?.iv ?? null;
   }
 
   /** Nearest listed option expiry that has not expired at `now`. */
@@ -249,13 +294,13 @@ export class LivePricing implements Pricing {
     return [...list].sort().find((e) => timeToExpiry(e, now) > 0);
   }
 
-  /** Forward price, or undefined when NoLiveData. Live quotes are used even when `ts` is in the past. */
-  private tryForward(symbol: string, expiry: string, ts: number): number | undefined {
-    try {
-      return this.forwardAt(symbol, expiry, ts).forward;
-    } catch (e) {
-      if (e instanceof NoLiveData) return undefined;
-      throw e;
-    }
+  /**
+   * Forward price from the live quotes (future / parity / spot; no spot needed for the first two),
+   * undefined when none is live. Undefined for a `ts` in the past: today's quotes are newer than it.
+   */
+  private liveForward(symbol: string, expiry: string, ts: number, now: number): number | undefined {
+    if (ts < now - LIVE_TS_SLACK_MS) return undefined;
+    const dates = this.liveDates(now);
+    return impliedForward(this.forwardInputs(symbol, expiry, now, dates), timeToExpiry(expiry, now), this.r)?.forward;
   }
 }

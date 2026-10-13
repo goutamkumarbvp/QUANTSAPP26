@@ -204,9 +204,9 @@ describe('KotakSession requests', () => {
   });
 
   it('never loops: a second rejection fails and further requests do not log in again', async () => {
-    const { ff, session, apiCalls } = setup(() => ({ status: 403, body: { message: 'Invalid session, please re-login' } }));
+    const { ff, session, apiCalls } = setup(() => ({ status: 401, body: { message: 'Invalid session, please re-login' } }));
     const err = await session.request('quick/user/orders', { kind: 'session' }).catch((e: unknown) => e);
-    expect(err).toMatchObject({ kind: 'auth', httpStatus: 403 });
+    expect(err).toMatchObject({ kind: 'auth', httpStatus: 401 });
     expect(ff.calls.filter(isLogin).length).toBe(2);
     expect(apiCalls().length).toBe(2);
     const before = ff.calls.length;
@@ -214,6 +214,30 @@ describe('KotakSession requests', () => {
     expect(ff.calls.length).toBe(before);
     expect(session.status().loggedIn).toBe(false);
     expect(session.status().error).toContain('Invalid session');
+  });
+
+  it('a login that works on sessions every request refuses holds longer each round (5, 10, 20, 30 min) until a request is served', async () => {
+    let refuse = true;
+    const { env, ff, session } = setup(() => (refuse ? { status: 401, body: INVALID_SESSION } : { body: [] }));
+    const logins = () => ff.calls.filter(isLogin).length;
+    const holds: number[] = [];
+    for (let round = 0; round < 5; round++) {
+      await expect(session.request('a', { kind: 'market' })).rejects.toMatchObject({ kind: 'auth' });
+      expect(logins()).toBe(2 * (round + 1)); // the login and the one re-login of each round
+      const until = session.status().loginBlockedUntil!;
+      holds.push(Math.round((until - env.clock) / 60_000));
+      // Nothing logs in during the hold (fails fast, no network call).
+      await expect(session.request('a', { kind: 'market' })).rejects.toMatchObject({ kind: 'not-logged-in' });
+      expect(logins()).toBe(2 * (round + 1));
+      env.clock = until + 1;
+    }
+    expect(holds).toEqual([5, 10, 20, 30, 30]);
+    // A served request ends the streak: the next double rejection holds for the cooldown again.
+    refuse = false;
+    await session.request('a', { kind: 'market' });
+    refuse = true;
+    await expect(session.request('a', { kind: 'market' })).rejects.toMatchObject({ kind: 'auth' });
+    expect(Math.round((session.status().loginBlockedUntil! - env.clock) / 60_000)).toBe(5);
   });
 
   it('concurrent rejections share one re-login', async () => {
@@ -285,6 +309,117 @@ describe('KotakSession requests', () => {
     const err = await session.request('a', { kind: 'market' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(NoLiveData);
     expect(err).toMatchObject({ kind: 'network', message: expect.stringContaining('socket hang up') });
+  });
+});
+
+describe('KotakSession 403 (not enough privileges vs dead session)', () => {
+  const MIN = 60_000;
+  const QUOTES = 'script-details/1.0/quotes/neosymbol/nse_cm|1333/all';
+  const HIST = 'market-data/1.0/historical/details';
+  const FORBIDDEN: Reply = { status: 403, body: { message: 'Not enough privileges' } };
+  const kinds = (calls: FetchCall[]) => calls.map((c) => (isLogin(c) ? 'login' : isValidate(c) ? 'validate' : c.url.includes('/quotes/') ? 'quotes' : c.url.includes('/historical/') ? 'hist' : 'other'));
+
+  it('after the session has served: a 403 is per endpoint, no re-login, fails fast for the cooldown', async () => {
+    const { env, ff, session, apiCalls } = setup((c) => (c.url.includes('/historical/') ? FORBIDDEN : { body: [QUOTE_EQUITY] }));
+    await session.request(QUOTES, { kind: 'market' });
+    const err = await session.request(HIST, { kind: 'market', lane: 'slow', endpoint: 'historical nse_cm' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoLiveData);
+    expect(err).toMatchObject({ kind: 'api', httpStatus: 403, message: expect.stringContaining('not permitted for this account') });
+    expect(env.logins).toBe(1);
+    expect(session.status()).toMatchObject({ loggedIn: true, endpointsOnHold: { 'historical nse_cm': env.clock + 10 * MIN } });
+
+    // Held: no network call for that endpoint; the others keep working on the same session.
+    const before = apiCalls().length;
+    await expect(session.request(HIST, { kind: 'market', lane: 'slow', endpoint: 'historical nse_cm' })).rejects.toMatchObject({ kind: 'api', httpStatus: 403 });
+    expect(apiCalls().length).toBe(before);
+    await expect(session.request(QUOTES, { kind: 'market' })).resolves.toEqual([QUOTE_EQUITY]);
+    expect(env.logins).toBe(1);
+
+    // After the cooldown it is asked again (and held again).
+    env.clock += 10 * MIN;
+    await expect(session.request(HIST, { kind: 'market', lane: 'slow', endpoint: 'historical nse_cm' })).rejects.toMatchObject({ kind: 'api', httpStatus: 403 });
+    expect(kinds(ff.calls)).toEqual(['login', 'validate', 'quotes', 'hist', 'quotes', 'hist']);
+    expect(env.logins).toBe(1);
+  });
+
+  it('a 403 on the first call after login re-logs in once; a dead session recovers', async () => {
+    let n = 0;
+    const { env, session } = setup(() => (++n === 1 ? FORBIDDEN : { body: [QUOTE_EQUITY] }));
+    await session.login();
+    await expect(session.request(QUOTES, { kind: 'market' })).resolves.toEqual([QUOTE_EQUITY]);
+    expect(env.logins).toBe(2);
+    expect(session.status().endpointsOnHold).toBeUndefined();
+  });
+
+  it('a 403 on the first call that persists after the re-login holds that endpoint only, the session stays', async () => {
+    const { env, ff, session } = setup((c) => (c.url.includes('/historical/') || c.url.endsWith('/oc') ? FORBIDDEN : { body: [QUOTE_EQUITY] }));
+    await session.login();
+    await expect(session.request(HIST, { kind: 'market', endpoint: 'historical nse_fo' })).rejects.toMatchObject({ kind: 'api', httpStatus: 403 });
+    expect(env.logins).toBe(2); // the one re-login
+    expect(session.status().loggedIn).toBe(true);
+    // Another refused endpoint on the fresh (not yet served) session: no second re-login.
+    await expect(session.request('oc', { kind: 'market' })).rejects.toMatchObject({ kind: 'api', httpStatus: 403 });
+    expect(env.logins).toBe(2);
+    expect(Object.keys(session.status().endpointsOnHold ?? {}).sort()).toEqual(['historical nse_fo', 'oc']);
+    await expect(session.request(QUOTES, { kind: 'market' })).resolves.toEqual([QUOTE_EQUITY]);
+    expect(kinds(ff.calls)).toEqual(['login', 'validate', 'hist', 'login', 'validate', 'hist', 'other', 'quotes']);
+  });
+
+  it('a 403 on an endpoint that already served this session is a dead session: one re-login and retry', async () => {
+    let n = 0;
+    const { env, session } = setup(() => (++n === 2 ? FORBIDDEN : { body: [QUOTE_EQUITY] }));
+    await session.request(QUOTES, { kind: 'market' });
+    await expect(session.request(QUOTES, { kind: 'market' })).resolves.toEqual([QUOTE_EQUITY]);
+    expect(env.logins).toBe(2);
+    expect(session.status().endpointsOnHold).toBeUndefined();
+  });
+});
+
+describe('KotakSession invalidate()', () => {
+  it('allows one re-login per authReloginCooldownMs; a repeat holds logins (even forced) until it ends', async () => {
+    const { env, ff, session } = setup(() => ({ body: [] }), { deps: { authReloginCooldownMs: 5 * 60_000 } });
+    await session.login();
+    const t1 = env.clock;
+    session.invalidate('feed: session rejected');
+    expect(session.status()).toMatchObject({ loggedIn: false, error: 'feed: session rejected' });
+    await session.request('a', { kind: 'market' }); // the one re-login
+    expect(env.logins).toBe(2);
+
+    env.clock += 60_000;
+    session.invalidate('feed: session rejected');
+    expect(session.status().loginBlockedUntil).toBe(t1 + 5 * 60_000);
+    const before = ff.calls.length;
+    await expect(session.request('a', { kind: 'market' })).rejects.toMatchObject({ kind: 'not-logged-in' });
+    await expect(session.login({ force: true })).rejects.toMatchObject({ kind: 'login', message: expect.stringContaining('on hold') });
+    expect(ff.calls.length).toBe(before);
+
+    env.clock = t1 + 5 * 60_000;
+    await session.request('a', { kind: 'market' });
+    expect(env.logins).toBe(3);
+    expect(session.status().loggedIn).toBe(true);
+  });
+
+  it('forgets the 403 holds taken on the invalidated session (they may have been the dead session)', async () => {
+    let refuse = true;
+    const { session } = setup((c) => (c.url.endsWith('/h') && refuse ? { status: 403, body: { message: 'Not enough privileges' } } : { body: [] }));
+    await session.request('q', { kind: 'market' });
+    await expect(session.request('h', { kind: 'market' })).rejects.toMatchObject({ kind: 'api', httpStatus: 403 });
+    expect(Object.keys(session.status().endpointsOnHold ?? {})).toEqual(['h']);
+    session.invalidate('feed: session rejected');
+    expect(session.status().endpointsOnHold).toBeUndefined();
+    refuse = false;
+    await expect(session.request('h', { kind: 'market' })).resolves.toEqual([]);
+  });
+
+  it('shares the budget with rejected requests: a 401 soon after an invalidate-triggered login does not log in again', async () => {
+    let n = 0;
+    const { env, session } = setup(() => (++n === 1 ? { body: [] } : { status: 401, body: INVALID_SESSION }));
+    await session.request('a', { kind: 'market' });
+    session.invalidate('feed: session rejected');
+    await expect(session.request('b', { kind: 'market' })).rejects.toMatchObject({ kind: 'auth' });
+    expect(env.logins).toBe(2);
+    await expect(session.request('c', { kind: 'market' })).rejects.toMatchObject({ kind: 'not-logged-in' });
+    expect(env.logins).toBe(2);
   });
 });
 

@@ -9,6 +9,7 @@
  * Call Short (§4), so every value is mapped by header name. A blank cell is missing data, never 0.
  */
 import type { ParticipantDay, ParticipantRow } from '@q26/core';
+import { NoLiveData } from '../types';
 import { CsvTable, NSE_ARCHIVES, NseError, assertYmd, csvRecords, ddmmyyyy, findHeaderRow, parseDate, type NseHttp, type Published } from './http';
 
 export type ParticipantFileKind = 'oi' | 'vol';
@@ -57,9 +58,18 @@ export interface ParticipantFile {
 
 const TITLE_DATE = /as on\s+([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/i;
 
+/** Parse one participant file. Every failure is an NseError (a NoLiveData): the file is not used. */
 export function parseParticipantCsv(text: string, opts: { kind?: ParticipantFileKind; expectedDate?: string; file?: string } = {}): ParticipantFile {
-  const kind = opts.kind ?? 'oi';
-  const file = opts.file ?? `fao_participant_${kind}`;
+  const file = opts.file ?? `fao_participant_${opts.kind ?? 'oi'}`;
+  try {
+    return parseParticipants(text, opts.kind ?? 'oi', file, opts.expectedDate);
+  } catch (e) {
+    if (e instanceof NoLiveData) throw e;
+    throw new NseError(`${file}: unreadable (${e instanceof Error ? e.message : String(e)})`, 'format');
+  }
+}
+
+function parseParticipants(text: string, kind: ParticipantFileKind, file: string, expectedDate: string | undefined): ParticipantFile {
   const records = csvRecords(text);
   const headerRow = findHeaderRow(records, 'Client Type', file);
   const t = new CsvTable(records, headerRow, file, ['Client Type', ...Object.values(PARTICIPANT_COLUMNS)]);
@@ -67,10 +77,10 @@ export function parseParticipantCsv(text: string, opts: { kind?: ParticipantFile
   // The title is malformed CSV (doubled quotes around a field holding a comma), so read it raw.
   const m = TITLE_DATE.exec(text.slice(0, 600));
   const titleDate = m ? parseDate(`${m[1]} ${m[2]}, ${m[3]}`) : undefined;
-  if (titleDate && opts.expectedDate && titleDate !== opts.expectedDate) {
-    throw new NseError(`${file}: file is dated ${titleDate}, expected ${opts.expectedDate}`, 'format');
+  if (titleDate && expectedDate && titleDate !== expectedDate) {
+    throw new NseError(`${file}: file is dated ${titleDate}, expected ${expectedDate}`, 'format');
   }
-  const date = titleDate ?? opts.expectedDate;
+  const date = titleDate ?? expectedDate;
   if (!date) throw new NseError(`${file}: no date in the title line and none expected`, 'format');
 
   const rows: ParticipantRow[] = [];
@@ -103,12 +113,14 @@ export function parseParticipantCsv(text: string, opts: { kind?: ParticipantFile
 }
 
 /**
- * The app's ParticipantDay. `niftyClose` comes from the index closes (§5 "Mapping"); it must be a real
- * number — when it is unknown the caller decides (e.g. leaves the day out) instead of passing NaN.
+ * The app's ParticipantDay, joined with the NIFTY close of the SAME date from the index closes
+ * (§5 "Mapping", indices.niftyCloseOf). Null when that close is unknown, not positive or of another
+ * date: the caller leaves the day out instead of showing a NIFTY value from a different session.
  */
-export function toParticipantDay(file: Pick<ParticipantFile, 'date' | 'rows'>, niftyClose: number): ParticipantDay {
-  if (!Number.isFinite(niftyClose) || niftyClose <= 0) throw new RangeError(`niftyClose for ${file.date} must be a positive number`);
-  return { date: file.date, niftyClose, rows: file.rows.map((r) => ({ ...r })) };
+export function toParticipantDay(file: Pick<ParticipantFile, 'date' | 'rows'>, nifty: { date: string; close: number } | undefined): ParticipantDay | null {
+  if (!nifty || nifty.date !== file.date) return null;
+  if (!Number.isFinite(nifty.close) || nifty.close <= 0) return null;
+  return { date: file.date, niftyClose: nifty.close, rows: file.rows.map((r) => ({ ...r })) };
 }
 
 /** The participant file of a date (published ≈19:00–23:30 IST, §4). 404 on both names → not-published. */

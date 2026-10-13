@@ -72,7 +72,10 @@ describe('FII/DII', () => {
       diiNet: 2345.67,
       niftyClose: 25145.5,
       niftyChangePct: -0.32,
+      scope: 'combined',
     });
+    // NSE-only figures (fallback endpoint) keep their scope: they must never be summed with combined days.
+    expect(toFiiDiiDay({ ...flows, scope: 'nse' }, { date: '2026-10-09', close: 25145.5, changePct: -0.32 })?.scope).toBe('nse');
     expect(toFiiDiiDay(flows, undefined)).toBeNull();
     expect(toFiiDiiDay(flows, { date: '2026-10-09', close: 25145.5 })).toBeNull();
     expect(toFiiDiiDay(flows, { date: '2026-10-09', close: Number.NaN, changePct: 1 })).toBeNull();

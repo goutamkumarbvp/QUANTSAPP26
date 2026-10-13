@@ -65,7 +65,6 @@ describe('quotes', () => {
       segment: 'nse_cm',
       token: '1333',
       displaySymbol: 'HDFCBANK-EQ',
-      isIndex: false,
       ts: 1782374657000,
       ltp: 801.6,
       ltq: 550,
@@ -104,14 +103,13 @@ describe('quotes', () => {
     expect(parseQuote(QUOTE_OPTION)!.oi).toBe(10715645);
   });
 
-  it('treats the zero placeholders of index quotes as absent', () => {
+  it('parses an index quote as sent; empty depth levels and zero prices are absent', () => {
     const q = parseQuote(QUOTE_INDEX_SENSEX)!;
     expect(q).toEqual({
       neosymbol: 'bse_cm|SENSEX',
       segment: 'bse_cm',
       token: 'SENSEX',
       displaySymbol: 'SENSEX-IN',
-      isIndex: true,
       ts: 1757915078000,
       ltp: 81809.34,
       open: 81925.51,
@@ -120,15 +118,42 @@ describe('quotes', () => {
       prevClose: 81904.7,
       change: -95.36,
       changePct: -0.12,
+      // Whether these "0"s are placeholders depends on the instrument: quoteToLive decides by key.
+      volume: 0,
+      totalBuyQty: 0,
+      totalSellQty: 0,
     });
   });
 
   it('quoteToLive maps to LiveQuote with best bid/ask from depth', () => {
     const key = { symbol: 'HDFCBANK', kind: 'SPOT' as const };
-    const lq = quoteToLive(parseQuote(QUOTE_EQUITY)!, key, 1)!;
+    const lq = quoteToLive(parseQuote(QUOTE_EQUITY)!, key, 1, 'stock')!;
     expect(lq).toMatchObject({ key, ts: 1782374657000, ltp: 801.6, prevClose: 793.2, volume: 30043533, bid: 801.6, ask: 801.65, bidQty: 1733, askQty: 550, atp: 799.89 });
     expect(lq.oi).toBeUndefined();
-    expect(quoteToLive({ ...parseQuote(QUOTE_EQUITY)!, ltp: undefined }, key, 1)).toBeUndefined();
+    expect(quoteToLive({ ...parseQuote(QUOTE_EQUITY)!, ltp: undefined }, key, 1, 'stock')).toBeUndefined();
+  });
+
+  it('quoteToLive drops the index placeholders by instrument key, whether the index came back by name or number', () => {
+    const sensex = { symbol: 'SENSEX', kind: 'SPOT' as const };
+    const byName = quoteToLive(parseQuote(QUOTE_INDEX_SENSEX)!, sensex, 1, 'index')!;
+    expect(byName).toEqual({ key: sensex, ts: 1757915078000, ltp: 81809.34, open: 81925.51, high: 81998.51, low: 81779.82, prevClose: 81904.7 });
+    // CONSTRUCTED: NIFTY addressed by its numeric cash token 26000, with a (non-empty) book that an
+    // index cannot have.
+    const nifty = { symbol: 'NIFTY', kind: 'SPOT' as const };
+    const numeric = parseQuote({ ...QUOTE_EQUITY, exchange_token: '26000', exchange: 'nse_cm', last_volume: '0', total_buy: '0', total_sell: '0' })!;
+    const lq = quoteToLive(numeric, nifty, 1, 'index')!;
+    expect(lq.ltp).toBe(801.6);
+    for (const f of ['volume', 'totalBuyQty', 'totalSellQty', 'bid', 'ask', 'bidQty', 'askQty', 'depth'] as const) expect(lq[f]).toBeUndefined();
+    // The same zeros are real for a stock (no trade yet) and for an index option (untraded strike).
+    const stock = quoteToLive(numeric, { symbol: 'X', kind: 'SPOT' }, 1, 'stock')!;
+    expect([stock.volume, stock.totalBuyQty, stock.totalSellQty, stock.bid]).toEqual([0, 0, 0, 801.6]);
+    const opt = { symbol: 'NIFTY', kind: 'CE' as const, expiry: '2026-06-23', strike: 22250 };
+    expect(quoteToLive({ ...parseQuote(QUOTE_OPTION)!, volume: 0 }, opt, 1, 'index')!.volume).toBe(0);
+  });
+
+  it('keeps a depth level without an order count, with orders absent (never 0)', () => {
+    const q = parseQuote({ ...QUOTE_EQUITY, depth: { buy: [{ price: '801.6', quantity: '1733' }], sell: [{ price: '801.65', quantity: '550', orders: '1' }] } })!;
+    expect(q.depth).toEqual({ bids: [{ price: 801.6, qty: 1733 }], asks: [{ price: 801.65, qty: 550, orders: 1 }] });
   });
 
   it('chunks ≤50 per call on the general lane and reports failed chunks', async () => {
@@ -140,7 +165,7 @@ describe('quotes', () => {
     });
     const r = await rest.quotes([...syms, syms[0]]);
     expect(calls.map((c) => c.path.split('/')[4].split(',').length)).toEqual([50, 50, 20]);
-    expect(calls.every((c) => c.opts.kind === 'market' && c.opts.lane === 'general')).toBe(true);
+    expect(calls.every((c) => c.opts.kind === 'market' && c.opts.lane === 'general' && c.opts.endpoint === 'quotes nse_fo')).toBe(true);
     expect(r.quotes.size).toBe(70);
     expect(r.quotes.get('nse_fo|1000')?.ltp).toBe(801.6);
     expect(r.errors).toEqual([{ neosymbols: syms.slice(50, 100), error: expect.stringContaining('Invalid instrument') }]);
@@ -163,7 +188,7 @@ describe('quotes', () => {
     const call = ff.calls[2];
     expect(call.url).toBe('https://neo-gw.kotaksecurities.com/xyz/script-details/1.0/quotes/neosymbol/bse_cm|SENSEX,nse_cm|Nifty%2050/all');
     expect(call.headers).toEqual({ authorization: CREDS.consumerKey });
-    expect(r.quotes.get('bse_cm|SENSEX')?.isIndex).toBe(true);
+    expect(r.quotes.get('bse_cm|SENSEX')?.ltp).toBe(81809.34);
     await expect(rest.expiries({ exchange: 'nse_fo', underlying: 'NOPE' })).rejects.toMatchObject({ kind: 'api', stCode: 1009 });
   });
 });
@@ -219,7 +244,6 @@ describe('option chain, futures chain, expiries', () => {
           open: 24455,
           high: 24512,
           low: 24428,
-          close: 24485.2,
           prevClose: 24322.1,
           volume: 9852340,
           oi: 13930930,
@@ -229,6 +253,12 @@ describe('option chain, futures chain, expiries', () => {
         },
       ],
     });
+    // quote.c equals ltp intraday in the sample: it is not a close and is not carried anywhere.
+    const row = parseFuturesChain(FUTURES_CHAIN).futures[0];
+    expect('close' in row).toBe(false);
+    const fut = chainLegToLive(row, { symbol: 'NIFTY', kind: 'FUT', expiry: '2026-07-31' }, 7)!;
+    expect(fut.prevClose).toBe(24322.1);
+    expect('close' in fut).toBe(false);
   });
 
   it('calls option-chain / futures chain / expiries on the slow lane with the documented params', async () => {
@@ -243,6 +273,8 @@ describe('option chain, futures chain, expiries', () => {
       ['market-data/1.0/watchlist/option-chain', 'slow', 'market', { exchange: 'nse_fo', underlying: 'NIFTY', expiry: undefined, instrument_type: 'fut' }],
       ['market-data/1.0/watchlist/expiries', 'slow', 'market', { exchange: 'nse_fo', underlying: 'RELIANCE', instrument_type: 'option' }],
     ]);
+    // 403 holds are per endpoint: one key per endpoint and exchange.
+    expect(calls.map((c) => c.opts.endpoint)).toEqual(['option-chain nse_fo', 'futures-chain nse_fo', 'expiries nse_fo']);
     await expect(rest.optionChain({ exchange: 'nse_fo', underlying: 'NIFTY', count: 45 })).rejects.toThrow(/multiple of 10/);
     expect(calls.length).toBe(3);
   });
@@ -297,6 +329,7 @@ describe('historical', () => {
       ['slow', '2026-08-30', '2026-09-13', '1min', 'nse_fo|71472'],
     ]);
     expect(out.length).toBe(2); // identical candles across windows are merged
+    expect(calls.every((c) => c.opts.endpoint === 'historical nse_fo')).toBe(true);
     const daily = stub(() => HISTORICAL);
     await daily.rest.historical({ neosymbol: 'nse_cm|1333', interval: 'D', from: '2026-01-01', to: '2026-09-30' });
     expect(daily.calls.length).toBe(2);

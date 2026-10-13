@@ -75,7 +75,8 @@ export interface FinalSettlement {
 }
 
 export interface VolumeUnitCheck {
-  verdict: VolumeUnit | 'inconclusive';
+  /** 'inconclusive' = no row could vote; 'conflicting' = votes for both units, neither ≥ 90 %. */
+  verdict: VolumeUnit | 'inconclusive' | 'conflicting';
   contractsVotes: number;
   unitsVotes: number;
 }
@@ -97,9 +98,9 @@ export interface FoBhavcopy {
 export interface FoParseOptions {
   exchange: Exchange;
   /**
-   * Unit of `TtlTradgVol`. 'auto' (default) uses the per-file turnover check and, when that is
-   * inconclusive, the documented unit (NSE contracts §2; BSE units §9, UNCONFIRMED). An explicit unit
-   * that the check contradicts throws instead of storing wrong volumes.
+   * Unit of `TtlTradgVol`. 'auto' (default) uses the per-file turnover check and, only when no row
+   * gives evidence, the documented unit (NSE contracts §2; BSE units §9, UNCONFIRMED). Conflicting
+   * evidence, or an explicit unit that the check contradicts, throws instead of guessing.
    */
   volumeUnit?: VolumeUnit | 'auto';
   /** Throws when the file's `TradDt` differs. */
@@ -242,6 +243,10 @@ export function parseFoUdiff(text: string, opts: FoParseOptions): FoBhavcopy {
     raw.map((x) => ({ volume: x.vol, lot: x.lot, turnover: x.meta.turnover, price: x.strike !== undefined ? x.strike + x.close : x.close })),
   );
   const wanted = opts.volumeUnit ?? 'auto';
+  if (volumeUnitCheck.verdict === 'conflicting') {
+    const { contractsVotes: c, unitsVotes: u } = volumeUnitCheck;
+    throw new NseError(`${file}: TtlTradgVol unit is ambiguous (turnover check: ${c} rows look like contracts, ${u} like units); file not used`, 'format');
+  }
   let volumeUnit: VolumeUnit;
   if (wanted === 'auto') {
     volumeUnit = volumeUnitCheck.verdict === 'inconclusive' ? DOCUMENTED_UNIT[exchange] : volumeUnitCheck.verdict;
@@ -320,7 +325,9 @@ export function parseFoUdiff(text: string, opts: FoParseOptions): FoBhavcopy {
 
 /**
  * Infers the unit of `TtlTradgVol` from `TtlTrfVal` ≈ volume × price (× lot for contracts), with
- * price = strike + premium for options (§2: NSE turnover is notional). Rows need lot ≥ 2.
+ * price = strike + premium for options (§2: NSE turnover is notional). Rows need lot ≥ 2. A unit
+ * wins with ≥ 90 % of the votes; votes without such a majority are 'conflicting', no votes at all
+ * 'inconclusive'.
  */
 export function checkVolumeUnit(samples: Iterable<{ volume: number; lot?: number; turnover?: number; price: number }>): VolumeUnitCheck {
   let contractsVotes = 0;
@@ -332,7 +339,7 @@ export function checkVolumeUnit(samples: Iterable<{ volume: number; lot?: number
     else if (Math.abs(ratio - 1) <= 0.25) unitsVotes++;
   }
   const n = contractsVotes + unitsVotes;
-  let verdict: VolumeUnitCheck['verdict'] = 'inconclusive';
+  let verdict: VolumeUnitCheck['verdict'] = n > 0 ? 'conflicting' : 'inconclusive';
   if (n > 0 && contractsVotes >= 0.9 * n) verdict = 'contracts';
   else if (n > 0 && unitsVotes >= 0.9 * n) verdict = 'units';
   return { verdict, contractsVotes, unitsVotes };

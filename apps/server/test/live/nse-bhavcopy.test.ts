@@ -20,6 +20,7 @@ import {
   underlyingCloses,
 } from '../../src/live/nse/bhavcopy';
 import { csvRecords } from '../../src/live/nse/http';
+import { NoLiveData } from '../../src/live/types';
 import { fixture, testHttp, text } from './nse-fake';
 
 const NSE_0915 = fixture('nse-fo-20260915.csv');
@@ -178,9 +179,20 @@ describe('BSE F&O UDiFF bhavcopy (SENSEX/BANKEX)', () => {
     expect(buildSettlementLookup([f]).settlement({ symbol: 'SENSEX', kind: 'CE', expiry: '2026-04-30', strike: 75200 })).toBe(1713.5);
   });
 
-  it('falls back to the documented unit when the turnover check is inconclusive', () => {
+  it('falls back to the documented unit only when no row gives evidence', () => {
     const noTurnover = BSE_0430.replace('234310908.00', '0.00');
     expect(parseFoUdiff(noTurnover, { exchange: 'BSE' })).toMatchObject({ volumeUnit: 'units', volumeUnitCheck: { verdict: 'inconclusive' } });
+  });
+
+  it('refuses a file whose rows support both volume units instead of guessing (CONSTRUCTED row)', () => {
+    // CONSTRUCTED: a second strike whose TtlTrfVal = 147 × 20 × (78100 + 1969.30) reads as contracts,
+    // while the real row reads as units.
+    const row = '2026-04-30,2026-04-30,FO,BSE,IDO,842627,,SENSEX,,2026-06-25,2026-06-25,78100.00,CE,SENSEX26JUN78100CE,1500.00,1982.60,1500.00,1969.30,1963.40,2300.00,76913.50,1969.30,2320,1860,147,235403742.00,143,F1,20,,,,,';
+    const mixed = `${BSE_0430.trimEnd()}\n${row}\n`;
+    for (const volumeUnit of ['auto', 'units', 'contracts'] as const) {
+      expect(() => parseFoUdiff(mixed, { exchange: 'BSE', volumeUnit })).toThrow(NoLiveData);
+      expect(() => parseFoUdiff(mixed, { exchange: 'BSE', volumeUnit })).toThrow(/unit is ambiguous \(turnover check: 1 rows look like contracts, 1 like units\); file not used/);
+    }
   });
 });
 
@@ -189,6 +201,15 @@ describe('checkVolumeUnit', () => {
     expect(checkVolumeUnit([{ volume: 10, lot: 1, turnover: 1000, price: 100 }]).verdict).toBe('inconclusive');
     expect(checkVolumeUnit([{ volume: 10, lot: 50, turnover: 50_000, price: 100 }]).verdict).toBe('contracts');
     expect(checkVolumeUnit([{ volume: 10, lot: 50, turnover: 1_000, price: 100 }]).verdict).toBe('units');
+  });
+
+  it('a unit needs ≥ 90 % of the votes; support for both without that is conflicting', () => {
+    const contracts = { volume: 10, lot: 50, turnover: 50_000, price: 100 };
+    const units = { volume: 10, lot: 50, turnover: 1_000, price: 100 };
+    expect(checkVolumeUnit([contracts, units])).toEqual({ verdict: 'conflicting', contractsVotes: 1, unitsVotes: 1 });
+    expect(checkVolumeUnit([...Array(8).fill(contracts), units]).verdict).toBe('conflicting'); // 89 %
+    expect(checkVolumeUnit([...Array(9).fill(contracts), units]).verdict).toBe('contracts'); // 90 %
+    expect(checkVolumeUnit([]).verdict).toBe('inconclusive');
   });
 });
 

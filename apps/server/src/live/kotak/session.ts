@@ -4,9 +4,16 @@
  * official authentication.md, troubleshooting.md Q3/Q7/Q8, critic.md C10/C12/C16).
  *
  * Secrets (consumer key, MPIN, TOTP secret, tokens, sids) never reach logs, errors or status().
- * Re-login policy: on 401/403/stCode 1003 one re-login with a NEW TOTP window, then one retry;
- * never a loop. Failed logins back off (60 s doubling to 30 min; a 429 holds for Retry-After, or
- * 5 min without one).
+ * Re-login policy: on 401/stCode 1003 one re-login with a NEW TOTP window, then one retry; never a
+ * loop. A 403 is a dead session only on a session that has not served anything yet (the first call
+ * after login), or on an endpoint that already served this same session (privileges do not change
+ * mid-session, so that cannot be "not enough privileges"). Any other 403 is "not enough privileges"
+ * for that endpoint (instruments.md): it fails fast for `pathCooldownMs` without touching the
+ * session. Auth-triggered re-logins (rejected requests, invalidate()) happen at most once per
+ * `authReloginCooldownMs`; a request rejected again after its fresh login holds logins for that
+ * cooldown, doubling (to 30 min) while nothing is served in between, so logins that succeed on a
+ * session every request refuses cannot repeat every few minutes. Failed logins back off (60 s
+ * doubling to 30 min; a 429 holds for Retry-After, or 5 min without one).
  */
 import type { NeoEnv } from '../env';
 import { scrubSecrets } from '../env';
@@ -54,8 +61,10 @@ export interface KotakSessionDeps {
   timeoutMs?: number;
   /** Daily proactive re-login time, minutes after IST midnight (default 08:30, before pre-open). */
   dailyReloginIstMinute?: number;
-  /** Minimum gap between two re-logins triggered by a rejected session (ms). */
+  /** Minimum gap between two re-logins triggered by a rejected session or invalidate() (ms). */
   authReloginCooldownMs?: number;
+  /** How long an endpoint refused with 403 ("not enough privileges") fails fast (ms, default 10 min). */
+  pathCooldownMs?: number;
   /** A 429 whose pause is at most this long is retried once inline (ms). */
   maxInlineRetryWaitMs?: number;
 }
@@ -70,6 +79,8 @@ export interface KotakRequestOptions {
   body?: string | URLSearchParams;
   lane?: Lane;
   signal?: AbortSignal;
+  /** Endpoint key for the 403 cooldown (default: the path without its query). */
+  endpoint?: string;
 }
 
 export interface KotakSessionStatus {
@@ -87,6 +98,8 @@ export interface KotakSessionStatus {
   feedUrlKnown: boolean;
   /** Last X-RateLimit-* / Retry-After headers seen (for checking the real quotas). */
   rateLimitHeaders?: Record<string, string>;
+  /** Endpoints refused with 403 that fail fast until the given time (ms). */
+  endpointsOnHold?: Record<string, number>;
 }
 
 /** What the SFeed client needs. Carries secrets: never log or return it from an API. */
@@ -113,6 +126,10 @@ interface ActiveSession {
   loggedInAt: number;
   expiresAt?: number;
   generation: number;
+  /** A request on this session returned data (the session is known to be good). */
+  served: boolean;
+  /** Endpoints (KotakRequestOptions.endpoint keys) that returned data on this session. */
+  okEndpoints: Set<string>;
 }
 
 type Json = Record<string, unknown>;
@@ -211,6 +228,7 @@ export class KotakSession {
   private readonly timeoutMs: number;
   private readonly dailyReloginMinute: number;
   private readonly authReloginCooldownMs: number;
+  private readonly pathCooldownMs: number;
   private readonly maxInlineRetryWaitMs: number;
 
   private session: ActiveSession | null = null;
@@ -223,6 +241,12 @@ export class KotakSession {
   private lastWasRateLimited = false;
   private lastError: string | undefined;
   private lastAuthRelogin = Number.NEGATIVE_INFINITY;
+  /** Requests rejected again after a fresh login since the last one that was served (escalates the hold). */
+  private rejectedStreak = 0;
+  /** Logins held after repeated session rejections; `force` does not skip this hold. */
+  private authHoldUntil = 0;
+  /** Endpoint → hold after a 403 "not enough privileges" (generation = session that got it). */
+  private readonly endpointHolds = new Map<string, { until: number; reason: string; generation: number }>();
   private rateHeaders: Record<string, string> | undefined;
   private readonly listeners = new Set<(s: KotakSessionStatus) => void>();
 
@@ -238,6 +262,7 @@ export class KotakSession {
     this.timeoutMs = deps.timeoutMs ?? 15_000;
     this.dailyReloginMinute = deps.dailyReloginIstMinute ?? 8 * 60 + 30;
     this.authReloginCooldownMs = deps.authReloginCooldownMs ?? 5 * MINUTE;
+    this.pathCooldownMs = deps.pathCooldownMs ?? 10 * MINUTE;
     this.maxInlineRetryWaitMs = deps.maxInlineRetryWaitMs ?? 5_000;
   }
 
@@ -248,12 +273,16 @@ export class KotakSession {
   /**
    * One TOTP login + MPIN validate attempt (shared by concurrent callers). Throws KotakError
    * kind 'login' on failure, or immediately while automatic logins are blocked after failures
-   * (`force` skips the failure back-off but never a 429 back-off), and kind 'rate-limit' while
-   * the shared limiter is paused for longer than `maxInlineRetryWaitMs`.
+   * (`force` skips the failure back-off but never a 429 back-off nor the hold after repeated
+   * session rejections), and kind 'rate-limit' while the shared limiter is paused for longer than
+   * `maxInlineRetryWaitMs`.
    */
   login(opts: { force?: boolean } = {}): Promise<void> {
     if (this.loginInFlight) return this.loginInFlight;
     const t = this.now();
+    if (t < this.authHoldUntil) {
+      return Promise.reject(new KotakError(`Kotak login on hold until ${new Date(this.authHoldUntil).toISOString()} after: ${this.lastError ?? 'repeated session rejections'}`, 'login'));
+    }
     if (t < this.blockedUntil && (!opts.force || this.lastWasRateLimited)) {
       return Promise.reject(
         new KotakError(`Kotak login on hold until ${new Date(this.blockedUntil).toISOString()} after: ${this.lastError ?? 'previous failure'}`, 'login'),
@@ -314,6 +343,8 @@ export class KotakSession {
         loggedInAt: t,
         expiresAt: Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined,
         generation: ++this.generation,
+        served: false,
+        okEndpoints: new Set(),
       };
       this.failures = 0;
       this.blockedUntil = 0;
@@ -371,11 +402,26 @@ export class KotakSession {
     this.emit();
   }
 
-  /** Mark the session dead (e.g. the feed reported auth failure); the next request re-logs in. */
+  /**
+   * Mark the session dead (e.g. the feed reported auth failure); the next request or login() logs
+   * in again. Shares the auth re-login budget with rejected requests: a second rejection within
+   * `authReloginCooldownMs` of the last auth-triggered re-login holds logins until that cooldown
+   * ends (even for `login({ force: true })`), so a feed that keeps refusing fresh sessions cannot
+   * cause a login storm.
+   */
   invalidate(reason: string): void {
     if (!this.session) return;
+    this.dropHolds(this.session.generation);
     this.session = null;
     this.lastError = this.scrub(reason);
+    const t = this.now();
+    if (t - this.lastAuthRelogin < this.authReloginCooldownMs) {
+      this.authHoldUntil = Math.max(this.authHoldUntil, this.lastAuthRelogin + this.authReloginCooldownMs);
+      this.lastError += ' (again within the re-login cooldown)';
+      this.log.warn(`Kotak session invalidated again: ${this.lastError}; logins held until ${new Date(this.authHoldUntil).toISOString()}`);
+    } else {
+      this.lastAuthRelogin = t;
+    }
     this.emit();
   }
 
@@ -411,14 +457,16 @@ export class KotakSession {
 
   /** JSON of a REST call on baseUrl. Throws KotakError (a NoLiveData) when no data was obtained. */
   async request<T = unknown>(path: string, opts: KotakRequestOptions): Promise<T> {
+    this.checkEndpoint(path, opts);
     const used = await this.ensureSession();
     try {
-      return await this.send<T>(used, path, opts);
+      return await this.send<T>(used, path, opts, false);
     } catch (e) {
       if (!(e instanceof KotakError) || e.kind !== 'auth') throw e;
       const fresh = await this.recover(used, e);
       try {
-        return await this.send<T>(fresh, path, opts);
+        // A 403 right after a fresh login is about the endpoint, not the session (send handles it).
+        return await this.send<T>(fresh, path, opts, true);
       } catch (e2) {
         // Rejected again on a fresh session: one re-login, one retry, never a loop. Drop the
         // session and hold automatic logins so later requests fail fast without network calls.
@@ -428,10 +476,47 @@ export class KotakSession {
     }
   }
 
+  private endpointOf(path: string, opts: KotakRequestOptions): string {
+    return opts.endpoint ?? path.split('?')[0].replace(/^\/+/, '');
+  }
+
+  /** Fail fast, without a network call, while the endpoint is on hold after a 403. */
+  private checkEndpoint(path: string, opts: KotakRequestOptions): void {
+    const key = this.endpointOf(path, opts);
+    const hold = this.endpointHolds.get(key);
+    if (!hold) return;
+    if (this.now() < hold.until) throw new KotakError(`${hold.reason}; not retried before ${new Date(hold.until).toISOString()}`, 'api', 403);
+    this.endpointHolds.delete(key);
+  }
+
+  /**
+   * Whether a 403 means the session is dead (→ the one re-login) rather than "not enough
+   * privileges" for this endpoint. Dead: the endpoint already served this session, or nothing has
+   * been served yet (first call after login) while a re-login is still allowed. Never on the retry
+   * right after a fresh login: the session was made for that request, so the 403 is the endpoint's.
+   */
+  private sessionLevel403(s: ActiveSession, key: string, afterRelogin: boolean): boolean {
+    if (afterRelogin) return false;
+    if (s.okEndpoints.has(key)) return true;
+    return !s.served && this.now() - this.lastAuthRelogin >= this.authReloginCooldownMs;
+  }
+
+  private holdEndpoint(s: ActiveSession, key: string, label: string, msg: string): KotakError {
+    const until = this.now() + this.pathCooldownMs;
+    const reason = `Kotak ${label}: not permitted for this account (HTTP 403: ${msg})`;
+    this.endpointHolds.set(key, { until, reason, generation: s.generation });
+    this.log.warn(`${reason}; endpoint ${key} on hold until ${new Date(until).toISOString()}`);
+    return new KotakError(reason, 'api', 403);
+  }
+
   private rejectedAgain(s: ActiveSession, cause: KotakError) {
     if (this.session === s) this.session = null;
     this.lastError = `${cause.message} (again after a fresh login)`;
-    this.blockedUntil = Math.max(this.blockedUntil, this.now() + this.authReloginCooldownMs);
+    // The login works but the sessions it makes are refused: hold longer each time (a successful
+    // login resets the failure back-off, so without this the cycle would repeat every cooldown).
+    this.rejectedStreak++;
+    const hold = Math.max(this.authReloginCooldownMs, Math.min(30 * MINUTE, this.authReloginCooldownMs * 2 ** (this.rejectedStreak - 1)));
+    this.blockedUntil = Math.max(this.blockedUntil, this.now() + hold);
     this.emit();
   }
 
@@ -442,7 +527,7 @@ export class KotakSession {
       this.session = null;
       this.lastError = 'Kotak trade token expired';
     }
-    if (!this.loginInFlight && this.now() < this.blockedUntil) {
+    if (!this.loginInFlight && this.now() < Math.max(this.blockedUntil, this.authHoldUntil)) {
       throw new KotakError(`Not logged in to Kotak Neo: ${this.lastError ?? 'login on hold'}`, 'not-logged-in');
     }
     await this.login();
@@ -458,24 +543,34 @@ export class KotakSession {
       if (this.session) return this.session;
     }
     const t = this.now();
-    this.session = null;
     if (t - this.lastAuthRelogin < this.authReloginCooldownMs) {
-      // Rejected again soon after an auth-triggered login: stop and hold automatic logins.
+      // No re-login allowed yet. A 403 never drops the session on its own: it stays this call's
+      // failure. A 401 / stCode 1003 soon after an auth-triggered login: stop and hold logins.
+      if (cause.httpStatus === 403 && cause.stCode !== 1003) throw new KotakError(cause.message, 'api', 403, cause.stCode);
+      this.session = null;
       this.lastError = `${cause.message} (again after a fresh login)`;
       this.blockedUntil = Math.max(this.blockedUntil, this.lastAuthRelogin + this.authReloginCooldownMs);
       this.emit();
       throw cause;
     }
+    this.session = null;
     this.lastAuthRelogin = t;
     this.log.warn(`${cause.message}; logging in again`);
     await this.login();
     if (!this.session) throw cause;
+    this.dropHolds(used.generation);
     return this.session;
   }
 
-  private async send<T>(s: ActiveSession, path: string, opts: KotakRequestOptions): Promise<T> {
+  /** 403 holds taken on a session that turned out dead may not be about privileges: re-learn them. */
+  private dropHolds(generation: number): void {
+    for (const [k, h] of this.endpointHolds) if (h.generation === generation) this.endpointHolds.delete(k);
+  }
+
+  private async send<T>(s: ActiveSession, path: string, opts: KotakRequestOptions, afterRelogin: boolean): Promise<T> {
     const url = joinUrl(s.baseUrl, path) + buildQuery(opts.query);
     const label = path.split('?')[0].replace(/^\/+/, '').slice(0, 80);
+    const endpoint = this.endpointOf(path, opts);
     const headers: Record<string, string> =
       opts.kind === 'market'
         ? { Authorization: this.creds.consumerKey }
@@ -518,12 +613,17 @@ export class KotakSession {
         if (attempt === 0 && wait <= this.maxInlineRetryWaitMs) continue;
         throw new KotakError(`Kotak rate limit on ${label}; paused ${Math.ceil(wait / 1000)} s`, 'rate-limit', 429, stCode, wait);
       }
-      if (res.status === 401 || res.status === 403 || stCode === 1003) {
-        throw new KotakError(`Kotak session rejected on ${label}: ${msg()}`, 'auth', res.status, stCode);
+      if (res.status === 401 || stCode === 1003) throw new KotakError(`Kotak session rejected on ${label}: ${msg()}`, 'auth', res.status, stCode);
+      if (res.status === 403) {
+        if (this.sessionLevel403(s, endpoint, afterRelogin)) throw new KotakError(`Kotak ${label} refused: ${msg()} (HTTP 403)`, 'auth', 403, stCode);
+        throw this.holdEndpoint(s, endpoint, label, msg());
       }
       if (!res.ok) throw new KotakError(`Kotak ${label} failed: ${msg()} (HTTP ${res.status})`, 'api', res.status, stCode);
       if (body === undefined) throw new KotakError(`Kotak ${label}: response is not JSON`, 'protocol', res.status);
       if (isErrorBody(body)) throw new KotakError(`Kotak ${label} failed: ${msg()}${stCode !== undefined ? ` (stCode ${stCode})` : ''}`, 'api', res.status, stCode);
+      s.served = true;
+      s.okEndpoints.add(endpoint);
+      this.rejectedStreak = 0;
       return body as T;
     }
   }
@@ -540,10 +640,17 @@ export class KotakSession {
       ...(this.lastError && !live ? { error: this.lastError } : {}),
       ...(s ? { baseUrl: s.baseUrl, baseUrlSource: s.baseUrlSource, dataCenter: s.dataCenter, loggedInAt: s.loggedInAt, tokenExpiresAt: s.expiresAt } : {}),
       ...(s ? { nextReloginAt: this.nextReloginAt() ?? undefined } : {}),
-      ...(this.blockedUntil > this.now() ? { loginBlockedUntil: this.blockedUntil } : {}),
+      ...(Math.max(this.blockedUntil, this.authHoldUntil) > this.now() ? { loginBlockedUntil: Math.max(this.blockedUntil, this.authHoldUntil) } : {}),
       feedUrlKnown: !!s?.feedUrl,
       ...(this.rateHeaders ? { rateLimitHeaders: { ...this.rateHeaders } } : {}),
+      ...this.heldEndpoints(),
     };
+  }
+
+  private heldEndpoints(): { endpointsOnHold?: Record<string, number> } {
+    const t = this.now();
+    const held = [...this.endpointHolds].filter(([, h]) => h.until > t);
+    return held.length ? { endpointsOnHold: Object.fromEntries(held.map(([k, h]) => [k, h.until])) } : {};
   }
 
   /** Credentials for the market-data websocket, or null when not logged in. Contains secrets. */

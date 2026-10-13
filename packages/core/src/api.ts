@@ -248,6 +248,11 @@ export interface FiiDiiDay {
   diiNet: number;
   niftyClose: number;
   niftyChangePct: number;
+  /**
+   * Coverage of the flow figures: 'combined' = NSE+BSE+MSEI (NSE fiidiiTradeReact), 'nse' = NSE-only
+   * (fiidiiTradeNse). Days of different scope must not be summed together.
+   */
+  scope?: 'combined' | 'nse';
 }
 
 export interface IvChartResponse {

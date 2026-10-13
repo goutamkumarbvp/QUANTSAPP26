@@ -17,7 +17,7 @@ const SPOT: InstrumentKey = { symbol: 'NIFTY', kind: 'SPOT' };
 const FUT_OCT: InstrumentKey = { symbol: 'NIFTY', kind: 'FUT', expiry: '2026-10-27' };
 const FUT_NOV: InstrumentKey = { symbol: 'NIFTY', kind: 'FUT', expiry: '2026-11-24' };
 const opt = (kind: 'CE' | 'PE', strike: number, expiry = EXP): InstrumentKey => ({ symbol: 'NIFTY', kind, expiry, strike });
-const bar = (ts: number, close: number, extra: Partial<MinuteRecord> = {}): MinuteRecord => ({ ts, open: close, high: close, low: close, close, volume: 0, ...extra });
+const bar = (ts: number, close: number, extra: Partial<MinuteRecord> = {}): MinuteRecord => ({ ts, open: close, high: close, low: close, close, traded: true, ...extra });
 
 describe('IntradayFiles', () => {
   let dir: string;
@@ -31,10 +31,14 @@ describe('IntradayFiles', () => {
     const spotBars = [bar(t(9, 15), 25_000, { open: 24_990, high: 25_010, low: 24_985 }), bar(t(9, 16), 25_004)];
     const ceBar = bar(t(9, 15), 120.5, { volume: 650, oi: 1_300_000, bid: 120.4, ask: 120.6, buyVolume: 390, sellVolume: 195, unclassified: 65, atp: 119.8, totalBuyQty: 50_000, totalSellQty: 61_000 });
     a.writeMinutes([...spotBars.map((rec) => ({ key: SPOT, rec })), { key: opt('CE', 25_000), rec: ceBar }]);
-    a.writeMinutes([{ key: FUT_OCT, rec: bar(t(9, 15), 25_120, { oi: 13_930_930 }) }]);
+    // A quote-only minute: written (chainAt needs its book and OI), flagged as not traded.
+    const quoteOnly = bar(t(9, 15), 25_120, { traded: false, volume: 0, oi: 13_930_930 });
+    a.writeMinutes([{ key: FUT_OCT, rec: quoteOnly }]);
 
     const b = new IntradayFiles({ dataDir: dir });
     expect(b.bars(SPOT, D)).toEqual(spotBars);
+    expect(b.bars(SPOT, D).every((r) => !('volume' in r))).toBe(true); // index volume stays absent
+    expect(b.bars(FUT_OCT, D)).toEqual([quoteOnly]);
     expect(b.bars(opt('CE', 25_000), D)).toEqual([ceBar]);
     expect(b.bars(opt('PE', 25_000), D)).toEqual([]);
     expect(b.bars(SPOT, '2026-10-13')).toEqual([]);
@@ -142,9 +146,46 @@ describe('IntradayFiles', () => {
   it('merges two records of the same minute (restart inside a minute)', () => {
     const s = new IntradayFiles({ dataDir: dir });
     const k = opt('CE', 25_000);
-    s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100, high: 101, low: 99, close: 100.5, volume: 10, buyVolume: 6, sellVolume: 4, unclassified: 0, oi: 100 } }]);
-    s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100.4, high: 102, low: 100, close: 101, volume: 5, buyVolume: 1, sellVolume: 0, unclassified: 4, oi: 200 } }]);
-    expect(new IntradayFiles({ dataDir: dir }).bars(k, D)).toEqual([{ ts: t(10, 0), open: 100, high: 102, low: 99, close: 101, volume: 15, buyVolume: 7, sellVolume: 4, unclassified: 4, oi: 200 }]);
+    s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100, high: 101, low: 99, close: 100.5, traded: true, volume: 10, buyVolume: 6, sellVolume: 4, unclassified: 0, oi: 100 } }]);
+    s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100.4, high: 102, low: 100, close: 101, traded: false, volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, oi: 200 } }]);
+    expect(new IntradayFiles({ dataDir: dir }).bars(k, D)).toEqual([{ ts: t(10, 0), open: 100, high: 102, low: 99, close: 101, traded: true, volume: 10, buyVolume: 6, sellVolume: 4, unclassified: 0, oi: 200 }]);
+    // Records without volume (index spots) stay without it; quote-only halves stay not traded.
+    s.writeMinutes([{ key: SPOT, rec: bar(t(10, 0), 25_000, { traded: false }) }, { key: SPOT, rec: bar(t(10, 0), 25_002, { traded: false }) }]);
+    expect(s.bars(SPOT, D)).toEqual([{ ts: t(10, 0), open: 25_000, high: 25_002, low: 25_000, close: 25_002, traded: false }]);
+  });
+
+  it('refuses a minute record without the traded flag (no default is invented)', () => {
+    const s = new IntradayFiles({ dataDir: dir });
+    const { traded: _t, ...noFlag } = bar(t(10, 0), 1);
+    expect(() => s.writeMinutes([{ key: SPOT, rec: noFlag as MinuteRecord }])).toThrow(/invalid minute record/);
+    // A line on disk without it (written by something else) is skipped on read.
+    const file = path.join(dir, 'market', D, 'bars', 'NIFTY', 'SPOT.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify({ ...noFlag, volume: 5 })}\n${JSON.stringify(bar(t(10, 1), 2))}\n`);
+    expect(new IntradayFiles({ dataDir: dir }).bars(SPOT, D).map((r) => r.close)).toEqual([2]);
+  });
+
+  it('round-trips chain minutes whose CE/PE volume was never seen as null', () => {
+    const s = new IntradayFiles({ dataDir: dir });
+    const rec: ChainMinute = { ts: t(10, 0), spot: 25_000, ceOi: 10, peOi: 4, ceVolume: null, peVolume: 130, pcr: 0.4, maxPain: null, atmStrike: 25_000, atmIv: null };
+    s.writeChainMinutes([{ symbol: 'NIFTY', expiry: EXP, rec }]);
+    expect(new IntradayFiles({ dataDir: dir }).chainSeries('NIFTY', EXP, D)).toEqual([rec]);
+    expect(() => s.writeChainMinutes([{ symbol: 'NIFTY', expiry: EXP, rec: { ...rec, ts: t(10, 1), ceVolume: undefined } as unknown as ChainMinute }])).toThrow(/invalid chain minute/);
+  });
+
+  it('hands out copies: callers mutating results cannot corrupt the cache', () => {
+    const s = new IntradayFiles({ dataDir: dir });
+    s.writeMinutes([{ key: SPOT, rec: bar(t(10, 0), 25_000) }, { key: opt('CE', 25_000), rec: bar(t(10, 0), 120, { oi: 1_000 }) }]);
+    const cm: ChainMinute = { ts: t(10, 0), spot: 25_000, ceOi: 10, peOi: 4, ceVolume: 1, peVolume: 2, pcr: 0.4, maxPain: null, atmStrike: 25_000, atmIv: 0.12 };
+    s.writeChainMinutes([{ symbol: 'NIFTY', expiry: EXP, rec: cm }]);
+    s.at(SPOT, t(10, 1))!.close = -1;
+    s.bars(SPOT, D)[0].close = -2;
+    s.chainSeries('NIFTY', EXP, D)[0].spot = -3;
+    s.chainAt('NIFTY', EXP, t(10, 1))!.rows[0].ce!.ltp = -4;
+    expect(s.at(SPOT, t(10, 1))?.close).toBe(25_000);
+    expect(s.bars(SPOT, D)[0].close).toBe(25_000);
+    expect(s.chainSeries('NIFTY', EXP, D)[0].spot).toBe(25_000);
+    expect(s.chainAt('NIFTY', EXP, t(10, 1))?.rows[0].ce?.ltp).toBe(120);
   });
 
   it('uses safe, reversible file names', () => {
@@ -186,14 +227,24 @@ describe('IntradayFiles', () => {
     expect(again.chainSeries('NIFTY', EXP, D).map((r) => r.ts)).toEqual([t(10, 0)]);
   });
 
-  it('prunes dates older than the retention window', () => {
-    const s = new IntradayFiles({ dataDir: dir, retentionDays: 5 });
-    for (const d of ['2026-10-01', '2026-10-06', '2026-10-07', '2026-10-09', '2026-10-12']) s.writeMinutes([{ key: SPOT, rec: bar(ist(d, 10, 0), 1) }]);
+  it('retention keeps exactly retentionDays sessions (today included)', () => {
+    const s = new IntradayFiles({ dataDir: dir, retentionDays: 3 });
+    for (const d of ['2026-10-01', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-12']) s.writeMinutes([{ key: SPOT, rec: bar(ist(d, 10, 0), 1) }]);
+    fs.mkdirSync(path.join(dir, 'market', '2026-10-10', 'bars'), { recursive: true }); // an empty date: not a session
     s.prune('2026-10-12');
-    expect(s.sessions()).toEqual(['2026-10-07', '2026-10-09', '2026-10-12']);
-    expect(s.bars(SPOT, '2026-10-01')).toEqual([]);
+    expect(s.sessions()).toEqual(['2026-10-08', '2026-10-09', '2026-10-12']);
+    expect(fs.existsSync(path.join(dir, 'market', '2026-10-10'))).toBe(false);
+    expect(s.bars(SPOT, '2026-10-07')).toEqual([]);
+    // At the start of a day nothing is recorded for it yet: it still counts as one of the sessions.
+    s.prune('2026-10-13');
+    expect(s.sessions()).toEqual(['2026-10-09', '2026-10-12']);
+    s.writeMinutes([{ key: SPOT, rec: bar(ist('2026-10-13', 10, 0), 1) }]);
+    expect(s.sessions()).toEqual(['2026-10-09', '2026-10-12', '2026-10-13']);
+    new IntradayFiles({ dataDir: dir, retentionDays: 1 }).prune('2026-10-13');
+    expect(new IntradayFiles({ dataDir: dir }).sessions()).toEqual(['2026-10-13']);
     new IntradayFiles({ dataDir: dir }).prune('2026-12-31'); // no retention configured: keeps everything
-    expect(s.sessions()).toHaveLength(3);
+    expect(new IntradayFiles({ dataDir: dir }).sessions()).toEqual(['2026-10-13']);
+    expect(() => new IntradayFiles({ dataDir: dir, retentionDays: 2.5 })).toThrow(/integer/);
   });
 
   it('serves liveBar from the attached recorder only', () => {

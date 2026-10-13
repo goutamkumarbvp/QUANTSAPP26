@@ -71,7 +71,7 @@ describe('HistoryFiles', () => {
     a.writeDailyBars('index', '2026-10-12', [{ symbol: 'NIFTY', date: '2026-10-12', open: 24_950, high: 25_080, low: 24_900, close: 25_000 }]);
     a.writeDailyBars('cm', '2026-10-12', [{ symbol: 'RELIANCE', date: '2026-10-12', open: 1_390, high: 1_410, low: 1_385, close: 1_402, volume: 9_000_000, turnover: 1.26e10 }]);
     a.writeDailyBars('cm', '2026-10-13', [{ symbol: 'RELIANCE', date: '2026-10-13', open: 1_402, high: 1_420, low: 1_400, close: 1_415 }]);
-    const fii: FiiDiiDay = { date: '2026-10-12', fiiBuy: 12_000, fiiSell: 13_500, fiiNet: -1_500, diiBuy: 14_000, diiSell: 11_000, diiNet: 3_000, niftyClose: 25_000, niftyChangePct: 0.4 };
+    const fii: FiiDiiDay = { date: '2026-10-12', fiiBuy: 12_000, fiiSell: 13_500, fiiNet: -1_500, diiBuy: 14_000, diiSell: 11_000, diiNet: 3_000, niftyClose: 25_000, niftyChangePct: 0.4, scope: 'combined' };
     a.writeFiiDii(fii);
     const part: ParticipantDay = { date: '2026-10-12', niftyClose: 25_000, rows: [] };
     a.writeParticipants(part);
@@ -89,6 +89,48 @@ describe('HistoryFiles', () => {
     expect(b.loadedDates('participants')).toEqual(['2026-10-12']);
     expect(b.loadedDates('fiidii')).toEqual(['2026-10-12']);
     expect(b.loadedDates('fo')).toEqual([]);
+  });
+
+  it('writeFo with no rows does not mark the date loaded (in memory or after a restart)', () => {
+    const a = new HistoryFiles({ dataDir: dir, r: R });
+    a.writeFo('2026-10-12', {});
+    a.writeFo('2026-10-13', { futures: [], options: [] });
+    expect(a.loadedDates('fo')).toEqual([]);
+    expect(new HistoryFiles({ dataDir: dir, r: R }).loadedDates('fo')).toEqual([]);
+    a.writeFo('2026-10-13', { futures: [fut('NIFTY', '2026-10-13', '2026-10-27', 25_200)] });
+    expect(a.loadedDates('fo')).toEqual(['2026-10-13']);
+    expect(new HistoryFiles({ dataDir: dir, r: R }).loadedDates('fo')).toEqual(['2026-10-13']);
+  });
+
+  it('hands out copies: neither the writer nor a reader can change cached rows', () => {
+    const s = new HistoryFiles({ dataDir: dir, r: R });
+    const futures = [fut('NIFTY', '2026-10-12', '2026-10-27', 25_150)];
+    const options = [optRow('NIFTY', '2026-10-12', '2026-10-27', 25_000, 'CE', 120)];
+    const bars = [{ symbol: 'NIFTY', date: '2026-10-12', open: 24_950, high: 25_080, low: 24_900, close: 25_000 }];
+    const fii: FiiDiiDay = { date: '2026-10-12', fiiBuy: 1, fiiSell: 2, fiiNet: -1, diiBuy: 3, diiSell: 1, diiNet: 2, niftyClose: 25_000, niftyChangePct: 0.4, scope: 'nse' };
+    const part: ParticipantDay = { date: '2026-10-12', niftyClose: 25_000, rows: [{ participant: 'FII', futIndexLong: 1, futIndexShort: 2, futStockLong: 3, futStockShort: 4, optIndexCallLong: 5, optIndexPutLong: 6, optIndexCallShort: 7, optIndexPutShort: 8, optStockCallLong: 9, optStockPutLong: 10, optStockCallShort: 11, optStockPutShort: 12 }] };
+    s.writeFo('2026-10-12', { futures, options });
+    s.writeDailyBars('index', '2026-10-12', bars);
+    s.writeFiiDii(fii);
+    s.writeParticipants(part);
+    // The writer's objects are not the cache.
+    futures[0].close = -1;
+    options[0].close = -1;
+    bars[0].close = -1;
+    fii.fiiNet = 999;
+    part.rows[0].futIndexLong = 999;
+    // Nor are the objects a reader gets.
+    s.dailyFutures('NIFTY', '2026-10-12', '2026-10-12')[0].close = -2;
+    s.dailyOptions('NIFTY', '2026-10-12')[0].close = -2;
+    s.dailyOptions('NIFTY', '2026-10-12', '2026-10-27')[0].close = -2;
+    s.dailyBars('NIFTY', '2026-10-12', '2026-10-12')[0].close = -2;
+    s.fiiDii('2026-10-12', '2026-10-12')[0].fiiNet = -2;
+    s.participantOi('2026-10-12', '2026-10-12')[0].rows[0].futIndexLong = -2;
+    expect(s.dailyFutures('NIFTY', '2026-10-12', '2026-10-12')[0].close).toBe(25_150);
+    expect(s.dailyOptions('NIFTY', '2026-10-12')[0].close).toBe(120);
+    expect(s.dailyBars('NIFTY', '2026-10-12', '2026-10-12')[0].close).toBe(25_000);
+    expect(s.fiiDii('2026-10-12', '2026-10-12')[0]).toMatchObject({ fiiNet: -1, scope: 'nse' });
+    expect(s.participantOi('2026-10-12', '2026-10-12')[0].rows[0].futIndexLong).toBe(1);
   });
 
   it('derives contract settlement from the underlying final settlement price', () => {

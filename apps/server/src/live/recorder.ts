@@ -6,7 +6,12 @@
  *
  * Per instrument and minute:
  *  - OHLC from LTP; volume = Δ cumulative session volume between ticks (decreases ignored; the
- *    baseline is the highest volume seen today, so out-of-order packets are not double counted);
+ *    baseline is the highest volume seen today, so out-of-order packets are not double counted),
+ *    absent for instruments whose feed carries no volume (index spots);
+ *  - traded = at least one trade in the minute: a positive Δvolume, or a last-trade time newer than
+ *    any seen before that falls in the minute (index packets: a new index time). A trade time of an
+ *    earlier minute marks that minute only while it is still open. Quote-only minutes (bid/ask/OI
+ *    moved, no trade) are still written, with traded false;
  *  - oi / bid / ask / total buy & sell qty / ATP = last value seen;
  *  - each positive Δvolume is classified with the quote rule against the bid/ask seen BEFORE the
  *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
@@ -89,6 +94,8 @@ interface Inst {
   /** Highest cumulative volume seen today (baseline). */
   cumVol?: number;
   tracksVolume: boolean;
+  /** Latest last-trade time seen today (epoch ms). */
+  lastLtt?: number;
   ltp?: number;
   oi?: number;
   bid?: number;
@@ -250,6 +257,13 @@ export class Recorder implements LiveBarSource {
       if (inst.cumVol !== undefined && q.volume > inst.cumVol) dv = q.volume - inst.cumVol;
       if (inst.cumVol === undefined || q.volume > inst.cumVol) inst.cumVol = q.volume;
     }
+    // A last-trade time newer than any seen today is a trade in the minute of that time (the first
+    // LTT seen only sets the baseline, unless it falls in the tick's own minute).
+    let tradeMinute: number | undefined;
+    if (isNum(q.ltt) && (inst.lastLtt === undefined || q.ltt > inst.lastLtt)) {
+      if (inst.lastLtt !== undefined || q.ltt >= minuteOf(q.ts)) tradeMinute = minuteOf(q.ltt);
+      inst.lastLtt = q.ltt;
+    }
     if (isPos(q.ltp)) inst.ltp = q.ltp;
     if (isNum(q.oi) && q.oi >= 0) inst.oi = q.oi;
     if (isPos(q.bid)) inst.bid = q.bid;
@@ -273,22 +287,26 @@ export class Recorder implements LiveBarSource {
     if (inst.lastWritten + MINUTE_MS > m) m = inst.lastWritten + MINUTE_MS;
     if (!this.inSession(m, today)) return void this.st.stateOnly.outsideSession++;
 
+    // A trade reported late, in the minute still open before this tick's: that minute traded.
+    if (inst.bar && tradeMinute === inst.bar.ts) inst.bar.traded = true;
     if (inst.bar && m > inst.bar.ts) {
       const done = this.takeBar(inst);
       if (done) this.write([{ key: inst.key, rec: done }]);
     }
     let bar = inst.bar;
-    if (!bar) bar = inst.bar = { ts: m, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp, volume: 0 };
+    if (!bar) bar = inst.bar = { ts: m, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp, traded: false };
     bar.high = Math.max(bar.high, q.ltp);
     bar.low = Math.min(bar.low, q.ltp);
     bar.close = q.ltp;
-    if (inst.tracksVolume && bar.buyVolume === undefined) {
+    if (dv > 0 || (tradeMinute !== undefined && tradeMinute >= minuteOf(q.ts))) bar.traded = true;
+    if (inst.tracksVolume && bar.volume === undefined) {
+      bar.volume = 0;
       bar.buyVolume = 0;
       bar.sellVolume = 0;
       bar.unclassified = 0;
     }
     if (dv > 0) {
-      bar.volume += dv;
+      bar.volume = (bar.volume ?? 0) + dv;
       const sane = isPos(prevBid) && isPos(prevAsk) && prevBid < prevAsk;
       if (sane && q.ltp >= prevAsk) bar.buyVolume = (bar.buyVolume ?? 0) + dv;
       else if (sane && q.ltp <= prevBid) bar.sellVolume = (bar.sellVolume ?? 0) + dv;
@@ -368,16 +386,17 @@ export class Recorder implements LiveBarSource {
     }
     let ceOi = 0;
     let peOi = 0;
-    let ceVolume = 0;
-    let peVolume = 0;
+    // Null until a strike of that side has reported volume (never a 0 that was not seen).
+    let ceVolume: number | null = null;
+    let peVolume: number | null = null;
     let ceSeen = 0;
     let peSeen = 0;
     const painRows: { strike: number; ceOI: number; peOI: number }[] = [];
     for (const row of rows.values()) {
       if (row.ce?.oi !== undefined) (ceOi += row.ce.oi), ceSeen++;
       if (row.pe?.oi !== undefined) (peOi += row.pe.oi), peSeen++;
-      ceVolume += row.ce?.vol ?? 0;
-      peVolume += row.pe?.vol ?? 0;
+      if (row.ce?.vol !== undefined) ceVolume = (ceVolume ?? 0) + row.ce.vol;
+      if (row.pe?.vol !== undefined) peVolume = (peVolume ?? 0) + row.pe.vol;
       // Max pain only over strikes whose OI is known on both sides.
       if (row.ce?.oi !== undefined && row.pe?.oi !== undefined) painRows.push({ strike: row.strike, ceOI: row.ce.oi, peOI: row.pe.oi });
     }

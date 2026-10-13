@@ -12,13 +12,14 @@
  *   settle/<expiry>.json                     { [symbol]: underlying final settlement price }
  *   derived/atmiv/<SYMBOL>.json              cached dailyAtmIv results (recomputed when inputs change)
  * Every file is replaced atomically (write to .tmp, rename), so a crash leaves the old or the new
- * version, never a torn one.
+ * version, never a torn one. The cache holds parsed copies of what is on disk and reads hand out
+ * copies, so neither a writer nor a reader can change cached rows by mutating its objects.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { addDays, istTs, MARKET_CLOSE_MIN, type FiiDiiDay, type ParticipantDay } from '@q26/core';
 import { isIsoDate } from '../calendar';
-import { atmIvOf, forwardOf, timeToExpiry, type PremiumRow } from '../pricing';
+import { atmIvOf, impliedForward, timeToExpiry, type PremiumRow } from '../pricing';
 import type { DailyBar, DailyFuture, DailyOption, HistoryStore, InstrumentKey } from '../types';
 import { encodeSymbol } from './intraday';
 
@@ -110,7 +111,7 @@ export function eodAtmIv(input: { date: string; underlying?: number; options: re
   const fut = futures.find((f) => f.expiry === expiry && f.volume > 0);
   const future = fut ? (isPos(fut.settle) ? fut.settle : isPos(fut.close) ? fut.close : undefined) : undefined;
   const T = timeToExpiry(expiry, istTs(date, MARKET_CLOSE_MIN));
-  const fwd = forwardOf({ spot, future, rows }, T, r);
+  const fwd = impliedForward({ spot, future, rows }, T, r);
   if (!fwd) return null;
   const atm = atmIvOf(rows, fwd.forward, T, r, spot ?? fwd.forward);
   return atm ? { iv: atm.iv, expiry } : null;
@@ -161,9 +162,11 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
   private writeJson(p: string, v: unknown): void {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     const tmp = `${p}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(v));
+    const text = JSON.stringify(v);
+    fs.writeFileSync(tmp, text);
     fs.renameSync(tmp, p);
-    this.remember(p, v);
+    // Cache what is on disk, not the caller's object (which it may still change).
+    this.remember(p, JSON.parse(text));
   }
 
   private listDir(dir: string): string[] {
@@ -220,7 +223,8 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
       this.writeJson(path.join(dir, 'options', `${encodeSymbol(sym)}.json`), list);
     }
     for (const sym of symbols) this.invalidateIv(sym, date);
-    this.markLoaded('fo', date);
+    // Only a date with rows on disk counts as loaded (loadedDates() after a restart agrees).
+    if (symbols.size) this.markLoaded('fo', date);
   }
 
   writeDailyBars(kind: 'cm' | 'index', date: string, bars: readonly SymbolRow<DailyBar>[]): void {
@@ -295,33 +299,35 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
         if (bar) out.set(d, bar);
       }
     }
-    return [...out.values()].sort((a, b) => a.date.localeCompare(b.date));
+    return [...out.values()].sort((a, b) => a.date.localeCompare(b.date)).map((b) => ({ ...b }));
   }
 
   dailyFutures(symbol: string, from: string, to: string): DailyFuture[] {
     const out: DailyFuture[] = [];
     for (const d of this.datesIn('fo', from, to)) {
       const rows = this.readJson<Record<string, DailyFuture[]>>(path.join(this.foDir(d), 'futures.json'))?.[symbol];
-      if (rows) out.push(...rows);
+      if (rows) for (const r of rows) out.push({ ...r });
     }
     return out;
   }
 
   dailyOptions(symbol: string, date: string, expiry?: string): DailyOption[] {
     const rows = this.readJson<DailyOption[]>(path.join(this.foDir(date), 'options', `${encodeSymbol(symbol)}.json`)) ?? [];
-    return expiry ? rows.filter((o) => o.expiry === expiry) : rows.slice();
+    return (expiry ? rows.filter((o) => o.expiry === expiry) : rows).map((o) => ({ ...o }));
   }
 
   fiiDii(from: string, to: string): FiiDiiDay[] {
     return this.datesIn('fiidii', from, to)
       .map((d) => this.readJson<FiiDiiDay>(this.dayFile('fiidii', d)))
-      .filter((v): v is FiiDiiDay => v !== undefined);
+      .filter((v): v is FiiDiiDay => v !== undefined)
+      .map((v) => structuredClone(v));
   }
 
   participantOi(from: string, to: string): ParticipantDay[] {
     return this.datesIn('participants', from, to)
       .map((d) => this.readJson<ParticipantDay>(this.dayFile('participants', d)))
-      .filter((v): v is ParticipantDay => v !== undefined);
+      .filter((v): v is ParticipantDay => v !== undefined)
+      .map((v) => structuredClone(v));
   }
 
   /** FUT → underlying final settlement price; CE/PE → intrinsic value at it (rounded to paise). */

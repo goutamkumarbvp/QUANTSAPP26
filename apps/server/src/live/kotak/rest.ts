@@ -5,9 +5,10 @@
  * option-chain, expiries and historical go through the 'slow' lane (≥1.5 s apart).
  *
  * Parsed shapes carry only values the response actually contained: zero/blank placeholders
- * (index volume and depth, untraded prices, empty depth levels) are dropped, never defaulted.
+ * (untraded prices, empty depth levels, and — in quoteToLive, for keys the caller says are index
+ * spots — index volume, total buy/sell and depth) are dropped, never defaulted.
  */
-import type { DepthLevel, InstrumentKey, LiveQuote, OptKind } from '../types';
+import type { DepthLevel, InstrumentKey, LiveQuote, OptKind, Underlying } from '../types';
 import { KotakError, type KotakRequestOptions } from './session';
 
 /** The part of KotakSession these calls need (lets tests and the provider wrap it). */
@@ -55,10 +56,9 @@ export interface KotakQuote {
   /** `${segment}|${token}` exactly as requested (index name unencoded, e.g. 'nse_cm|Nifty 50'). */
   neosymbol: string;
   segment: string;
-  /** Instrument token, or the index name for indices. */
+  /** Instrument token, or the index name for indices (an index can also come back by number). */
   token: string;
   displaySymbol?: string;
-  isIndex: boolean;
   /** lstup_time (epoch ms). */
   ts?: number;
   ltp?: number;
@@ -70,7 +70,7 @@ export interface KotakQuote {
   prevClose?: number;
   change?: number;
   changePct?: number;
-  /** Day volume in units: `last_volume` (critic.md C3, SDK reading; verify on day 1). */
+  /** Day volume in units: `last_volume` (critic.md C3, SDK reading; verify on day 1). "0" for indices. */
   volume?: number;
   atp?: number;
   oi?: number;
@@ -120,32 +120,35 @@ function parseDepth(side: unknown): DepthLevel[] {
     const qty = pos(l.quantity);
     // Empty levels come back as "0"s: no order there, not a level at price 0.
     if (price === undefined || qty === undefined) continue;
-    out.push({ price, qty, orders: nonNeg(l.orders) ?? 0 });
+    const level: DepthLevel = { price, qty };
+    const orders = nonNeg(l.orders);
+    if (orders !== undefined) level.orders = orders;
+    out.push(level);
   }
   return out;
 }
 
-/** One element of the quotes array. Returns null when the row has no identity. */
+/**
+ * One element of the quotes array. Returns null when the row has no identity. Whether the row is
+ * an index is not decided here (an index may come back by name or by number): quoteToLive drops
+ * the index placeholders for the key the caller asked for.
+ */
 export function parseQuote(row: unknown): KotakQuote | null {
   if (!isObj(row)) return null;
   const segment = text(row.exchange);
   const token = text(row.exchange_token);
   if (!segment || !token) return null;
   const cash = segment === 'nse_cm' || segment === 'bse_cm';
-  // Indices are addressed by name; their volume/depth/52w fields are "0" placeholders (critic.md R3).
-  const isIndex = cash && !/^\d+$/.test(token);
   const ohlc = isObj(row.ohlc) ? row.ohlc : {};
   const depth = isObj(row.depth) ? row.depth : {};
   const lstup = pos(row.lstup_time);
-  const bids = isIndex ? [] : parseDepth(depth.buy);
-  const asks = isIndex ? [] : parseDepth(depth.sell);
-  const zeroAsAbsent = (v: unknown) => (isIndex ? pos(v) : nonNeg(v));
+  const bids = parseDepth(depth.buy);
+  const asks = parseDepth(depth.sell);
   return compact<KotakQuote>({
     neosymbol: `${segment}|${token}`,
     segment,
     token,
     displaySymbol: text(row.display_symbol),
-    isIndex,
     ts: lstup !== undefined ? Math.round(lstup * 1000) : undefined,
     ltp: pos(row.ltp),
     ltq: pos(row.last_traded_quantity),
@@ -155,12 +158,12 @@ export function parseQuote(row: unknown): KotakQuote | null {
     prevClose: pos(ohlc.close),
     change: num(row.change),
     changePct: num(row.per_change),
-    volume: zeroAsAbsent(row.last_volume),
+    volume: nonNeg(row.last_volume),
     atp: pos(row.avg_cost),
     // Cash instruments have no OI; "0" there is a placeholder.
     oi: cash ? undefined : nonNeg(row.open_int),
-    totalBuyQty: zeroAsAbsent(row.total_buy),
-    totalSellQty: zeroAsAbsent(row.total_sell),
+    totalBuyQty: nonNeg(row.total_buy),
+    totalSellQty: nonNeg(row.total_sell),
     upperCircuit: pos(row.high_price_range),
     lowerCircuit: pos(row.low_price_range),
     yearHigh: pos(row.year_high),
@@ -181,12 +184,20 @@ export function parseQuotes(body: unknown): KotakQuote[] {
   return out;
 }
 
-/** LiveQuote for an instrument key; undefined when the quote has no LTP. `receivedAt` stands in
- *  for a missing exchange timestamp (it is when the value was observed). */
-export function quoteToLive(q: KotakQuote, key: InstrumentKey, receivedAt: number): LiveQuote | undefined {
+/**
+ * LiveQuote for an instrument key; undefined when the quote has no LTP. `receivedAt` stands in for a
+ * missing exchange timestamp (it is when the value was observed). `underlying` is the kind of the
+ * key's underlying (ReferenceData.underlying(key.symbol).kind): for an index SPOT the "0"
+ * placeholders of volume and total buy/sell are dropped and the book is ignored (critic.md R3),
+ * whether Kotak returned the index by name or by numeric token.
+ */
+export function quoteToLive(q: KotakQuote, key: InstrumentKey, receivedAt: number, underlying: Underlying['kind']): LiveQuote | undefined {
   if (q.ltp === undefined) return undefined;
-  const bid = q.depth?.bids[0];
-  const ask = q.depth?.asks[0];
+  const indexSpot = key.kind === 'SPOT' && underlying === 'index';
+  const qty = (v: number | undefined) => (indexSpot && !(v !== undefined && v > 0) ? undefined : v);
+  const depth = indexSpot ? undefined : q.depth;
+  const bid = depth?.bids[0];
+  const ask = depth?.asks[0];
   return compact<LiveQuote>({
     key,
     ts: q.ts ?? receivedAt,
@@ -196,16 +207,16 @@ export function quoteToLive(q: KotakQuote, key: InstrumentKey, receivedAt: numbe
     high: q.high,
     low: q.low,
     prevClose: q.prevClose,
-    volume: q.volume,
+    volume: qty(q.volume),
     atp: q.atp,
     oi: q.oi,
     bid: bid?.price,
     ask: ask?.price,
     bidQty: bid?.qty,
     askQty: ask?.qty,
-    totalBuyQty: q.totalBuyQty,
-    totalSellQty: q.totalSellQty,
-    depth: q.depth,
+    totalBuyQty: qty(q.totalBuyQty),
+    totalSellQty: qty(q.totalSellQty),
+    depth,
     upperCircuit: q.upperCircuit,
     lowerCircuit: q.lowerCircuit,
   });
@@ -251,6 +262,11 @@ export interface KotakOptionChain {
   puts: KotakChainLeg[];
 }
 
+/**
+ * One futures-chain row. The row's `quote.c` is deliberately not parsed: in the documented sample
+ * it equals `ltp` intraday, so it is neither a settlement nor a previous close (unlike the option
+ * leg's `close`). `prevClose` (`quote.pc`) is the previous close.
+ */
 export interface KotakFutureRow {
   neosymbol: string;
   segment: string;
@@ -261,7 +277,6 @@ export interface KotakFutureRow {
   open?: number;
   high?: number;
   low?: number;
-  close?: number;
   prevClose?: number;
   volume?: number;
   oi?: number;
@@ -343,7 +358,7 @@ export function parseOptionChain(body: unknown): KotakOptionChain {
   });
 }
 
-/** `instrument_type=fut` rows use abbreviated keys: inst{…}, quote{ltp,o,h,l,c,pc,vol}, oi{cur,prev,chg,chgPct}. */
+/** `instrument_type=fut` rows use abbreviated keys: inst{…}, quote{ltp,o,h,l,c,pc,vol}, oi{cur,prev,chg,chgPct} (`c` is skipped, see KotakFutureRow). */
 export function parseFuturesChain(body: unknown): KotakFuturesChain {
   const d = dataOf(body, 'futures chain');
   const common = isObj(d.common_data) ? d.common_data : {};
@@ -366,7 +381,6 @@ export function parseFuturesChain(body: unknown): KotakFuturesChain {
         open: pos(q.o),
         high: pos(q.h),
         low: pos(q.l),
-        close: pos(q.c),
         prevClose: pos(q.pc),
         volume: nonNeg(q.vol),
         oi: nonNeg(oi.cur),
@@ -386,7 +400,8 @@ export function parseFuturesChain(body: unknown): KotakFuturesChain {
   });
 }
 
-/** Option-chain leg as a LiveQuote (the endpoint has no timestamp: `receivedAt` is used). */
+/** Option-chain leg as a LiveQuote (the endpoint has no timestamp: `receivedAt` is used). No close is
+ *  carried: the leg's `close` is the settlement once published and goes to EOD use only. */
 export function chainLegToLive(leg: KotakChainLeg | KotakFutureRow, key: InstrumentKey, receivedAt: number): LiveQuote | undefined {
   if (leg.ltp === undefined) return undefined;
   return compact<LiveQuote>({
@@ -564,8 +579,10 @@ export class KotakRest {
     unique.forEach(splitNeo);
     const chunks: string[][] = [];
     for (let i = 0; i < unique.length; i += QUOTES_MAX_PER_CALL) chunks.push(unique.slice(i, i + QUOTES_MAX_PER_CALL));
+    // A 403 ("not enough privileges") holds only quotes of the same segments, never other endpoints.
+    const endpoint = (c: string[]) => `quotes ${[...new Set(c.map((s) => splitNeo(s).segment))].sort().join(',')}`;
     const settled = await Promise.allSettled(
-      chunks.map((c) => this.session.request(quotesPath(c), { kind: 'market', lane: 'general', signal }).then(parseQuotes)),
+      chunks.map((c) => this.session.request(quotesPath(c), { kind: 'market', lane: 'general', signal, endpoint: endpoint(c) }).then(parseQuotes)),
     );
     const quotes = new Map<string, KotakQuote>();
     const errors: QuotesResult['errors'] = [];
@@ -588,6 +605,7 @@ export class KotakRest {
       kind: 'market',
       lane: 'slow',
       signal,
+      endpoint: `option-chain ${p.exchange}`,
       query: { exchange: p.exchange, underlying: p.underlying, expiry: p.expiry, instrument_type: 'option', count },
     });
     return parseOptionChain(body);
@@ -599,6 +617,7 @@ export class KotakRest {
       kind: 'market',
       lane: 'slow',
       signal,
+      endpoint: `futures-chain ${p.exchange}`,
       query: { exchange: p.exchange, underlying: p.underlying, expiry: p.expiry, instrument_type: 'fut' },
     });
     return parseFuturesChain(body);
@@ -609,6 +628,7 @@ export class KotakRest {
       kind: 'market',
       lane: 'slow',
       signal,
+      endpoint: `expiries ${p.exchange}`,
       query: { exchange: p.exchange, underlying: p.underlying, instrument_type: p.instrumentType ?? 'option' },
     });
     return parseExpiries(body);
@@ -621,13 +641,14 @@ export class KotakRest {
   async historical(p: { neosymbol: string; interval: HistInterval; from: string; to: string }, signal?: AbortSignal): Promise<KotakCandle[]> {
     const max = HIST_MAX_DAYS[p.interval];
     if (!max) throw new RangeError(`Unsupported historical interval "${p.interval}"`);
-    splitNeo(p.neosymbol);
+    const { segment } = splitNeo(p.neosymbol);
     const byTs = new Map<number, KotakCandle>();
     for (const w of splitDateRange(p.from, p.to, max)) {
       const body = await this.session.request('market-data/1.0/historical/details', {
         kind: 'market',
         lane: 'slow',
         signal,
+        endpoint: `historical ${segment}`,
         query: { neosymbol: p.neosymbol, interval: p.interval, fromdate: w.from, todate: w.to },
       });
       for (const c of parseCandles(body)) byTs.set(c.ts, c);

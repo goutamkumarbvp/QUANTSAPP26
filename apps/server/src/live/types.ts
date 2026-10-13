@@ -54,9 +54,10 @@ export interface Listing extends InstrumentKey {
   /** Broker instrument token (numeric string), or the index name for index spots ("Nifty 50"). */
   token: string;
   tradingSymbol: string;
+  /** Contract lot size from the scrip master. Index spots: 1, the value the exchange's cash master lists for index rows. */
   lotSize: number;
-  /** Rupees. */
-  tickSize: number;
+  /** Rupees. Absent for index spots: indices are not traded and have no official tick size. */
+  tickSize?: number;
   freezeQty?: number;
 }
 
@@ -68,7 +69,7 @@ export interface Underlying {
   /** Reference metadata (hand-maintained map), '' when unknown. */
   sector: string;
   lotSize: number;
-  /** Most common gap between listed strikes of the nearest expiry. */
+  /** Most common gap between consecutive listed strikes, counted over every live expiry. */
   strikeStep: number;
   spot: Listing;
 }
@@ -80,7 +81,8 @@ export interface Underlying {
 export interface DepthLevel {
   price: number;
   qty: number;
-  orders: number;
+  /** Number of orders at the level; absent when the source did not send it. */
+  orders?: number;
 }
 
 /** Latest live state of one instrument. Optional fields are absent when the feed does not provide them. */
@@ -131,12 +133,19 @@ export interface RawChain {
   expiry: string;
   ts: number;
   spot?: LiveQuote;
-  /** Same-expiry future if listed, else the nearest future. */
+  /**
+   * Live chains (LiveMarket.chain): the same-expiry future when listed, else absent (weekly expiries
+   * have none). Recorded chains (IntradayStore.chainAt): the same-expiry future, else the nearest
+   * unexpired recorded future.
+   */
   future?: LiveQuote;
   rows: ChainRowLive[];
 }
 
 export type WatchLevel = 'ltp' | 'quote' | 'depth';
+
+/** A contract the user holds or looks at (orders, positions, strategy legs, alerts, watchlists, algos); level defaults to 'quote'. */
+export type UserContract = InstrumentKey | { key: InstrumentKey; level?: WatchLevel };
 
 export interface FeedHealth {
   /** Logged in to the broker (TOTP + MPIN). */
@@ -152,6 +161,11 @@ export interface FeedHealth {
 export interface LiveMarket {
   /** Ask for live updates of these instruments (demand driven; `ttlMs` releases idle subscriptions). */
   watch(keys: InstrumentKey[], level?: WatchLevel, ttlMs?: number): void;
+  /**
+   * Latest quote, only while it is dated a live session: today; outside market hours (pre-open,
+   * after the close, weekends, holidays) also the last session. An older quote is undefined. The
+   * book (bid/ask/depth) is the one last reported: check `ts` before trading against it.
+   */
   quote(key: InstrumentKey): LiveQuote | undefined;
   quotes(keys: InstrumentKey[]): Map<string, LiveQuote>;
   /** Fetch fresh quotes over REST for keys without a live stream (rate-limited). */
@@ -201,7 +215,12 @@ export interface SessionClock {
 /* Recorded intraday data                                                                       */
 /* ------------------------------------------------------------------------------------------ */
 
-/** One recorded minute of an instrument (built from live ticks). */
+/**
+ * One recorded minute of an instrument (built from live ticks). A minute is written when a tick with
+ * a price arrived in it, including quote-only updates (bid/ask/OI changed, no trade): `chainAt` needs
+ * those values. Bar consumers (ORB, candles, straddle charts) must skip minutes with `traded: false`,
+ * whose OHLC is only the last traded price carried by the quotes.
+ */
 export interface MinuteRecord {
   /** Start of the minute (epoch ms). */
   ts: number;
@@ -209,8 +228,13 @@ export interface MinuteRecord {
   high: number;
   low: number;
   close: number;
-  /** Units traded in the minute (Δ cumulative volume). */
-  volume: number;
+  /**
+   * At least one trade happened in the minute: the cumulative volume rose, or the feed reported a
+   * new last-trade time (for index spots: a new index value time). False for quote-only minutes.
+   */
+  traded: boolean;
+  /** Units traded in the minute (Δ cumulative volume); absent when the feed reports no volume (e.g. index spots). */
+  volume?: number;
   oi?: number;
   bid?: number;
   ask?: number;
@@ -231,8 +255,10 @@ export interface ChainMinute {
   spot: number;
   ceOi: number;
   peOi: number;
-  ceVolume: number;
-  peVolume: number;
+  /** Sum of the CE strikes' cumulative session volume (units); null when no CE volume was seen. */
+  ceVolume: number | null;
+  /** Sum of the PE strikes' cumulative session volume (units); null when no PE volume was seen. */
+  peVolume: number | null;
   pcr: number | null;
   maxPain: number | null;
   atmStrike: number;
@@ -324,9 +350,16 @@ export interface ForwardEstimate {
 export interface Pricing {
   /** Risk-free rate (config input, not market data). */
   r: number;
-  /** Throws NoLiveData when neither a future, a put-call pair nor a spot price is live. */
+  /**
+   * Throws NoLiveData when neither a future, a put-call pair nor a spot price is live, when no live
+   * spot is there to imply the carry from, or once the expiry has passed (carry is never NaN).
+   */
   forward(symbol: string, expiry: string): ForwardEstimate;
-  /** Implied vol (decimal) of a market premium; null when it cannot be solved. */
+  /**
+   * Implied vol (decimal) of a market premium; null when it cannot be solved. Without `forward` the
+   * forward comes from the live quotes (no spot needed when a future or a put-call pair is live); a
+   * past `ts` then gives null (no look-ahead), so as-of callers pass the forward of that time.
+   */
   iv(input: { symbol: string; expiry: string; type: OptKind; strike: number; premium: number; ts?: number; forward?: number }): number | null;
   greeks(input: { symbol: string; expiry: string; type: OptKind; strike: number; iv: number; ts?: number; forward?: number }): Greeks | null;
   /** ATM IV of an expiry (nearest when omitted) from live premiums; null when unavailable. */
@@ -337,6 +370,24 @@ export interface Pricing {
 /* Facade                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
 
+export type CandleInterval = '1min' | '3min' | '5min' | '10min' | '15min' | '30min' | '60min' | 'D';
+
+/**
+ * One bar of MarketDataProvider.candles(). Intraday bars always carry OHLC. Daily bars of contracts
+ * come from the official closes (DailyFuture/DailyOption), which publish no open/high/low: those
+ * fields are then absent rather than copied from the close.
+ */
+export interface Candle {
+  /** Start of the bar (epoch ms); daily bars: 09:15 IST of the date. */
+  ts: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close: number;
+  /** Units traded in the bar; absent when the source reports no volume (index spots). */
+  volume?: number;
+}
+
 export interface MarketDataProvider {
   ref: ReferenceData;
   calendar: TradingCalendar;
@@ -345,8 +396,17 @@ export interface MarketDataProvider {
   intraday: IntradayStore;
   history: HistoryStore;
   pricing: Pricing;
-  /** Kotak historical candles for ACTIVE contracts only (expired ones are not served). */
-  candles(key: InstrumentKey, interval: '1min' | '3min' | '5min' | '10min' | '15min' | '30min' | '60min' | 'D', from: string, to: string): Promise<{ ts: number; open: number; high: number; low: number; close: number; volume: number }[]>;
+  /**
+   * Candles of [from, to] (inclusive dates). Intraday intervals: recorded minutes (traded ones only),
+   * else Kotak historical for ACTIVE contracts (expired ones are not served), resampled from real
+   * minutes. 'D': official end-of-day history. Throws NoLiveData when nothing is available.
+   */
+  candles(key: InstrumentKey, interval: CandleInterval, from: string, to: string): Promise<Candle[]>;
+  /**
+   * The contracts the user holds or looks at, read on every universe update (about once a minute):
+   * they are streamed in the 'user' tier, above the index chains and ad-hoc watches. Null clears it.
+   */
+  setUserContracts(fn: (() => Iterable<UserContract>) | null): void;
   start(): Promise<void>;
   stop(): Promise<void>;
 }

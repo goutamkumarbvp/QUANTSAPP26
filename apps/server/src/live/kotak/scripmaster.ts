@@ -283,13 +283,20 @@ export function* csvRecords(text: string): Generator<string[]> {
   }
 }
 
-/** Most common gap between consecutive strikes (ties → the smaller gap). */
-export function strikeStepOf(strikes: number[]): number | undefined {
-  const s = [...new Set(strikes)].sort((a, b) => a - b);
+/**
+ * Most common gap between consecutive strikes, counted within each expiry and pooled over all of
+ * them (ties → the smaller gap). Pooling matters after a corporate action: the adjusted strikes of
+ * the older expiries sit off the grid (real 2023 data gives NTPC 1.75 on its nearest expiry while
+ * the grid was 2.5), the newer expiries are listed on the regular grid.
+ */
+export function strikeStepOf(...expiryStrikes: readonly (readonly number[])[]): number | undefined {
   const counts = new Map<number, number>();
-  for (let i = 1; i < s.length; i++) {
-    const g = Math.round((s[i] - s[i - 1]) * 100) / 100;
-    if (g > 0) counts.set(g, (counts.get(g) ?? 0) + 1);
+  for (const strikes of expiryStrikes) {
+    const s = [...new Set(strikes)].sort((a, b) => a - b);
+    for (let i = 1; i < s.length; i++) {
+      const g = Math.round((s[i] - s[i - 1]) * 100) / 100;
+      if (g > 0) counts.set(g, (counts.get(g) ?? 0) + 1);
+    }
   }
   let best: number | undefined;
   let bestN = 0;
@@ -784,9 +791,9 @@ export class ScripMaster implements ReferenceData {
         continue;
       }
       const m = st.opts.get(nearest)!;
-      const strikeStep = strikeStepOf([...m.keys()]);
+      const strikeStep = strikeStepOf(...[...st.opts.values()].map((byStrike) => [...byStrike.keys()]));
       if (strikeStep === undefined) {
-        warnings.push(`${st.symbol}: fewer than two strikes in ${nearest}; skipped`);
+        warnings.push(`${st.symbol}: fewer than two strikes in any live expiry; skipped`);
         continue;
       }
       const leg = [...m.values()].map((l) => l.CE ?? l.PE).find((l): l is Listing => !!l)!;
@@ -834,8 +841,12 @@ interface FileParse {
   warnings: string[];
 }
 
-/** Indices are not tradable: lot 1 and the 0.01 precision indices are published with. */
-const INDEX_SPOT_META = { lotSize: 1, tickSize: 0.01 } as const;
+/**
+ * Index spots are not tradable. Lot size 1 is what the cash master lists for index rows (lLotSize 1
+ * on NSE token 26000 / NIFTY in the official nse_cm sample); their dTickSize is −1, i.e. there is no
+ * tick size, so `tickSize` is left out rather than invented.
+ */
+const INDEX_SPOT_META = { lotSize: 1 } as const;
 
 function newState(symbol: string, name: string, kind: 'index' | 'stock', exchange: 'NSE' | 'BSE', sector: string, foSegment: 'nse_fo' | 'bse_fo'): UState {
   return { symbol, name, kind, exchange, sector, foSegment, hasOptStk: false, futs: new Map(), opts: new Map() };

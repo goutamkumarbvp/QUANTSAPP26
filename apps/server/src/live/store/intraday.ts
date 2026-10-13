@@ -13,10 +13,11 @@
  * trimmed before the next append (a complete record that only lost its '\n' is kept), so earlier
  * minutes are never lost. Two records of the same minute
  * (a restart inside a minute) are merged on read.
+ * Reads hand out copies: callers may mutate what they get without touching the cache.
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { addDays, istParts } from '@q26/core';
+import { istParts } from '@q26/core';
 import { isIsoDate } from '../calendar';
 import { keyId } from '../types';
 import type { ChainMinute, ChainRowLive, InstrumentKey, IntradayStore, LiveQuote, MinuteRecord, OptKind, RawChain } from '../types';
@@ -38,7 +39,10 @@ export interface LiveBarSource {
 
 export interface IntradayFilesOptions {
   dataDir: string;
-  /** Keep this many calendar days of dates (by directory name); unset = keep everything. */
+  /**
+   * Keep this many sessions (recorded date directories, the date being pruned for included); older
+   * dates are deleted by prune(). Unset = keep everything.
+   */
   retentionDays?: number;
   /** Parsed files kept in memory (LRU). Default 2,000. */
   cacheFiles?: number;
@@ -105,13 +109,14 @@ function parseLines(text: string): unknown[] {
   return out;
 }
 
-const OPTIONAL_NUM_FIELDS = ['oi', 'bid', 'ask', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
+const OPTIONAL_NUM_FIELDS = ['volume', 'oi', 'bid', 'ask', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
 
+/** A valid record (unknown fields dropped). `traded` is required: there is no default for it. */
 function toMinuteRecord(v: unknown): MinuteRecord | undefined {
   if (!v || typeof v !== 'object') return undefined;
   const o = v as Record<string, unknown>;
-  if (!isNum(o.ts) || !isNum(o.open) || !isNum(o.high) || !isNum(o.low) || !isNum(o.close) || !isNum(o.volume)) return undefined;
-  const rec: MinuteRecord = { ts: o.ts, open: o.open, high: o.high, low: o.low, close: o.close, volume: o.volume };
+  if (!isNum(o.ts) || !isNum(o.open) || !isNum(o.high) || !isNum(o.low) || !isNum(o.close) || typeof o.traded !== 'boolean') return undefined;
+  const rec: MinuteRecord = { ts: o.ts, open: o.open, high: o.high, low: o.low, close: o.close, traded: o.traded };
   for (const f of OPTIONAL_NUM_FIELDS) if (isNum(o[f])) rec[f] = o[f];
   return rec;
 }
@@ -121,14 +126,15 @@ const numOrNull = (v: unknown): number | null => (isNum(v) ? v : null);
 function toChainMinute(v: unknown): ChainMinute | undefined {
   if (!v || typeof v !== 'object') return undefined;
   const o = v as Record<string, unknown>;
-  if (!isNum(o.ts) || !isNum(o.spot) || !isNum(o.ceOi) || !isNum(o.peOi) || !isNum(o.ceVolume) || !isNum(o.peVolume) || !isNum(o.atmStrike)) return undefined;
+  if (!isNum(o.ts) || !isNum(o.spot) || !isNum(o.ceOi) || !isNum(o.peOi) || !isNum(o.atmStrike)) return undefined;
+  if (!(o.ceVolume === null || isNum(o.ceVolume)) || !(o.peVolume === null || isNum(o.peVolume))) return undefined;
   return { ts: o.ts, spot: o.spot, ceOi: o.ceOi, peOi: o.peOi, ceVolume: o.ceVolume, peVolume: o.peVolume, pcr: numOrNull(o.pcr), maxPain: numOrNull(o.maxPain), atmStrike: o.atmStrike, atmIv: numOrNull(o.atmIv) };
 }
 
 /** Merge two records of the same minute (written before and after a restart). */
 function mergeSameMinute(a: MinuteRecord, b: MinuteRecord): MinuteRecord {
-  const out: MinuteRecord = { ...a, ...b, open: a.open, high: Math.max(a.high, b.high), low: Math.min(a.low, b.low), close: b.close, volume: a.volume + b.volume };
-  for (const f of ['buyVolume', 'sellVolume', 'unclassified'] as const) {
+  const out: MinuteRecord = { ...a, ...b, open: a.open, high: Math.max(a.high, b.high), low: Math.min(a.low, b.low), close: b.close, traded: a.traded || b.traded };
+  for (const f of ['volume', 'buyVolume', 'sellVolume', 'unclassified'] as const) {
     if (a[f] !== undefined || b[f] !== undefined) out[f] = (a[f] ?? 0) + (b[f] ?? 0);
   }
   return out;
@@ -183,7 +189,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   constructor(private readonly opts: IntradayFilesOptions) {
     this.root = path.join(opts.dataDir, 'market');
     this.cacheMax = Math.max(16, opts.cacheFiles ?? 2000);
-    if (opts.retentionDays !== undefined && !(opts.retentionDays >= 1)) throw new Error('retentionDays must be ≥ 1');
+    if (opts.retentionDays !== undefined && !(Number.isInteger(opts.retentionDays) && opts.retentionDays >= 1)) throw new Error('retentionDays must be an integer ≥ 1');
   }
 
   /** The recorder registers itself here to serve liveBar(). */
@@ -375,13 +381,20 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
     );
   }
 
-  /** Remove date directories older than `retentionDays` calendar days before `today`. */
+  /**
+   * Keep exactly `retentionDays` sessions: `today` (recorded or about to be) and the most recent
+   * `retentionDays − 1` recorded dates before it. Every other date directory before `today` is
+   * deleted (empty ones too); later dates are never touched.
+   */
   prune(today: string): void {
     const days = this.opts.retentionDays;
     if (days === undefined) return;
-    const cutoff = addDays(today, -days);
-    for (const d of this.dateDirs()) {
-      if (d >= cutoff) continue;
+    if (!isIsoDate(today)) throw new Error(`invalid date '${today}'`);
+    const before = this.dateDirs().filter((d) => d < today);
+    const recorded = before.filter((d) => this.hasRecords(d));
+    const keep = new Set(days > 1 ? recorded.slice(-(days - 1)) : []);
+    for (const d of before) {
+      if (keep.has(d)) continue;
       const dir = path.join(this.root, d);
       fs.rmSync(dir, { recursive: true, force: true });
       const prefix = dir + path.sep;
@@ -393,7 +406,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   /* ---------------------------------- reads ---------------------------------- */
 
   bars(key: InstrumentKey, date: string): MinuteRecord[] {
-    return this.loadBars(this.barPath(key, date)).slice();
+    return this.loadBars(this.barPath(key, date)).map((r) => ({ ...r }));
   }
 
   liveBar(key: InstrumentKey): MinuteRecord | null {
@@ -407,7 +420,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   at(key: InstrumentKey, ts: number): MinuteRecord | undefined {
     const list = this.loadBars(this.barPath(key, istParts(ts).date));
     const i = lastAtOrBefore(list, ts - MINUTE_MS);
-    return i >= 0 ? list[i] : undefined;
+    return i >= 0 ? { ...list[i] } : undefined;
   }
 
   /**
@@ -466,11 +479,11 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   }
 
   chainSeries(symbol: string, expiry: string, date: string): ChainMinute[] {
-    return this.loadChain(this.chainPath(symbol, expiry, date)).slice();
+    return this.loadChain(this.chainPath(symbol, expiry, date)).map((r) => ({ ...r }));
   }
 
   sessions(): string[] {
-    return this.dateDirs().filter((d) => this.hasFiles(path.join(this.root, d, 'bars')) || this.hasFiles(path.join(this.root, d, 'chains')));
+    return this.dateDirs().filter((d) => this.hasRecords(d));
   }
 
   recordedKeys(date: string): InstrumentKey[] {
@@ -504,6 +517,11 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
 
   private dateDirs(): string[] {
     return this.listDir(this.root).filter(isIsoDate).sort();
+  }
+
+  /** The date directory holds at least one non-empty bar or chain file. */
+  private hasRecords(date: string): boolean {
+    return this.hasFiles(path.join(this.root, date, 'bars')) || this.hasFiles(path.join(this.root, date, 'chains'));
   }
 
   /** True when the directory tree holds at least one non-empty file. */

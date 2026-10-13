@@ -138,8 +138,10 @@ describe('ScripMaster', () => {
       sector: 'Index',
       lotSize: 75,
       strikeStep: 50,
-      spot: { symbol: 'NIFTY', kind: 'SPOT', exchange: 'NSE', segment: 'nse_cm', token: 'Nifty 50', tradingSymbol: 'Nifty 50', lotSize: 1, tickSize: 0.01 },
+      // Index spots: lot 1 as the cash master lists index rows; no tick size (indices are not traded).
+      spot: { symbol: 'NIFTY', kind: 'SPOT', exchange: 'NSE', segment: 'nse_cm', token: 'Nifty 50', tradingSymbol: 'Nifty 50', lotSize: 1 },
     });
+    expect('tickSize' in sm.underlying('NIFTY').spot).toBe(false);
     expect(sm.underlying('BANKNIFTY')).toMatchObject({ lotSize: 35, strikeStep: 100, spot: { token: 'Nifty Bank' } });
     expect(sm.underlying('SENSEX')).toMatchObject({ exchange: 'BSE', lotSize: 20, strikeStep: 100, spot: { segment: 'bse_cm', token: 'SENSEX' } });
     expect(sm.underlying('RELIANCE')).toEqual({
@@ -180,7 +182,8 @@ describe('ScripMaster', () => {
     expect(sm.listing({ symbol: 'NIFTY', kind: 'FUT', expiry: '2026-10-27' })).toMatchObject({ token: '52010', tickSize: 0.1 });
     expect(sm.listing({ symbol: 'BANKNIFTY', kind: 'PE', expiry: '2026-10-27', strike: 56100 })?.freezeQty).toBe(901);
     expect(sm.listing({ symbol: 'NIFTY', kind: 'CE', expiry: '2026-10-06', strike: 25000 })).toBeUndefined();
-    expect(sm.listing({ symbol: 'INDIAVIX', kind: 'SPOT' })).toMatchObject({ segment: 'nse_cm', token: 'INDIA VIX' });
+    expect(sm.listing({ symbol: 'INDIAVIX', kind: 'SPOT' })).toMatchObject({ segment: 'nse_cm', token: 'INDIA VIX', lotSize: 1 });
+    expect(sm.listing({ symbol: 'INDIAVIX', kind: 'SPOT' })?.tickSize).toBeUndefined();
     expect(sm.chain('NIFTY', '2026-10-27')).toEqual([{ strike: 25000, ce: expect.objectContaining({ token: '52011' }), pe: expect.objectContaining({ token: '52012' }) }]);
 
     // Reverse lookups for the feed decoder (incl. the numeric NIFTY index token of the cm file).
@@ -360,6 +363,35 @@ describe('scrip master helpers', () => {
     expect(strikeStepOf([100, 150, 200, 300])).toBe(50);
     expect(strikeStepOf([100, 200, 250])).toBe(50);
     expect(strikeStepOf([100])).toBeUndefined();
+    expect(strikeStepOf()).toBeUndefined();
+    // Gaps are taken inside each expiry, never across two (100 → 102.5 is not a gap of 2.5).
+    expect(strikeStepOf([100, 105, 110], [102.5, 112.5])).toBe(5);
+    expect(strikeStepOf([100], [200])).toBeUndefined();
+  });
+
+  it('strike step pools every live expiry: corporate-action-adjusted strikes do not set it', () => {
+    // Adjusted series (NTPC-like): 1.75 apart on the nearest expiry, the newer ones on the 2.5 grid.
+    const adjusted = [171.75, 173.5, 175.25, 177];
+    expect(strikeStepOf(adjusted)).toBe(1.75); // the old nearest-expiry rule
+    expect(strikeStepOf(adjusted, [170, 172.5, 175, 177.5], [170, 172.5, 175])).toBe(2.5);
+  });
+
+  it('builds strikeStep from all live expiries of the underlying (adjusted nearest expiry)', async () => {
+    // CONSTRUCTED: IRCTC with a corporate-action-adjusted October series (10.25 apart) and
+    // November/December series on the regular 10-rupee grid.
+    let tok = 90000;
+    const irctc = (expiry: number, ks: number[]) =>
+      ks.map((k) => foRow({ token: tok++, inst: 'OPTSTK', name: 'IRCTC', trd: `IRCTC${expiry}${k}CE`, opt: 'CE', expiry, strike: Math.round(k * 100), lot: 875 }));
+    const extra = [
+      ...irctc(OCT27, [700.25, 710.5, 720.75, 731]),
+      ...irctc(nseExpiry('2026-11-24'), [690, 700, 710, 720, 730]),
+      ...irctc(nseExpiry('2026-12-29'), [700, 710, 720]),
+    ];
+    const { sm } = harness(dir, { ...ALL, nse_fo: { text: nseFo(extra) } });
+    await sm.refresh(DATE);
+    expect(sm.expiries('IRCTC', 'OPT')).toEqual(['2026-10-27', '2026-11-24', '2026-12-29']);
+    expect(sm.strikes('IRCTC', '2026-10-27')).toEqual([700.25, 710.5, 720.75, 731]); // listed as published
+    expect(sm.underlying('IRCTC').strikeStep).toBe(10);
   });
 
   it('parses quoted CSV fields, CRLF and the trimmed 78-column header', () => {

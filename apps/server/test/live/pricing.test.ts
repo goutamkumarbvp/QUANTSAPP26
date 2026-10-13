@@ -8,8 +8,10 @@ import {
   black76Price,
   chainAtmIv,
   forwardOf,
+  impliedForward,
   timeToExpiry,
 } from '../../src/live/pricing';
+import { ExchangeCalendar } from '../../src/live/calendar';
 import { NoLiveData, keyId } from '../../src/live/types';
 import type { InstrumentKey, Listing, LiveQuote, OptKind, RawChain, ReferenceData, Segment, Underlying } from '../../src/live/types';
 
@@ -128,7 +130,15 @@ describe('forwardOf', () => {
   it('prefers the same-expiry future and implies carry from spot', () => {
     const f = forwardOf({ spot: 25_000, future: 25_100, rows }, T, r);
     expect(f).toEqual({ forward: 25_100, carry: Math.log(25_100 / 25_000) / T, source: 'future' });
-    expect(Number.isNaN(forwardOf({ future: 25_100, rows: [] }, T, r)?.carry)).toBe(true);
+  });
+
+  it('never carries a NaN: without a spot or with no time left the estimate is rejected', () => {
+    // The forward price alone (all Black-76 needs) is still known.
+    expect(impliedForward({ future: 25_100, rows: [] }, T, r)).toEqual({ forward: 25_100, source: 'future' });
+    expect(forwardOf({ future: 25_100, rows: [] }, T, r)).toBeNull();
+    expect(forwardOf({ spot: 25_000, future: 25_100, rows }, 0, r)).toBeNull();
+    expect(forwardOf({ spot: 25_000, rows: [] }, -1, r)).toBeNull();
+    expect(impliedForward({ spot: 25_000, future: 25_100, rows }, 0, r)).toEqual({ forward: 25_100, source: 'future' });
   });
 
   it('uses put-call parity at the strike nearest spot', () => {
@@ -142,10 +152,10 @@ describe('forwardOf', () => {
   });
 
   it('without spot, uses the pair with the smallest |C − P|', () => {
-    const f = forwardOf({ rows }, T, r);
+    const f = impliedForward({ rows }, T, r);
     expect(f?.source).toBe('parity');
     expect(Math.abs((f?.forward as number) - Ftrue)).toBeLessThan(1e-6);
-    expect(Number.isNaN(f?.carry)).toBe(true);
+    expect(forwardOf({ rows }, T, r)).toBeNull(); // no carry without a spot
   });
 
   it('falls back to spot carried at r, then to null', () => {
@@ -176,9 +186,11 @@ describe('LivePricing', () => {
     { 'NIFTY|OPT': ['2026-10-06', WEEKLY, MONTHLY], 'NIFTY|FUT': [MONTHLY] },
   );
 
+  const calendar = new ExchangeCalendar(); // 2026-10-09 Fri, 10-12 Mon, 10-13 Tue
+
   function setup(quotes: LiveQuote[], extra: Partial<ConstructorParameters<typeof LivePricing>[0]> = {}) {
     const map = new Map(quotes.map((q) => [keyId(q.key), q]));
-    return new LivePricing({ r, ref, getQuote: (k) => map.get(keyId(k)), now: () => now, ...extra });
+    return new LivePricing({ r, ref, calendar, getQuote: (k) => map.get(keyId(k)), now: () => now, ...extra });
   }
   const q = (key: InstrumentKey, ltp: number, ts = now): LiveQuote => ({ key, ts, ltp });
   const spot = (ltp: number, ts = now) => q({ symbol: 'NIFTY', kind: 'SPOT' }, ltp, ts);
@@ -211,9 +223,62 @@ describe('LivePricing', () => {
     expect(() => setup([spot(0)]).forward('NIFTY', WEEKLY)).toThrow(NoLiveData);
   });
 
+  it('forward: NoLiveData instead of a NaN carry when no spot is live, and once the expiry has passed', () => {
+    const fut = q({ symbol: 'NIFTY', kind: 'FUT', expiry: MONTHLY }, 25_180);
+    expect(() => setup([fut]).forward('NIFTY', MONTHLY)).toThrow(/No live spot price for NIFTY/);
+    expect(() => setup([spot(25_000), fut]).forward('NIFTY', '2026-10-06')).toThrow(/has expired/);
+    // Black-76 itself needs no spot: IV off the live future still solves.
+    const T = timeToExpiry(MONTHLY, now);
+    const premium = black76Price('CE', 25_180, 25_200, T, r, 0.13);
+    expect(setup([fut]).iv({ symbol: 'NIFTY', expiry: MONTHLY, type: 'CE', strike: 25_200, premium })).toBeCloseTo(0.13, 6);
+  });
+
   it('treats stale quotes as not live when maxQuoteAgeMs is set', () => {
     const p = setup([spot(25_000, now - 120_000)], { maxQuoteAgeMs: 60_000 });
     expect(() => p.forward('NIFTY', WEEKLY)).toThrow(NoLiveData);
+    expect(setup([spot(25_000, now - 120_000)]).forward('NIFTY', WEEKLY).source).toBe('spot');
+  });
+
+  it('counts a quote only on the current session date (outside hours also the most recent session)', () => {
+    const fri = ist('2026-10-09', 15, 29); // last quote of the previous session
+    const thu = ist('2026-10-08', 15, 29);
+    const fridaySpot = [spot(25_000, fri)];
+    const at = (t: number, quotes: LiveQuote[]) => setup(quotes, { now: () => t });
+    // During Monday's session Friday's quote is not live.
+    expect(() => at(now, fridaySpot).forward('NIFTY', WEEKLY)).toThrow(NoLiveData);
+    // Before Monday's open (and in pre-open), on the weekend: Friday is the most recent session.
+    for (const t of [ist('2026-10-12', 8, 0), ist('2026-10-12', 9, 5), ist('2026-10-11', 12, 0), ist('2026-10-10', 1, 0)]) {
+      expect(at(t, fridaySpot).forward('NIFTY', WEEKLY).forward).toBeGreaterThan(25_000);
+      expect(() => at(t, [spot(25_000, thu)]).forward('NIFTY', WEEKLY)).toThrow(NoLiveData);
+    }
+    // After Monday's close, Monday is the most recent session: Friday's quote is not live.
+    expect(at(ist('2026-10-12', 18, 0), [spot(25_000, ist('2026-10-12', 15, 29))]).forward('NIFTY', WEEKLY).source).toBe('spot');
+    expect(() => at(ist('2026-10-12', 18, 0), fridaySpot).forward('NIFTY', WEEKLY)).toThrow(NoLiveData);
+    // A holiday Monday: Friday stays the most recent session all day.
+    const holiday = new LivePricing({ r, ref, calendar: new ExchangeCalendar(['2026-10-12']), getQuote: (k) => (k.kind === 'SPOT' ? fridaySpot[0] : undefined), now: () => now });
+    expect(holiday.forward('NIFTY', WEEKLY).source).toBe('spot');
+    // Same rule for option premiums: yesterday's chain gives no ATM IV today.
+    const old = chainQuotes(WEEKLY, 25_010, 0.12, 0.12).map((x) => ({ ...x, ts: fri }));
+    expect(at(now, [spot(25_000), ...old]).atmIv('NIFTY', WEEKLY)).toBeNull();
+  });
+
+  it('iv/greeks with a past ts and no forward give null (no look-ahead); a passed forward is used', () => {
+    const F = 25_061.5;
+    const p = setup([spot(25_020), ...chainQuotes(WEEKLY, F, 0.12, 0.12)]);
+    const past = now - 30 * 60_000;
+    const Tpast = timeToExpiry(WEEKLY, past);
+    const premium = black76Price('CE', F, 25_200, Tpast, r, 0.16);
+    expect(p.iv({ symbol: 'NIFTY', expiry: WEEKLY, type: 'CE', strike: 25_200, premium, ts: past })).toBeNull();
+    expect(p.greeks({ symbol: 'NIFTY', expiry: WEEKLY, type: 'CE', strike: 25_200, iv: 0.16, ts: past })).toBeNull();
+    expect(p.iv({ symbol: 'NIFTY', expiry: WEEKLY, type: 'CE', strike: 25_200, premium, ts: past, forward: F })).toBeCloseTo(0.16, 6);
+    expect(p.greeks({ symbol: 'NIFTY', expiry: WEEKLY, type: 'CE', strike: 25_200, iv: 0.16, ts: past, forward: F })?.delta).toBeCloseTo(
+      bsGreeks('CE', F, 25_200, Tpast, r, 0.16, r).delta,
+      9,
+    );
+    // A ts of "now" give or take call overhead is live.
+    const Tnow = timeToExpiry(WEEKLY, now - 2_000);
+    const premiumNow = black76Price('CE', F, 25_200, Tnow, r, 0.16);
+    expect(p.iv({ symbol: 'NIFTY', expiry: WEEKLY, type: 'CE', strike: 25_200, premium: premiumNow, ts: now - 2_000 })).toBeCloseTo(0.16, 6);
   });
 
   it('iv/greeks: solves market premiums off the live forward, never a fixed IV', () => {
@@ -249,7 +314,7 @@ describe('LivePricing', () => {
   it('atmIv: null when no premium is live or the master is not loaded', () => {
     expect(setup([spot(25_000)]).atmIv('NIFTY')).toBeNull();
     expect(setup([]).atmIv('NIFTY')).toBeNull();
-    const p = new LivePricing({ r, ref: new FakeRef({}, {}, false), getQuote: () => undefined, now: () => now });
+    const p = new LivePricing({ r, ref: new FakeRef({}, {}, false), calendar, getQuote: () => undefined, now: () => now });
     expect(p.atmIv('NIFTY')).toBeNull();
     expect(p.atmIv('NIFTY', WEEKLY)).toBeNull();
   });
