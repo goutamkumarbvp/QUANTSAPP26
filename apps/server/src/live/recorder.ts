@@ -5,7 +5,9 @@
  * cumulative-volume baseline, and nothing is carried into minutes that had no ticks.
  *
  * Per instrument and minute:
- *  - OHLC from LTP; volume = Δ cumulative session volume between ticks (decreases ignored; the
+ *  - OHLC from LTP: once the minute has a trade, from its trades only (the quote-only ticks before the
+ *    first trade repeated an earlier minute's price; a minute without trades keeps that last price,
+ *    with traded false); volume = Δ cumulative session volume between ticks (decreases ignored; the
  *    baseline is the highest volume seen today, so out-of-order packets are not double counted),
  *    absent for instruments whose feed carries no volume (index spots);
  *  - traded = at least one trade in the minute: a positive Δvolume, or a last-trade time newer than
@@ -17,9 +19,9 @@
  *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
  *    estimate, and only meaningful if the feed is per trade (critic U4).
  * Minute bucket = the tick's exchange timestamp (critic U7: LUT/LTT, epoch seconds on the wire).
- * Ticks dated another day, outside 09:15–15:30, without a price, whose LTT is another day (no trade
- * yet today), or whose timestamp is further than maxLag/maxLead from the clock (re-sent snapshots,
- * skew) update state only. A tick for a minute
+ * Ticks dated another day, outside 09:15–15:30, without a price, whose LTT is another day or whose
+ * session volume is still 0 after the open (no trade yet today), or whose timestamp is further than
+ * maxLag/maxLead from the clock (re-sent snapshots, skew) update state only. A tick for a minute
  * that was already written is folded into the next open minute instead of rewriting history.
  */
 import { maxPain } from '@q26/core';
@@ -264,7 +266,11 @@ export class Recorder implements LiveBarSource {
       if (inst.lastLtt !== undefined || q.ltt >= minuteOf(q.ts)) tradeMinute = minuteOf(q.ltt);
       inst.lastLtt = q.ltt;
     }
-    if (isPos(q.ltp)) inst.ltp = q.ltp;
+    // A fresh packet (LUT today) can still carry an earlier session's last trade: its LTT is another
+    // day, or (REST option-chain legs, stamped when received) the session has opened and it has no
+    // volume yet. That LTP is neither a trade of a minute nor a premium for the chain's ATM IV.
+    const oldTrade = (isNum(q.ltt) && calendar.session(q.ltt).date !== today) || (q.volume === 0 && q.ts >= calendar.ts(today, 0));
+    if (isPos(q.ltp) && !oldTrade) inst.ltp = q.ltp;
     if (isNum(q.oi) && q.oi >= 0) inst.oi = q.oi;
     if (isPos(q.bid)) inst.bid = q.bid;
     if (isPos(q.ask)) inst.ask = q.ask;
@@ -276,9 +282,7 @@ export class Recorder implements LiveBarSource {
 
     // Bar.
     if (!isPos(q.ltp)) return void this.st.stateOnly.noPrice++;
-    // A fresh packet (LUT today) can still carry the previous session's last trade (LTT another
-    // day, before the first trade today): that price is not a trade of this minute.
-    if (isNum(q.ltt) && calendar.session(q.ltt).date !== today) return void this.st.stateOnly.oldTrade++;
+    if (oldTrade) return void this.st.stateOnly.oldTrade++;
     if (q.ts < now - this.maxLagMs) return void this.st.stateOnly.stale++;
     if (q.ts > now + this.maxLeadMs) return void this.st.stateOnly.ahead++;
     if (at.status !== 'open') return void this.st.stateOnly.outsideSession++;
@@ -287,30 +291,30 @@ export class Recorder implements LiveBarSource {
     if (inst.lastWritten + MINUTE_MS > m) m = inst.lastWritten + MINUTE_MS;
     if (!this.inSession(m, today)) return void this.st.stateOnly.outsideSession++;
 
-    // A trade reported late, in the minute still open before this tick's: that minute traded.
-    if (inst.bar && tradeMinute === inst.bar.ts) inst.bar.traded = true;
+    // A trade reported late, in the minute still open before this tick's: the trade (its price and the
+    // volume behind it) belongs to that minute, not to the one this tick opens.
+    if (inst.bar && tradeMinute === inst.bar.ts && m > inst.bar.ts) {
+      addTrade(inst.bar, q.ltp, dv, prevBid, prevAsk);
+      dv = 0;
+    }
     if (inst.bar && m > inst.bar.ts) {
       const done = this.takeBar(inst);
       if (done) this.write([{ key: inst.key, rec: done }]);
     }
     let bar = inst.bar;
     if (!bar) bar = inst.bar = { ts: m, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp, traded: false };
-    bar.high = Math.max(bar.high, q.ltp);
-    bar.low = Math.min(bar.low, q.ltp);
-    bar.close = q.ltp;
-    if (dv > 0 || (tradeMinute !== undefined && tradeMinute >= minuteOf(q.ts))) bar.traded = true;
     if (inst.tracksVolume && bar.volume === undefined) {
       bar.volume = 0;
       bar.buyVolume = 0;
       bar.sellVolume = 0;
       bar.unclassified = 0;
     }
-    if (dv > 0) {
-      bar.volume = (bar.volume ?? 0) + dv;
-      const sane = isPos(prevBid) && isPos(prevAsk) && prevBid < prevAsk;
-      if (sane && q.ltp >= prevAsk) bar.buyVolume = (bar.buyVolume ?? 0) + dv;
-      else if (sane && q.ltp <= prevBid) bar.sellVolume = (bar.sellVolume ?? 0) + dv;
-      else bar.unclassified = (bar.unclassified ?? 0) + dv;
+    if (dv > 0 || (tradeMinute !== undefined && tradeMinute >= minuteOf(q.ts))) addTrade(bar, q.ltp, dv, prevBid, prevAsk);
+    else {
+      // Quote-only tick: its LTP repeats the last trade (of this minute once the minute has traded).
+      bar.high = Math.max(bar.high, q.ltp);
+      bar.low = Math.min(bar.low, q.ltp);
+      bar.close = q.ltp;
     }
     if (inst.oi !== undefined) bar.oi = inst.oi;
     if (inst.bid !== undefined) bar.bid = inst.bid;
@@ -524,6 +528,28 @@ export class Recorder implements LiveBarSource {
     this.date = date;
     this.lastChainTs = -Infinity;
     this.sessionWritten = { minutes: 0, chains: 0 };
+  }
+}
+
+/**
+ * A trade at `ltp` (and the Δvolume `dv` behind it) in the minute of `bar`. The minute's first trade
+ * replaces the prices seen before it: quote-only ticks only repeated an earlier minute's trade, which
+ * is not part of this minute's OHLC.
+ */
+function addTrade(bar: MinuteRecord, ltp: number, dv: number, prevBid: number | undefined, prevAsk: number | undefined): void {
+  if (!bar.traded) {
+    bar.open = bar.high = bar.low = ltp;
+    bar.traded = true;
+  }
+  bar.high = Math.max(bar.high, ltp);
+  bar.low = Math.min(bar.low, ltp);
+  bar.close = ltp;
+  if (dv > 0) {
+    bar.volume = (bar.volume ?? 0) + dv;
+    const sane = isPos(prevBid) && isPos(prevAsk) && prevBid < prevAsk;
+    if (sane && ltp >= prevAsk) bar.buyVolume = (bar.buyVolume ?? 0) + dv;
+    else if (sane && ltp <= prevBid) bar.sellVolume = (bar.sellVolume ?? 0) + dv;
+    else bar.unclassified = (bar.unclassified ?? 0) + dv;
   }
 }
 

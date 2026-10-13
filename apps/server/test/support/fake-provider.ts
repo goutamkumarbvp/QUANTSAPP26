@@ -14,7 +14,8 @@ import { addDays, istParts, istTs, maxPain, weekday } from '@q26/core';
 import { ExchangeCalendar, isIsoDate } from '../../src/live/calendar';
 import { LiveClock } from '../../src/live/clock';
 import { INTERVAL_MINUTES, officialDailyCandles, recordedMinutes, resampleMinutes } from '../../src/live/provider';
-import { LivePricing, black76Price, chainAtmIv, timeToExpiry } from '../../src/live/pricing';
+import { BOOK_FIELDS } from '../../src/live/live-market';
+import { LivePricing, black76Price, chainAtmIv, liveSessionDates, timeToExpiry } from '../../src/live/pricing';
 import { HistoryFiles } from '../../src/live/store/history';
 import type { IntradayWriter } from '../../src/live/store/intraday';
 import { NoLiveData, keyId } from '../../src/live/types';
@@ -46,6 +47,13 @@ const MINUTE = 60_000;
 function notFound(message: string): Error {
   return Object.assign(new Error(message), { statusCode: 404 });
 }
+
+/** A copy that shares nothing with the cache (depth levels included), as the real live market hands out. */
+const copyQuote = (q: LiveQuote): LiveQuote => {
+  const out: LiveQuote = { ...q, key: { ...q.key } };
+  if (q.depth) out.depth = { bids: q.depth.bids.map((l) => ({ ...l })), asks: q.depth.asks.map((l) => ({ ...l })) };
+  return out;
+};
 
 const canon = (k: InstrumentKey): InstrumentKey => {
   const key: InstrumentKey = { symbol: k.symbol.trim().toUpperCase(), kind: k.kind };
@@ -216,14 +224,14 @@ export class FakeLiveMarket implements LiveMarket {
   ) {}
 
   private liveDates(): Set<string> {
-    const now = this.now();
-    const s = this.calendar.session(now);
-    const dates = new Set([s.date]);
-    if (s.status !== 'open') dates.add(this.calendar.isTradingDay(s.date) && now >= this.calendar.ts(s.date, 0) ? s.date : this.calendar.prev(s.date));
-    return dates;
+    return liveSessionDates(this.calendar, this.now());
   }
 
-  /** Set (merge) a quote and fan it out like a tick. `ts` defaults to the fake clock; an update dated before the stored quote's session is ignored. */
+  /**
+   * Set (merge) a quote and fan it out like a tick. `ts` defaults to the fake clock. As the real live
+   * market: an update dated before the stored quote's session is ignored, and an older update of the
+   * same session only fills fields the quote does not have yet.
+   */
   setQuote(key: InstrumentKey, q: QuoteInput): LiveQuote {
     const k = canon(key);
     const ts = q.ts ?? this.now();
@@ -231,15 +239,21 @@ export class FakeLiveMarket implements LiveMarket {
     if (prev) {
       const was = this.calendar.session(prev.ts).date;
       const day = this.calendar.session(ts).date;
-      if (day < was) return { ...prev, key: { ...prev.key } }; // an older session's update changes nothing
+      if (day < was) return copyQuote(prev); // an older session's update changes nothing
       if (day !== was) prev = undefined;
     }
-    const next = { ...prev, ...q, key: k, ts } as LiveQuote;
+    let next: LiveQuote;
+    if (prev && ts < prev.ts) {
+      next = copyQuote(prev);
+      const rec = next as unknown as Record<string, unknown>;
+      // Never an older book (bid/ask/depth): fill-only, as the real merge.
+      for (const [f, v] of Object.entries(q)) if (f !== 'ts' && !(BOOK_FIELDS as readonly string[]).includes(f) && v !== undefined && rec[f] === undefined) rec[f] = v;
+    } else next = { ...prev, ...q, key: k, ts } as LiveQuote;
     for (const f of Object.keys(next) as (keyof LiveQuote)[]) if (next[f] === undefined) delete next[f];
-    this.map.set(keyId(k), next);
-    this.state.lastTickTs = next.ts;
-    for (const fn of this.listeners) fn({ ...next, key: { ...k } });
-    return { ...next };
+    this.map.set(keyId(k), copyQuote(next));
+    this.state.lastTickTs = Math.max(this.state.lastTickTs ?? -Infinity, ts);
+    for (const fn of this.listeners) fn(copyQuote(next));
+    return copyQuote(next);
   }
 
   clearQuote(key: InstrumentKey): void {
@@ -252,7 +266,7 @@ export class FakeLiveMarket implements LiveMarket {
 
   quote(key: InstrumentKey): LiveQuote | undefined {
     const q = this.map.get(keyId(canon(key)));
-    return q && this.liveDates().has(this.calendar.session(q.ts).date) ? { ...q, key: { ...q.key } } : undefined;
+    return q && this.liveDates().has(this.calendar.session(q.ts).date) ? copyQuote(q) : undefined;
   }
 
   quotes(keys: InstrumentKey[]): Map<string, LiveQuote> {
@@ -264,9 +278,17 @@ export class FakeLiveMarket implements LiveMarket {
     return out;
   }
 
-  /** No network: the quotes already set for these keys. */
+  /** No network: the quotes already set for these keys. As the real one, NoLiveData when none of the keys is listed. */
   async refresh(keys: InstrumentKey[]): Promise<Map<string, LiveQuote>> {
-    return this.quotes(keys);
+    const listed = keys.filter((k) => {
+      try {
+        return !!this.ref.listing(k);
+      } catch {
+        return false; // master not loaded
+      }
+    });
+    if (keys.length && !listed.length) throw new NoLiveData(`Not in the instrument master: ${keys.slice(0, 5).map((k) => keyId(canon(k))).join(', ')}`);
+    return this.quotes(listed);
   }
 
   async chain(symbol: string, expiry: string): Promise<RawChain> {

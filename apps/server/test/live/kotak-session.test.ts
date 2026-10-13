@@ -365,6 +365,30 @@ describe('KotakSession 403 (not enough privileges vs dead session)', () => {
     expect(kinds(ff.calls)).toEqual(['login', 'validate', 'hist', 'login', 'validate', 'hist', 'other', 'quotes']);
   });
 
+  it('a gateway that refuses every call with 403: each re-login that did not help doubles the wait for the next (10, 20, then 30 min)', async () => {
+    let open = false;
+    const { env, session } = setup((c) => (open && c.url.endsWith('/ok') ? { body: [] } : FORBIDDEN));
+    await session.login();
+    const call = (path: string) => session.request(path, { kind: 'market' }).catch((e: unknown) => e);
+    const logins: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      expect(await call(`e${i}`)).toMatchObject({ kind: 'api', httpStatus: 403 });
+      logins.push(env.logins);
+      env.clock += 5 * MIN;
+    }
+    // Re-logins at 0, 10 (+10) and 30 (+20) min; the next one not before 60 (+30): never every 5 min.
+    expect(logins).toEqual([2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4]);
+    expect(session.status().loggedIn).toBe(true);
+    // Something served resets it: a first-call 403 after the plain cooldown counts as a dead session again.
+    open = true;
+    await expect(call('ok')).resolves.toEqual([]);
+    session.logout();
+    await session.login();
+    const before = env.logins;
+    await call('later');
+    expect(env.logins).toBe(before + 1);
+  });
+
   it('a 403 on an endpoint that already served this session is a dead session: one re-login and retry', async () => {
     let n = 0;
     const { env, session } = setup(() => (++n === 2 ? FORBIDDEN : { body: [QUOTE_EQUITY] }));

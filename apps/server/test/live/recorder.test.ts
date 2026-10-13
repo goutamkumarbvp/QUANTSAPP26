@@ -94,12 +94,13 @@ describe('Recorder: minute bars', () => {
     tick(FUT, t(10, 0, 40), { ltp: 99.2, volume: 1030 }); // inside 98.5–99.5 → unclassified 5
     tick(FUT, t(10, 0, 50), { ltp: 101, volume: 1020, bid: 100.5, ask: 101.5 }); // volume went down: ignored
     tick(FUT, t(10, 0, 55), { ltp: 100.8, volume: 1031, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1 }); // Δ1 vs max 1030, inside → unclassified
-    expect(rec.liveBar(FUT)).toMatchObject({ ts: t(10, 0), open: 100, close: 100.8, volume: 31 });
+    // The baseline tick's 100 is not known to be a trade of this minute: the first trade (100.5) opens it.
+    expect(rec.liveBar(FUT)).toMatchObject({ ts: t(10, 0), open: 100.5, close: 100.8, volume: 31 });
     expect(writer.minutes).toHaveLength(0);
 
     tick(FUT, t(10, 1, 2), { ltp: 101.6, volume: 1040 }); // rollover; ≥ prior ask 101.5 → buy 9
     expect(writer.of(FUT)).toEqual([
-      { ts: t(10, 0), open: 100, high: 101, low: 99, close: 100.8, traded: true, volume: 31, buyVolume: 10, sellVolume: 15, unclassified: 6, oi: 5100, bid: 100.5, ask: 101.5, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1 },
+      { ts: t(10, 0), open: 100.5, high: 101, low: 99, close: 100.8, traded: true, volume: 31, buyVolume: 10, sellVolume: 15, unclassified: 6, oi: 5100, bid: 100.5, ask: 101.5, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1 },
     ]);
     expect(rec.liveBar(FUT)).toMatchObject({ ts: t(10, 1), open: 101.6, volume: 9, buyVolume: 9, sellVolume: 0, unclassified: 0 });
   });
@@ -229,6 +230,26 @@ describe('Recorder: minute bars', () => {
     expect(writer.of(k)).toEqual([{ ts: t(9, 21), open: 43, high: 43, low: 43, close: 43, traded: true, volume: 75, buyVolume: 75, sellVolume: 0, unclassified: 0, oi: 9_000, bid: 41, ask: 43 }]);
   });
 
+  it('a minute opens at its first trade, not at the earlier trade its quote-only ticks repeat; a late-reported trade keeps its minute (review)', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(10, 0, 5), { ltp: 100, ltt: t(10, 0, 5), volume: 1_000 }); // a trade in 10:00
+    at(t(10, 1, 2));
+    tick(FUT, t(10, 1, 3), { ltp: 100, ltt: t(10, 0, 5), volume: 1_000, bid: 104, ask: 106 }); // book moved; LTP is 10:00's trade
+    tick(FUT, t(10, 1, 40), { ltp: 105, ltt: t(10, 1, 40), volume: 1_010 }); // first trade of 10:01
+    tick(FUT, t(10, 1, 50), { ltp: 105.5, ltt: t(10, 1, 50), volume: 1_012 });
+    at(t(10, 2, 2));
+    tick(FUT, t(10, 2, 30), { ltp: 105.5, ltt: t(10, 1, 50), volume: 1_012, bid: 105 }); // quote-only so far in 10:02
+    tick(FUT, t(10, 3, 1), { ltp: 104, ltt: t(10, 2, 59), volume: 1_020 }); // reported in 10:03, traded in the open 10:02
+    at(t(10, 4, 2));
+    expect(writer.of(FUT).map((r) => [r.ts, r.open, r.high, r.low, r.close, r.traded, r.volume])).toEqual([
+      [t(10, 0), 100, 100, 100, 100, true, 0],
+      [t(10, 1), 105, 105.5, 105, 105.5, true, 12], // never 100: no trade at 100 in 10:01
+      [t(10, 2), 104, 104, 104, 104, true, 8], // the late trade's price and volume
+      [t(10, 3), 104, 104, 104, 104, false, 0], // only repeats 10:02's trade
+    ]);
+    expect(writer.of(FUT)[2]).toMatchObject({ sellVolume: 8 }); // 104 ≤ the bid before it (105)
+  });
+
   it('folds a tick for an already written minute into the next open minute', () => {
     const { writer, tick, at, rec } = setup();
     tick(FUT, t(10, 0, 10), { ltp: 100, volume: 10 });
@@ -299,6 +320,27 @@ describe('Recorder: chain aggregates', () => {
     at(t(10, 2, 2));
     expect(writer.chains).toHaveLength(2);
     expect(writer.chains[1].rec).toMatchObject({ ts: t(10, 1), ceOi: ceOi + 30, peOi: peOi + 30 });
+  });
+
+  it('a REST leg with no volume today (earlier session premium) is no bar and no ATM IV input; its OI counts (review)', () => {
+    const { writer, tick, at, rec } = setup();
+    const T = timeToExpiry(EXP, t(10, 1));
+    tick(SPOT, t(10, 0, 1), { ltp: 25_010 });
+    let s = 2;
+    for (const K of strikes) {
+      for (const kind of ['CE', 'PE'] as OptKind[]) {
+        // Option-chain legs carry no trade time: the 25,000 call has not traded today (volume 0), so
+        // its LTP is an earlier session's price although the leg is stamped now.
+        const stale = kind === 'CE' && K === 25_000;
+        tick(opt(kind, K), t(10, 0, s++), { ltp: stale ? 300 : black76Price(kind, F, K, T, R, 0.12), oi: oi[`${kind}|${K}`], volume: stale ? 0 : 500 });
+      }
+    }
+    at(t(10, 1, 2));
+    expect(writer.of(opt('CE', 25_000))).toEqual([]);
+    expect(rec.stats().stateOnly.oldTrade).toBe(1);
+    expect(writer.chains[0].rec).toMatchObject({ ceOi: 100 + 300 + 600, peOi: 700 + 400 + 50 });
+    // Parity and ATM at 25,100 (the nearest strikes with two premiums of today): the stated vol.
+    expect(writer.chains[0].rec.atmIv).toBeCloseTo(0.12, 6);
   });
 
   it('uses listed strikes for the ATM strike and skips chains without spot or OI', () => {
@@ -392,7 +434,8 @@ describe('Recorder: session hooks and the store', () => {
     tick(SPOT, t(10, 1, 5), { ltp: 25_003 });
 
     const reopened = new IntradayFiles({ dataDir: dir });
-    expect(reopened.bars(opt('CE', 25_000), D)).toEqual([{ ts: t(10, 0), open: 120, high: 121, low: 120, close: 121, traded: true, volume: 65, buyVolume: 0, sellVolume: 0, unclassified: 65, oi: 1_065, bid: 120.9, ask: 121.1 }]);
+    // 120 was the baseline tick (no trade known in the minute); 121 is the minute's trade.
+    expect(reopened.bars(opt('CE', 25_000), D)).toEqual([{ ts: t(10, 0), open: 121, high: 121, low: 121, close: 121, traded: true, volume: 65, buyVolume: 0, sellVolume: 0, unclassified: 65, oi: 1_065, bid: 120.9, ask: 121.1 }]);
     expect(store.liveBar(SPOT)).toMatchObject({ ts: t(10, 1), close: 25_003 });
     expect(reopened.chainSeries('NIFTY', EXP, D)).toEqual([expect.objectContaining({ ts: t(10, 0), spot: 25_000, ceOi: 1_065, peOi: 1_200, ceVolume: 130, peVolume: 130, atmStrike: 25_000 })]);
     expect(reopened.chainAt('NIFTY', EXP, t(10, 1, 30))?.rows[0]).toMatchObject({ strike: 25_000, ce: { ltp: 121, oi: 1_065 }, pe: { ltp: 110, oi: 1_200 } });

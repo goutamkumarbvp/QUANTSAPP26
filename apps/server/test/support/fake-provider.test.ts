@@ -150,6 +150,35 @@ describe('FakeProvider keeps the real provider rules (review)', () => {
     expect(p.intraday.bars(key, '2026-10-09')).toEqual([{ ts, open: 10, high: 13, low: 9, close: 12, traded: true, volume: 100 }]);
   });
 
+  it('quotes are deep copies; an older update of the session only fills gaps; refresh of unlisted keys is NoLiveData (review)', async () => {
+    const p = fresh();
+    const book = loadSampleBook(p);
+    const k: InstrumentKey = { symbol: 'RELIANCE', kind: 'FUT', expiry: book.expiries.RELIANCE[0] };
+    p.setQuote(k, { ltp: 1410, bid: 1409.9, ask: 1410.1, depth: { bids: [{ price: 1409.9, qty: 500 }], asks: [{ price: 1410.1, qty: 250 }] } });
+    const got = p.live.quote(k)!;
+    got.depth!.bids[0].qty = 1;
+    got.key.symbol = 'X';
+    expect(p.live.quote(k)?.depth?.bids[0].qty).toBe(500);
+    expect(p.live.quote(k)?.key.symbol).toBe('RELIANCE');
+    // Older than the cached quote (same session): LTP/book kept, a missing field filled.
+    p.setQuote(k, { ltp: 1300, bid: 1299, prevOi: 1_150_000, ts: book.now - 60_000 });
+    expect(p.live.quote(k)).toMatchObject({ ltp: 1410, bid: 1409.9, prevOi: 1_150_000, ts: book.now });
+    await expect(p.live.refresh([{ symbol: 'NIFTY', kind: 'FUT', expiry: '2030-01-01' }])).rejects.toThrow(NoLiveData);
+    expect((await p.live.refresh([k, { symbol: 'NIFTY', kind: 'FUT', expiry: '2030-01-01' }])).size).toBe(1);
+  });
+
+  it('pricing over the fake uses only premiums traded this session (review)', () => {
+    const p = fresh();
+    const book = loadSampleBook(p);
+    const w = book.expiries.NIFTY[0];
+    const atm: InstrumentKey = { symbol: 'NIFTY', kind: 'CE', expiry: w, strike: 25_000 };
+    const premium = p.live.quote(atm)!.ltp;
+    // The ATM call as the feed reports it when it has not traded today: fresh update time, Friday's trade.
+    p.setQuote(atm, { ltp: 999, ltt: p.calendar.ts(p.calendar.prev(book.date), 370), volume: 0 });
+    const iv = p.pricing.iv({ symbol: 'NIFTY', expiry: w, type: 'CE', strike: 25_000, premium });
+    expect(Math.abs((iv as number) - book.vols.NIFTY)).toBeLessThan(1e-3); // parity moved to the next pair, not to 999
+  });
+
   it('setUserContracts is part of the provider; candles reject a bad request like LiveProvider', async () => {
     const p = fresh();
     const k: InstrumentKey = { symbol: 'NIFTY', kind: 'CE', expiry: '2026-10-13', strike: 25000 };

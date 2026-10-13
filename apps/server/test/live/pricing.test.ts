@@ -9,6 +9,8 @@ import {
   chainAtmIv,
   forwardOf,
   impliedForward,
+  isLivePrice,
+  liveSessionDates,
   timeToExpiry,
 } from '../../src/live/pricing';
 import { ExchangeCalendar } from '../../src/live/calendar';
@@ -260,6 +262,44 @@ describe('LivePricing', () => {
     // Same rule for option premiums: yesterday's chain gives no ATM IV today.
     const old = chainQuotes(WEEKLY, 25_010, 0.12, 0.12).map((x) => ({ ...x, ts: fri }));
     expect(at(now, [spot(25_000), ...old]).atmIv('NIFTY', WEEKLY)).toBeNull();
+  });
+
+  it('a quote dated today whose LTP is an earlier session trade is not a live price (review)', () => {
+    const F = 25_061.5;
+    const fri = ist('2026-10-09', 15, 20);
+    const thu = ist('2026-10-08', 15, 20);
+    const live = chainQuotes(WEEKLY, F, 0.12, 0.12);
+    const isAtm = (x: LiveQuote) => x.key.strike === 25_000;
+    // The 25,000 strike (nearest spot) as the feed reports it when it has not traded today: the
+    // update time is today (a book change), the last trade is Friday's at another price.
+    const staleCe = live.map((x) => (isAtm(x) && x.key.kind === 'CE' ? { ...x, ltp: 150, ltt: fri, volume: 0 } : x));
+    const p = setup([spot(25_020), ...staleCe]);
+    // Parity skips it and uses the next pair (25,100), which recovers the true forward.
+    expect(p.forward('NIFTY', WEEKLY).forward).toBeCloseTo(F, 6);
+    // A REST option-chain leg (stamped when received, no trade time) with no volume today.
+    const restLeg = live.map((x) => (isAtm(x) && x.key.kind === 'PE' ? { ...x, ltp: 99, volume: 0 } : x));
+    expect(setup([spot(25_020), ...restLeg]).forward('NIFTY', WEEKLY).forward).toBeCloseTo(F, 6);
+    // Traded today (volume, today's trade time): used as usual.
+    const traded = live.map((x) => (isAtm(x) ? { ...x, ltt: now - 5_000, volume: 1_500 } : x));
+    expect(setup([spot(25_020), ...traded]).forward('NIFTY', WEEKLY).forward).toBeCloseTo(F, 6);
+    // Before Monday's open Friday is the last session: a Friday trade is live, a Thursday one is not.
+    const preOpen = ist('2026-10-12', 9, 5);
+    const sp = spot(25_000, preOpen);
+    const fut = (ltt: number) => ({ key: { symbol: 'NIFTY', kind: 'FUT' as const, expiry: MONTHLY }, ts: preOpen, ltp: 25_180, ltt, volume: 0 });
+    expect(setup([sp, fut(fri)], { now: () => preOpen }).forward('NIFTY', MONTHLY).source).toBe('future');
+    expect(setup([sp, fut(thu)], { now: () => preOpen }).forward('NIFTY', MONTHLY).source).toBe('spot');
+  });
+
+  it('isLivePrice / liveSessionDates are the shared rule', () => {
+    const dates = liveSessionDates(calendar, now);
+    expect([...dates]).toEqual(['2026-10-12']);
+    expect(isLivePrice({ ts: now }, calendar, dates)).toBe(true);
+    expect(isLivePrice({ ts: now, volume: 0 }, calendar, dates)).toBe(false);
+    expect(isLivePrice({ ts: now, ltt: ist('2026-10-09', 15, 0) }, calendar, dates)).toBe(false);
+    expect(isLivePrice({ ts: ist('2026-10-09', 15, 0) }, calendar, dates)).toBe(false);
+    const weekend = liveSessionDates(calendar, ist('2026-10-11', 12, 0));
+    expect([...weekend].sort()).toEqual(['2026-10-09', '2026-10-11']);
+    expect(isLivePrice({ ts: ist('2026-10-09', 15, 29), ltt: ist('2026-10-09', 15, 29), volume: 10 }, calendar, weekend)).toBe(true);
   });
 
   it('iv/greeks with a past ts and no forward give null (no look-ahead); a passed forward is used', () => {

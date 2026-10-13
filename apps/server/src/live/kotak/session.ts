@@ -9,11 +9,14 @@
  * after login), or on an endpoint that already served this same session (privileges do not change
  * mid-session, so that cannot be "not enough privileges"). Any other 403 is "not enough privileges"
  * for that endpoint (instruments.md): it fails fast for `pathCooldownMs` without touching the
- * session. Auth-triggered re-logins (rejected requests, invalidate()) happen at most once per
- * `authReloginCooldownMs`; a request rejected again after its fresh login holds logins for that
- * cooldown, doubling (to 30 min) while nothing is served in between, so logins that succeed on a
- * session every request refuses cannot repeat every few minutes. Failed logins back off (60 s
- * doubling to 30 min; a 429 holds for Retry-After, or 5 min without one).
+ * session. A re-login whose fresh session is refused with 403 too doubles the wait before the next
+ * first-call 403 counts as a dead session (to 30 min, until something is served), so a gateway that
+ * refuses the account outright cannot cause a re-login every cooldown. Auth-triggered re-logins
+ * (rejected requests, invalidate()) happen at most once per `authReloginCooldownMs`; a request
+ * rejected again after its fresh login holds logins for that cooldown, doubling (to 30 min) while
+ * nothing is served in between, so logins that succeed on a session every request refuses cannot
+ * repeat every few minutes. Failed logins back off (60 s doubling to 30 min; a 429 holds for
+ * Retry-After, or 5 min without one).
  */
 import type { NeoEnv } from '../env';
 import { scrubSecrets } from '../env';
@@ -245,6 +248,8 @@ export class KotakSession {
   private rejectedStreak = 0;
   /** Logins held after repeated session rejections; `force` does not skip this hold. */
   private authHoldUntil = 0;
+  /** Re-logins whose fresh session was refused with 403 too, since the last request that was served. */
+  private forbiddenStreak = 0;
   /** Endpoint → hold after a 403 "not enough privileges" (generation = session that got it). */
   private readonly endpointHolds = new Map<string, { until: number; reason: string; generation: number }>();
   private rateHeaders: Record<string, string> | undefined;
@@ -492,13 +497,15 @@ export class KotakSession {
   /**
    * Whether a 403 means the session is dead (→ the one re-login) rather than "not enough
    * privileges" for this endpoint. Dead: the endpoint already served this session, or nothing has
-   * been served yet (first call after login) while a re-login is still allowed. Never on the retry
-   * right after a fresh login: the session was made for that request, so the 403 is the endpoint's.
+   * been served yet (first call after login) while a re-login is still allowed; that wait doubles
+   * (to 30 min) for each re-login whose fresh session was refused too. Never on the retry right after
+   * a fresh login: the session was made for that request, so the 403 is the endpoint's.
    */
   private sessionLevel403(s: ActiveSession, key: string, afterRelogin: boolean): boolean {
     if (afterRelogin) return false;
     if (s.okEndpoints.has(key)) return true;
-    return !s.served && this.now() - this.lastAuthRelogin >= this.authReloginCooldownMs;
+    const wait = Math.max(this.authReloginCooldownMs, Math.min(30 * MINUTE, this.authReloginCooldownMs * 2 ** this.forbiddenStreak));
+    return !s.served && this.now() - this.lastAuthRelogin >= wait;
   }
 
   private holdEndpoint(s: ActiveSession, key: string, label: string, msg: string): KotakError {
@@ -616,6 +623,7 @@ export class KotakSession {
       if (res.status === 401 || stCode === 1003) throw new KotakError(`Kotak session rejected on ${label}: ${msg()}`, 'auth', res.status, stCode);
       if (res.status === 403) {
         if (this.sessionLevel403(s, endpoint, afterRelogin)) throw new KotakError(`Kotak ${label} refused: ${msg()} (HTTP 403)`, 'auth', 403, stCode);
+        if (afterRelogin) this.forbiddenStreak++;
         throw this.holdEndpoint(s, endpoint, label, msg());
       }
       if (!res.ok) throw new KotakError(`Kotak ${label} failed: ${msg()} (HTTP ${res.status})`, 'api', res.status, stCode);
@@ -624,6 +632,7 @@ export class KotakSession {
       s.served = true;
       s.okEndpoints.add(endpoint);
       this.rejectedStreak = 0;
+      this.forbiddenStreak = 0;
       return body as T;
     }
   }

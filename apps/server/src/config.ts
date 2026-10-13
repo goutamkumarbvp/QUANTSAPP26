@@ -34,7 +34,7 @@ export interface AppConfig {
   neoError?: string;
   /** Sessions checked for missing NSE/BSE end-of-day files at start and daily (EOD_BACKFILL_DAYS). */
   eodBackfillDays: number;
-  /** Hard cap of SFeed (token, intent) subscriptions (SFEED_TOKEN_BUDGET, server limit 3,000). */
+  /** Hard cap of SFeed (token, intent) subscriptions (SFEED_TOKEN_BUDGET, at most 2,700 of the server's 3,000, DESIGN.md §3). */
   sfeedTokenBudget: number;
 }
 
@@ -66,7 +66,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),
     eodBackfillDays: Math.max(0, Math.floor(num('EOD_BACKFILL_DAYS', 30))),
-    sfeedTokenBudget: Math.min(3000, Math.max(1, Math.floor(num('SFEED_TOKEN_BUDGET', 2700)))),
+    sfeedTokenBudget: Math.min(2700, Math.max(1, Math.floor(num('SFEED_TOKEN_BUDGET', 2700)))),
   };
   return { ...base, ...overrides };
 }

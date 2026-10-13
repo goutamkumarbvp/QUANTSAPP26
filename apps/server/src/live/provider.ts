@@ -276,6 +276,8 @@ export class LiveProvider implements MarketDataProvider {
   private started = false;
   private stopped = false;
   private boot: Promise<void> = Promise.resolve();
+  /** The instrument-master attempt started by the last login (part of whenStarted()). */
+  private refdataAttempt: Promise<void> = Promise.resolve();
   private feedGeneration = -1;
   private feedRelogins: number[] = [];
   private feedHeld: string | undefined;
@@ -448,13 +450,18 @@ export class LiveProvider implements MarketDataProvider {
       return;
     }
     await this.execJob('login', () => this.login(), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil });
+    await this.refdataAttempt;
   }
 
   private async login(): Promise<void> {
-    await this.session!.login();
+    // An attempt armed for later (the end of a login hold, a back-off) may find the session already
+    // restored by a REST caller: logging in again would only replace a working session.
+    if (!this.session!.status().loggedIn) await this.session!.login();
     this.startOrUpdateFeed();
     this.scheduleRelogin();
-    if (!this.refdataCurrent()) await this.execJob('refdata', () => this.refreshRefdata(), REFDATA_BACKOFF);
+    // Its own job, not awaited: while the login job runs, another login request (a feed refusal) is
+    // dropped, so the job must not last as long as the instrument-master download.
+    if (!this.refdataCurrent()) this.refdataAttempt = this.execJob('refdata', () => this.refreshRefdata(), REFDATA_BACKOFF);
   }
 
   /* ---------------------------------- jobs ---------------------------------- */

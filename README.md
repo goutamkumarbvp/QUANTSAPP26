@@ -11,7 +11,7 @@ order-book analytics, FII/DII & participant data, watchlists, alerts and a paper
 
 ## Quick start
 
-Requires Node.js ≥ 20.11.
+Requires Node.js ≥ 20.12.
 
 ```bash
 npm install

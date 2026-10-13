@@ -13,7 +13,8 @@
  * gives null.
  *
  * Live quotes count only when they are of the current session date (outside session hours: also
- * the most recent session's date), never yesterday's quotes during today's session. A past `ts`
+ * the most recent session's date), never yesterday's quotes during today's session, and only when
+ * their LTP is a trade of that session (isLivePrice: last-trade time, zero session volume). A past `ts`
  * without an explicit forward gives null: the live quotes are newer than `ts` (no look-ahead).
  */
 import { bsGreeks, bsPrice, expiryTs, impliedVol, yearsBetween, type Greeks } from '@q26/core';
@@ -184,6 +185,34 @@ export interface LivePricingOptions {
 /** A `ts` this close to now is "now" (call overhead), not a past evaluation time. */
 export const LIVE_TS_SLACK_MS = 5_000;
 
+/**
+ * Session dates whose quotes are live at `now`: today; outside session hours also the most recent
+ * session (the previous trading day before 09:15 and on holidays, today after the close).
+ */
+export function liveSessionDates(calendar: TradingCalendar, now: number): Set<string> {
+  const s = calendar.session(now);
+  const dates = new Set([s.date]);
+  if (s.status !== 'open') dates.add(calendar.isTradingDay(s.date) && now >= calendar.ts(s.date, 0) ? s.date : calendar.prev(s.date));
+  return dates;
+}
+
+/**
+ * The quote's LTP is a trade of a live session (`dates` from liveSessionDates). A quote can be dated
+ * today while its LTP is an older trade: the feed stamps the update time (a book change), REST
+ * option-chain legs the receive time. So the quote must be of a live date, its last-trade time (when
+ * reported) too, and a quote dated after its session opened with a zero session volume has not
+ * traded in that session (its LTP is from an earlier one). Callers that use an LTP as a current
+ * price (premiums for IV, forwards, marks) apply this rule; the quote itself (book, OI) stays live.
+ */
+export function isLivePrice(q: Pick<LiveQuote, 'ts' | 'ltt' | 'volume'>, calendar: TradingCalendar, dates: ReadonlySet<string>): boolean {
+  if (!Number.isFinite(q.ts)) return false;
+  const day = calendar.session(q.ts).date;
+  if (!dates.has(day)) return false;
+  if (q.ltt !== undefined && Number.isFinite(q.ltt) && !dates.has(calendar.session(q.ltt).date)) return false;
+  if (q.volume === 0 && calendar.isTradingDay(day) && q.ts >= calendar.ts(day, 0)) return false;
+  return true;
+}
+
 export class LivePricing implements Pricing {
   readonly r: number;
   private readonly now: () => number;
@@ -199,18 +228,13 @@ export class LivePricing implements Pricing {
    * recent session (the previous trading day before 09:15 and on holidays, today after the close).
    */
   private liveDates(now: number): Set<string> {
-    const cal = this.opts.calendar;
-    const s = cal.session(now);
-    const dates = new Set([s.date]);
-    if (s.status !== 'open') dates.add(cal.isTradingDay(s.date) && now >= cal.ts(s.date, 0) ? s.date : cal.prev(s.date));
-    return dates;
+    return liveSessionDates(this.opts.calendar, now);
   }
 
-  /** Live price of an instrument, undefined when there is none (or it is not of a live date / too old). */
+  /** Live price of an instrument, undefined when there is none (or its LTP is not a trade of a live session / too old). */
   private price(key: InstrumentKey, now: number, dates: Set<string>): number | undefined {
     const q = this.opts.getQuote(key);
-    if (!q || !isPos(q.ltp) || !Number.isFinite(q.ts)) return undefined;
-    if (!dates.has(this.opts.calendar.session(q.ts).date)) return undefined;
+    if (!q || !isPos(q.ltp) || !isLivePrice(q, this.opts.calendar, dates)) return undefined;
     if (this.opts.maxQuoteAgeMs !== undefined && now - q.ts > this.opts.maxQuoteAgeMs) return undefined;
     return q.ltp;
   }
