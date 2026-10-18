@@ -104,6 +104,19 @@ describe('IntradayFiles', () => {
     expect(s.chainAt('BANKNIFTY', EXP, m1 + 60_000)).toBeUndefined();
   });
 
+  it('round-trips level-1 bid/ask quantities and serves them in as-of chains (Phase C order-book history)', () => {
+    const a = new IntradayFiles({ dataDir: dir });
+    const rec = bar(t(11, 0), 130, { oi: 1_000, bid: 129.9, ask: 130.1, bidQty: 750, askQty: 1_500, totalBuyQty: 90_000, totalSellQty: 80_000 });
+    a.writeMinutes([{ key: opt('CE', 25_000), rec }, { key: opt('PE', 25_000), rec: bar(t(11, 0), 110, { bid: 109.9, ask: 110.1 }) }]);
+    const b = new IntradayFiles({ dataDir: dir });
+    expect(b.bars(opt('CE', 25_000), D)).toEqual([rec]);
+    // Absent quantities stay absent (never a 0 that looks like an empty level).
+    expect('bidQty' in b.bars(opt('PE', 25_000), D)[0]).toBe(false);
+    const c = b.chainAt('NIFTY', EXP, t(11, 1));
+    expect(c?.rows[0].ce).toEqual({ key: opt('CE', 25_000), ts: t(11, 0), ltp: 130, oi: 1_000, bid: 129.9, ask: 130.1, bidQty: 750, askQty: 1_500, totalBuyQty: 90_000, totalSellQty: 80_000 });
+    expect(c?.rows[0].pe).toEqual({ key: opt('PE', 25_000), ts: t(11, 0), ltp: 110, bid: 109.9, ask: 110.1 });
+  });
+
   it('round-trips chain minutes (last write of a minute wins)', () => {
     const s = new IntradayFiles({ dataDir: dir });
     const cm = (ts: number, atmIv: number | null): ChainMinute => ({ ts, spot: 25_000, ceOi: 100, peOi: 120, ceVolume: 1_000, peVolume: 900, pcr: 1.2, maxPain: 25_000, atmStrike: 25_000, atmIv });

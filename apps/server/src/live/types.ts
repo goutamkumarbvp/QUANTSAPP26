@@ -238,6 +238,10 @@ export interface MinuteRecord {
   oi?: number;
   bid?: number;
   ask?: number;
+  /** Quantity (units) at the best bid recorded with `bid`; absent when the feed did not report it with that bid. */
+  bidQty?: number;
+  /** Quantity (units) at the best ask recorded with `ask`; absent when the feed did not report it with that ask. */
+  askQty?: number;
   totalBuyQty?: number;
   totalSellQty?: number;
   /** Δvolume classified at/above the ask (buyer-initiated), from live ticks. */
@@ -305,6 +309,8 @@ export interface DailyFuture {
   oiChange?: number;
   /** Units. */
   volume: number;
+  /** Market lot of the contract that day (bhavcopy `NewBrdLotQty`), so past contracts can be valued. */
+  lotSize?: number;
 }
 
 export interface DailyOption {
@@ -320,6 +326,8 @@ export interface DailyOption {
   /** Units. */
   volume: number;
   underlying?: number;
+  /** Market lot of the contract that day (bhavcopy `NewBrdLotQty`), so past contracts can be valued. */
+  lotSize?: number;
 }
 
 export interface HistoryStore {

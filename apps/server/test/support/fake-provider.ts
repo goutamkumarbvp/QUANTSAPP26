@@ -404,7 +404,7 @@ export class MemoryIntraday implements IntradayStore, IntradayWriter {
       const r = this.at(key, ts);
       if (!r) return undefined;
       const q: LiveQuote = { key, ts: r.ts, ltp: r.close };
-      for (const f of ['oi', 'bid', 'ask', 'atp', 'totalBuyQty', 'totalSellQty'] as const) if (r[f] !== undefined) q[f] = r[f];
+      for (const f of ['oi', 'bid', 'ask', 'bidQty', 'askQty', 'atp', 'totalBuyQty', 'totalSellQty'] as const) if (r[f] !== undefined) q[f] = r[f];
       return q;
     };
     const futures: InstrumentKey[] = [];
@@ -534,6 +534,12 @@ export class FakeProvider implements MarketDataProvider {
   /** What the last setUserContracts callback returns now (tests assert what a service declared). */
   userContracts(): UserContract[] {
     return this.userFn ? [...this.userFn()] : [];
+  }
+
+  /** Stand-in for LiveProvider.healthReport() (/api/health): JSON-safe, no credentials. */
+  healthReport(): { feed: FeedHealth; refdata: { ready: boolean }; recorder: { firstRecordedSession: string | null; sessions: number }; clock: ReturnType<LiveClock['info']> } {
+    const sessions = this.intraday.sessions();
+    return { feed: this.live.health(), refdata: { ready: this.ref.ready() }, recorder: { firstRecordedSession: sessions[0] ?? null, sessions: sessions.length }, clock: this.clock.info() };
   }
 
   async start(): Promise<void> {}

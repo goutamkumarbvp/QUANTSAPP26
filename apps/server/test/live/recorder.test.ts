@@ -250,6 +250,23 @@ describe('Recorder: minute bars', () => {
     expect(writer.of(FUT)[2]).toMatchObject({ sellVolume: 8 }); // 104 ≤ the bid before it (105)
   });
 
+  it('records the level-1 quantities reported with the bid/ask; a new price without one clears it (Phase C)', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(10, 0, 5), { ltp: 100, volume: 1_000, bid: 99.5, ask: 100.5, bidQty: 750, askQty: 1_500 });
+    tick(FUT, t(10, 0, 20), { ltp: 100.5, volume: 1_010, bid: 100, ask: 101, bidQty: 300, askQty: 2_250 });
+    at(t(10, 1, 2));
+    tick(FUT, t(10, 1, 10), { ltp: 100.5, volume: 1_010, bid: 100.25, ask: 101, askQty: 900 }); // bid without a quantity
+    at(t(10, 2, 2));
+    tick(FUT, t(10, 2, 10), { ltp: 100.5, volume: 1_015 }); // no book in this update: last book kept
+    at(t(10, 3, 2));
+    expect(writer.of(FUT).map((r) => [r.bid, r.bidQty, r.ask, r.askQty])).toEqual([
+      [100, 300, 101, 2_250],
+      [100.25, undefined, 101, 900],
+      [100.25, undefined, 101, 900],
+    ]);
+    expect('bidQty' in writer.of(FUT)[1]).toBe(false);
+  });
+
   it('folds a tick for an already written minute into the next open minute', () => {
     const { writer, tick, at, rec } = setup();
     tick(FUT, t(10, 0, 10), { ltp: 100, volume: 10 });

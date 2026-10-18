@@ -77,8 +77,8 @@ function pickDefined<T extends object>(src: T, keys: readonly (keyof T)[]): T {
 }
 
 const BAR_KEYS: readonly (keyof DailyBar)[] = ['date', 'open', 'high', 'low', 'close', 'volume', 'turnover'];
-const FUT_KEYS: readonly (keyof DailyFuture)[] = ['date', 'expiry', 'close', 'settle', 'oi', 'oiChange', 'volume'];
-const OPT_KEYS: readonly (keyof DailyOption)[] = ['date', 'expiry', 'strike', 'type', 'close', 'settle', 'oi', 'oiChange', 'volume', 'underlying'];
+const FUT_KEYS: readonly (keyof DailyFuture)[] = ['date', 'expiry', 'close', 'settle', 'oi', 'oiChange', 'volume', 'lotSize'];
+const OPT_KEYS: readonly (keyof DailyOption)[] = ['date', 'expiry', 'strike', 'type', 'close', 'settle', 'oi', 'oiChange', 'volume', 'underlying', 'lotSize'];
 
 /**
  * ATM IV of one date from official closing data (pricing math of pricing.ts):

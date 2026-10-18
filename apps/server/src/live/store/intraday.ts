@@ -109,7 +109,7 @@ function parseLines(text: string): unknown[] {
   return out;
 }
 
-const OPTIONAL_NUM_FIELDS = ['volume', 'oi', 'bid', 'ask', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
+const OPTIONAL_NUM_FIELDS = ['volume', 'oi', 'bid', 'ask', 'bidQty', 'askQty', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
 
 /** A valid record (unknown fields dropped). `traded` is required: there is no default for it. */
 function toMinuteRecord(v: unknown): MinuteRecord | undefined {
@@ -425,7 +425,7 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
 
   /**
    * As-of chain at `ts` from recorded minutes (same completion rule as at()): premium = minute
-   * close, OI/bid/ask/ATP = values at that minute's close. Day OHLC, cumulative volume and prevOi
+   * close, OI/bid/ask (+ their level-1 quantities)/ATP = values at that minute's close. Day OHLC, cumulative volume and prevOi
    * are not part of a minute record and are left out. Future: the same-expiry future when
    * recorded, else the nearest unexpired recorded future.
    */
@@ -472,6 +472,8 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
     if (r.oi !== undefined) q.oi = r.oi;
     if (r.bid !== undefined) q.bid = r.bid;
     if (r.ask !== undefined) q.ask = r.ask;
+    if (r.bidQty !== undefined) q.bidQty = r.bidQty;
+    if (r.askQty !== undefined) q.askQty = r.askQty;
     if (r.atp !== undefined) q.atp = r.atp;
     if (r.totalBuyQty !== undefined) q.totalBuyQty = r.totalBuyQty;
     if (r.totalSellQty !== undefined) q.totalSellQty = r.totalSellQty;

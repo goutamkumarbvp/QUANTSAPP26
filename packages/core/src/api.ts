@@ -3,20 +3,53 @@
  */
 import type { BuildUp } from './oi';
 import type { InstrumentType, Leg, Side } from './payoff';
-import type { ExpiryRule } from './dates';
 import type { FlowSummary, MinuteBar, OrbEvaluation, OrbRule, OrbTrend } from './orb';
+
+/*
+ * Live-data rule: every market value comes from a live (Kotak Neo) or official (NSE/BSE end-of-day)
+ * source, or is derived from such values (IV/Greeks solved from premiums, PCR, max pain …). A value
+ * that is not available is `null` (shown blank); a response that is only partly available names the
+ * missing sections in `gaps` (section → reason). A response with nothing available is HTTP 503
+ * `{ error, code: 'NO_LIVE_DATA' }`.
+ */
+
+/** Sections of a response that could not be filled from live/official data: section → reason. */
+export interface DataGaps {
+  gaps?: Record<string, string>;
+}
 
 export type MarketStatusCode = 'open' | 'pre-open' | 'closed';
 
+/** Connection and data-health summary for the web (no credentials or tokens, ever). */
+export interface FeedStatus {
+  /** Logged in to the broker (Kotak Neo). */
+  loggedIn: boolean;
+  /** Live market-data socket connected and authenticated. */
+  connected: boolean;
+  /** Time of the last live update received (epoch ms), null before any. */
+  lastTickTs: number | null;
+  /** Instruments currently subscribed on the live socket. */
+  subscribed: number;
+  /** Why something is down (e.g. "Kotak login failed: …"), absent when all is well. */
+  error?: string;
+  /** The day's instrument master (listings, lot sizes, expiries, strikes) is loaded. */
+  refdataReady: boolean;
+  /** First session the recorder holds minute data for ('YYYY-MM-DD'), null before any recording. */
+  recordingSince: string | null;
+  /** Last date loaded per official end-of-day source, null when none is loaded. */
+  eod: { fo: string | null; cm: string | null; index: string | null; participants: string | null; fiidii: string | null };
+}
+
 export interface MarketClockInfo {
+  /** Real time (epoch ms); the app runs on the real IST clock only. */
   ts: number;
   date: string;
   time: string;
   status: MarketStatusCode;
   /** Minutes since 09:15 (0..375). */
   sessionMinute: number;
-  mode: 'demo' | 'live';
-  speed: number;
+  /** Live data health (sent by /api/clock, /api/meta, /api/health and the websocket). */
+  feed?: FeedStatus;
 }
 
 export interface SymbolInfo {
@@ -25,65 +58,81 @@ export interface SymbolInfo {
   kind: 'index' | 'stock';
   exchange: 'NSE' | 'BSE';
   sector: string;
+  /** Current lot size from the instrument master. */
   lotSize: number;
+  /** Most common gap between listed strikes (instrument master). */
   strikeStep: number;
-  expiryRule: ExpiryRule;
+  /** Option expiry cycle seen in the listed expiries (consecutive expiries ≤ 8 days apart → weekly); null with fewer than two listed. */
+  expiryCycle: 'weekly' | 'monthly' | null;
 }
 
-export interface MetaResponse {
+export interface MetaResponse extends DataGaps {
   appName: string;
-  dataSource: 'simulated' | 'live';
+  dataSource: 'live';
   riskFreeRate: number;
   clock: MarketClockInfo;
+  /** Empty (with `gaps.symbols`) while the instrument master is not loaded. */
   symbols: SymbolInfo[];
 }
 
+/** Underlying quote: live spot LTP (required) plus whatever else is live; absent values are null. */
 export interface Quote {
   symbol: string;
   ltp: number;
-  change: number;
-  changePct: number;
-  open: number;
-  high: number;
-  low: number;
-  prevClose: number;
-  future: number;
-  futureChange: number;
-  atmIv: number;
+  change: number | null;
+  changePct: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prevClose: number | null;
+  /** Near-month future's live price. */
+  future: number | null;
+  futureExpiry: string | null;
+  futureChange: number | null;
+  /** ATM IV (percent) solved from live premiums. */
+  atmIv: number | null;
   ts: number;
 }
 
+/** Candle; daily bars of contracts carry the official close only (no open/high/low), index bars no volume. */
 export interface Candle {
   ts: number;
-  open: number;
-  high: number;
-  low: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
   close: number;
-  volume: number;
+  volume: number | null;
 }
 
 export interface OptionQuote {
-  ltp: number;
-  change: number;
-  changePct: number;
-  prevClose: number;
-  oi: number;
-  prevOi: number;
-  oiChange: number;
-  oiChangePct: number;
-  volume: number;
-  iv: number;
-  delta: number;
-  gamma: number;
-  theta: number;
-  vega: number;
-  bid: number;
-  ask: number;
-  bidQty: number;
-  askQty: number;
-  buildUp: BuildUp;
-  intrinsic: number;
-  timeValue: number;
+  /** Last traded price of the live session; null when the leg has not traded in it (its OI is still shown). */
+  ltp: number | null;
+  change: number | null;
+  changePct: number | null;
+  prevClose: number | null;
+  oi: number | null;
+  prevOi: number | null;
+  oiChange: number | null;
+  oiChangePct: number | null;
+  volume: number | null;
+  /** Percent, solved (Black-76) from the premium named by `ivSource`. */
+  iv: number | null;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  /** Live best bid/ask (open session, fresh book); null otherwise. */
+  bid: number | null;
+  ask: number | null;
+  bidQty: number | null;
+  askQty: number | null;
+  buildUp: BuildUp | null;
+  intrinsic: number | null;
+  timeValue: number | null;
+  /** Premium the IV/Greeks are solved from: 'mid' of a live two-sided book, else the session 'ltp'; null = no usable premium. */
+  ivSource: 'mid' | 'ltp' | null;
+  /** Time of the leg's quote (epoch ms); null when there is no quote. */
+  ts: number | null;
 }
 
 export interface ChainRow {
@@ -92,128 +141,196 @@ export interface ChainRow {
   pe: OptionQuote;
 }
 
-export interface OptionChain {
+export interface OptionChain extends DataGaps {
   symbol: string;
   expiry: string;
   expiries: string[];
+  /** Evaluation time (now, or the ?at= time of a recorded chain). */
   ts: number;
-  spot: number;
-  spotChange: number;
-  spotChangePct: number;
-  future: number;
-  futureExpiry: string;
-  /** Carry yield implied by this expiry's synthetic forward. */
-  carry: number;
+  spot: number | null;
+  spotChange: number | null;
+  spotChangePct: number | null;
+  /** Same-expiry future when listed, else the nearest future (live price). */
+  future: number | null;
+  futureExpiry: string | null;
+  /** Forward of this expiry (Black-76 input) and where it came from. */
+  forward: number | null;
+  forwardSource: 'future' | 'parity' | 'spot' | null;
+  /** Carry yield q such that spot·e^{(r−q)T} = this expiry's forward; null without a live spot. */
+  carry: number | null;
   lotSize: number;
   strikeStep: number;
   daysToExpiry: number;
-  atm: number;
-  atmIv: number;
-  ivChange: number;
-  pcr: number;
-  pcrVolume: number;
-  maxPain: number;
-  totalCeOi: number;
-  totalPeOi: number;
-  totalCeOiChange: number;
-  totalPeOiChange: number;
-  support: number;
-  resistance: number;
+  atm: number | null;
+  atmIv: number | null;
+  ivChange: number | null;
+  pcr: number | null;
+  pcrVolume: number | null;
+  maxPain: number | null;
+  totalCeOi: number | null;
+  totalPeOi: number | null;
+  totalCeOiChange: number | null;
+  totalPeOiChange: number | null;
+  support: number | null;
+  resistance: number | null;
+  /** Strikes the OI aggregates (PCR, max pain, totals, support/resistance) cover. */
+  coverage: string;
   rows: ChainRow[];
 }
 
 export interface FuturesQuote {
   symbol: string;
   expiry: string;
-  ltp: number;
-  change: number;
-  changePct: number;
-  oi: number;
-  oiChange: number;
-  oiChangePct: number;
-  volume: number;
-  basis: number;
-  buildUp: BuildUp;
+  ltp: number | null;
+  change: number | null;
+  changePct: number | null;
+  oi: number | null;
+  oiChange: number | null;
+  oiChangePct: number | null;
+  volume: number | null;
+  basis: number | null;
+  buildUp: BuildUp | null;
+  ts: number | null;
 }
 
 export interface TimePoint {
   ts: number;
 }
 
+/**
+ * Strike-wise OI (live chain, or the recorded chain at ?at=). Values are null where the leg has no
+ * quote / no OI; changes are null where the baseline OI of that leg is not known.
+ */
 export interface StrikeOiRow {
   strike: number;
-  ceOi: number;
-  peOi: number;
-  ceChange: number;
-  peChange: number;
-  ceVolume: number;
-  peVolume: number;
+  ceOi: number | null;
+  peOi: number | null;
+  ceChange: number | null;
+  peChange: number | null;
+  /** Session volume (units); null when not reported (recorded chains carry no cumulative volume). */
+  ceVolume: number | null;
+  peVolume: number | null;
 }
 
-export interface StrikeOiResponse {
+export interface StrikeOiResponse extends DataGaps {
   symbol: string;
   expiry: string;
-  spot: number;
+  spot: number | null;
+  /** Time the change is measured from: 15:30 of the previous session ('prev-close') or the recorded minute ('recorded'). */
   fromTs: number;
+  from: 'prev-close' | 'recorded';
   toTs: number;
   rows: StrikeOiRow[];
-  maxPain: number;
-  pcr: number;
+  /** Over the strikes with OI on both sides (`coverage`). */
+  maxPain: number | null;
+  pcr: number | null;
+  coverage: string;
 }
 
+/** Values at each of `times`: null where the window before that time has no recorded value (nothing carried forward). */
 export interface MultiStrikeSeries {
   strike: number;
   type: 'CE' | 'PE';
-  oi: number[];
-  ltp: number[];
-  iv: number[];
+  oi: (number | null)[];
+  /** Close of the last traded minute in the window. */
+  ltp: (number | null)[];
+  /** Percent, solved (Black-76) from `ltp` with the recorded forward of that time. */
+  iv: (number | null)[];
 }
 
-export interface MultiStrikeResponse {
+export interface MultiStrikeResponse extends DataGaps {
   symbol: string;
   expiry: string;
+  /** Session the series are recorded on. */
+  date: string;
+  /** As-of times (end of each window). */
   times: number[];
-  spot: number[];
+  spot: (number | null)[];
   series: MultiStrikeSeries[];
 }
 
+/** One recorded chain minute (the last one in the window ending at `ts`). */
 export interface OiTrendPoint extends TimePoint {
-  spot: number;
-  ceOi: number;
-  peOi: number;
-  ceChange: number;
-  peChange: number;
-  pcr: number;
-  maxPain: number;
-  atmIv: number;
+  spot: number | null;
+  /** Recorded totals of the streamed strikes (see the response's `coverage`). */
+  ceOi: number | null;
+  peOi: number | null;
+  /** Σ (OI − previous-close OI) over recorded strikes that have an official previous-close OI; null when none has. */
+  ceChange: number | null;
+  peChange: number | null;
+  pcr: number | null;
+  maxPain: number | null;
+  /** Percent, solved from the recorded ATM premiums. */
+  atmIv: number | null;
 }
 
+export interface OiTrendResponse extends DataGaps {
+  symbol: string;
+  expiry: string;
+  date: string;
+  points: OiTrendPoint[];
+  /** What the recorded totals cover (streamed strikes ±8 %, not the whole chain). */
+  coverage: string;
+}
+
+/** PCR of one session from the official F&O bhavcopy (every strike of the nearest expiry, real OI only). */
 export interface DailyPcrPoint {
   date: string;
   pcr: number;
-  close: number;
+  /** Official close of the underlying; null when the index/CM file of that date is not loaded. */
+  close: number | null;
+  expiry: string;
 }
 
+export interface PcrResponse extends DataGaps {
+  symbol: string;
+  expiry: string | null;
+  intraday: { ts: number; pcr: number | null; spot: number | null; ceOi: number | null; peOi: number | null }[];
+  daily: DailyPcrPoint[];
+  coverage: { intraday: string; daily: string };
+}
+
+export interface MaxPainResponse extends DataGaps {
+  symbol: string;
+  expiry: string;
+  spot: number | null;
+  maxPain: number | null;
+  pain: { strike: number; callPain: number; putPain: number; total: number }[];
+  history: { ts: number; maxPain: number | null; spot: number | null }[];
+  coverage: string;
+}
+
+/** Near-month future of one underlying: live quote vs the previous close / previous OI. */
 export interface FuturesBuildUpRow {
   symbol: string;
   name: string;
   sector: string;
   kind: 'index' | 'stock';
-  ltp: number;
-  changePct: number;
-  oi: number;
-  oiChangePct: number;
-  volume: number;
-  buildUp: BuildUp;
+  expiry: string;
+  ltp: number | null;
+  changePct: number | null;
+  oi: number | null;
+  oiChangePct: number | null;
+  volume: number | null;
+  buildUp: BuildUp | null;
   lotSize: number;
+  /** Quote time (epoch ms); null without a quote. */
+  ts: number | null;
 }
 
 export type BuildUpCounts = Record<BuildUp, number>;
 
-export interface BreadthResponse {
+export interface BreadthResponse extends DataGaps {
+  /** Live build-up of the stock futures that have one (`classified` of `total`). */
   overall: BuildUpCounts;
+  classified: number;
+  total: number;
   sectors: { sector: string; counts: BuildUpCounts; symbols: FuturesBuildUpRow[] }[];
-  history: { date: string; counts: BuildUpCounts }[];
+  /**
+   * Past sessions from the official files (spot close change vs total futures OI change of the same
+   * contracts), then today's live counts ('live').
+   */
+  history: { date: string; counts: BuildUpCounts; classified: number; source: 'eod' | 'live' }[];
 }
 
 export interface ParticipantRow {
@@ -255,88 +372,161 @@ export interface FiiDiiDay {
   scope?: 'combined' | 'nse';
 }
 
-export interface IvChartResponse {
+export interface IvChartResponse extends DataGaps {
   symbol: string;
-  intraday: { ts: number; atmIv: number; spot: number; ceIv: number; peIv: number }[];
-  daily: { date: string; iv: number; hv: number; close: number }[];
-  ivr: number;
-  ivp: number;
+  /** Expiry of the intraday series (recorded chain), null when there is none. */
+  expiry: string | null;
+  /** Session of the intraday series. */
+  date: string;
+  /** Recorded chain minutes: ATM IV (percent) and the ATM strike's CE/PE IV solved from their traded premiums. */
+  intraday: { ts: number; atmIv: number | null; spot: number | null; ceIv: number | null; peIv: number | null }[];
+  /** Official end-of-day: ATM IV solved from the bhavcopy closes (nearest expiry with ≥ 1 day left), HV 20D of official closes. */
+  daily: { date: string; iv: number | null; hv: number | null; close: number | null; expiry: string | null }[];
+  /** ATM IV now (live premiums), else the latest official one (percent). */
+  currentIv: number | null;
+  /** IV rank / percentile of `currentIv` over the last 252 sessions of official ATM IV; null while that history is shorter. */
+  ivr: number | null;
+  ivp: number | null;
 }
 
-export interface IvTableRow {
+export interface IvTableRow extends DataGaps {
   symbol: string;
   kind: 'index' | 'stock';
   sector: string;
-  ltp: number;
-  changePct: number;
-  iv: number;
-  ivChange: number;
-  ivr: number;
-  ivp: number;
-  hv: number;
-  ivHvSpread: number;
+  ltp: number | null;
+  changePct: number | null;
+  /** ATM IV (percent) of `expiry` from live premiums. */
+  iv: number | null;
+  /** vs the same expiry's ATM IV solved from the previous session's official closes. */
+  ivChange: number | null;
+  ivr: number | null;
+  ivp: number | null;
+  /** HV 20D (percent) of official daily closes. */
+  hv: number | null;
+  ivHvSpread: number | null;
+  /** Nearest listed option expiry with at least one day left. */
+  expiry: string | null;
 }
 
 export interface SkewPoint {
   strike: number;
+  /** (strike / reference − 1) × 100; reference = spot, else the forward. */
   moneyness: number;
-  ceIv: number;
-  peIv: number;
-  iv: number;
+  ceIv: number | null;
+  peIv: number | null;
+  /** Out-of-the-money side (CE at/above the forward, PE below). */
+  iv: number | null;
 }
 
-export interface SkewResponse {
+export interface SkewResponse extends DataGaps {
   symbol: string;
-  spot: number;
-  curves: { expiry: string; label: string; atmIv: number; points: SkewPoint[] }[];
+  spot: number | null;
+  curves: {
+    expiry: string;
+    label: string;
+    /** 'live' = solved from live premiums; 'eod' = from the previous session's official traded closes. */
+    source: 'live' | 'eod';
+    /** Session of the premiums. */
+    date: string;
+    atmIv: number | null;
+    forward: number | null;
+    points: SkewPoint[];
+  }[];
 }
 
-export interface SurfaceResponse {
+export interface SurfaceResponse extends DataGaps {
   symbol: string;
-  spot: number;
+  spot: number | null;
   expiries: string[];
   daysToExpiry: number[];
+  /** Bucket centres (K / reference − 1, %). */
   moneyness: number[];
-  /** iv[expiryIdx][moneynessIdx] in percent */
-  iv: number[][];
+  /**
+   * iv[expiryIdx][moneynessIdx] in percent: the solved IV of the listed strike nearest the bucket
+   * centre within the bucket; null when no listed strike there has a live premium (no smile fill-in).
+   */
+  iv: (number | null)[][];
+  /** The listed strike behind each cell (null with the cell). */
+  strikes: (number | null)[][];
 }
 
 export interface StraddlePoint extends TimePoint {
-  spot: number;
+  spot: number | null;
+  /** Centre strike (rolling: nearest the recorded forward of that time). */
   strike: number;
-  ce: number;
-  pe: number;
-  straddle: number;
-  iv: number;
+  ceStrike: number;
+  peStrike: number;
+  /** Close of each leg's last traded minute in the window; null when it did not trade. */
+  ce: number | null;
+  pe: number | null;
+  straddle: number | null;
+  /** Average of the legs' IVs (percent) solved from those premiums. */
+  iv: number | null;
+}
+
+export interface StraddleResponse extends DataGaps {
+  symbol: string;
+  expiry: string;
+  date: string;
+  /** Where the premiums come from. */
+  source: 'recorded' | 'kotak' | 'mixed';
+  points: StraddlePoint[];
 }
 
 export interface StrategyChartPoint extends TimePoint {
-  spot: number;
-  premium: number;
-  pnl: number;
-  delta: number;
-  theta: number;
-  vega: number;
-  gamma: number;
+  spot: number | null;
+  /** Null when a leg did not trade in the window. */
+  premium: number | null;
+  pnl: number | null;
+  delta: number | null;
+  theta: number | null;
+  vega: number | null;
+  gamma: number | null;
 }
 
+/** Realised-vol cone of official daily closes; a window is null when the history is too short. */
+export interface ConeResponse extends DataGaps {
+  symbol: string;
+  /** Live ATM IV (percent), null when not live. */
+  atmIv: number | null;
+  /** Consecutive official closes used. */
+  closes: number;
+  from: string | null;
+  to: string | null;
+  rows: { window: number; min: number | null; p25: number | null; median: number | null; p75: number | null; max: number | null; current: number | null }[];
+}
+
+/**
+ * One scanner hit. Values come from live quotes (near futures, spots), the market-wide option
+ * snapshot (IV solved from live premiums) or recorded 1-minute bars (ORB); a value that is not
+ * live/official is null. Rows without the value the scanner ranks by are not listed.
+ */
 export interface ScannerRow {
   symbol: string;
   instrument: string;
   type: InstrumentType | 'EQ';
   strike?: number;
   expiry?: string;
-  ltp: number;
-  changePct: number;
-  oi: number;
-  oiChangePct: number;
-  volume: number;
-  iv?: number;
-  ivChange?: number;
-  ivp?: number;
-  buildUp?: BuildUp;
+  ltp: number | null;
+  changePct: number | null;
+  oi: number | null;
+  oiChangePct: number | null;
+  /** Session volume (units). */
+  volume: number | null;
+  iv?: number | null;
+  ivChange?: number | null;
+  ivp?: number | null;
+  buildUp?: BuildUp | null;
+  /** The value the scanner ranks by. */
   metric: number;
   metricLabel: string;
+}
+
+/** GET /api/scanners/:id: the hits plus how much of the market was live (`coverage`); missing inputs in `gaps`. */
+export interface ScannerResponse extends DataGaps {
+  id: string;
+  rows: ScannerRow[];
+  coverage: string;
 }
 
 export interface ScannerDef {
@@ -351,65 +541,111 @@ export interface UnusualActivityRow {
   type: 'CE' | 'PE';
   strike: number;
   expiry: string;
+  /** Live-session trade price (contracts without one are not listed). */
   ltp: number;
-  changePct: number;
+  changePct: number | null;
   oi: number;
   oiChange: number;
   oiChangePct: number;
   volume: number;
   volumeOiRatio: number;
-  iv: number;
-  ivChange: number;
-  premiumTurnover: number;
+  /** Percent, solved from the live premium; null when it cannot be solved. */
+  iv: number | null;
+  /** IV now − IV solved from the previous session's official close; null when either is missing. */
+  ivChange: number | null;
+  /** Volume × average traded price (₹); null when the feed reported no ATP. */
+  premiumTurnover: number | null;
   score: number;
   signal: string;
-  buildUp: BuildUp;
+  buildUp: BuildUp | null;
+}
+
+/** GET /api/unusual. */
+export interface UnusualResponse extends DataGaps {
+  rows: UnusualActivityRow[];
+  coverage: string;
 }
 
 export interface SynopsisRow {
   symbol: string;
   name: string;
   sector: string;
+  /** Live spot price (stocks without one are not listed). */
   ltp: number;
-  changePct: number;
-  oiChangePct: number;
-  ivChange: number;
-  iv: number;
-  turnover: number;
-  buildUp: BuildUp;
-  pcr: number;
+  changePct: number | null;
+  /** Near-month future's OI change vs the previous session (%). */
+  oiChangePct: number | null;
+  ivChange: number | null;
+  /** ATM IV (percent) solved from live premiums. */
+  iv: number | null;
+  /** Cash-market session turnover = volume × average traded price (₹); null when either is not reported. */
+  turnover: number | null;
+  buildUp: BuildUp | null;
+  /** Put/call OI ratio over the snapshot strikes (nearest expiry) that have live OI on both sides. */
+  pcr: number | null;
 }
 
+/** GET /api/synopsis. */
+export interface SynopsisResponse extends DataGaps {
+  rows: SynopsisRow[];
+  coverage: string;
+}
+
+/** One level of the exchange's market depth as the feed sent it. */
 export interface DepthLevel {
   price: number;
   qty: number;
-  orders: number;
+  /** Number of orders at the level; null when the feed did not send it. */
+  orders: number | null;
 }
 
-export interface OrderBookResponse {
+/**
+ * GET /api/order-book/:symbol: the live 5-level depth of one contract (Kotak market-depth stream)
+ * and analytics derived from it. Without a depth packet for the contract the answer is 503. Values
+ * the feed did not send are null. `history` comes from the recorder's minutes only.
+ */
+export interface OrderBookResponse extends DataGaps {
+  symbol: string;
   instrument: string;
-  ltp: number;
-  change: number;
-  changePct: number;
-  open: number;
-  high: number;
-  low: number;
-  prevClose: number;
-  vwap: number;
-  volume: number;
-  oi: number;
+  type: 'FUT' | 'CE' | 'PE';
+  expiry: string;
+  strike?: number;
+  /** Time of the book the levels come from (epoch ms). */
+  bookTs: number;
+  /** True while the session is open and the book is at most 10 s old; otherwise it is the last book received, as of `bookTs`. */
+  bookLive: boolean;
+  /** Live-session trade price; null when the contract has not traded in the session. */
+  ltp: number | null;
+  change: number | null;
+  changePct: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prevClose: number | null;
+  /** Average traded price of the session (exchange ATP). */
+  vwap: number | null;
+  volume: number | null;
+  oi: number | null;
+  /** The levels as sent (up to 5; fewer when the book is thinner, never padded). */
   bids: DepthLevel[];
   asks: DepthLevel[];
-  totalBidQty: number;
-  totalAskQty: number;
-  spread: number;
-  spreadPct: number;
-  imbalance: number;
-  lastTradeQty: number;
-  upperCircuit: number;
-  lowerCircuit: number;
-  history: { ts: number; ltp: number; bidQty: number; askQty: number; ratio: number; spread: number; vwap: number }[];
-  analytics: { label: string; value: string; hint?: string; tone?: 'up' | 'down' | 'neutral' }[];
+  /** Total pending buy / sell quantity reported by the exchange. */
+  totalBidQty: number | null;
+  totalAskQty: number | null;
+  spread: number | null;
+  spreadPct: number | null;
+  /** (total bid − total ask) / (total bid + total ask). */
+  imbalance: number | null;
+  lastTradeQty: number | null;
+  upperCircuit: number | null;
+  lowerCircuit: number | null;
+  /**
+   * Recorded minutes of the session (the last minute of each 5-minute block): level-1 quantities,
+   * totals, spread and ATP as recorded at that minute's close. Empty when the contract was not recorded.
+   */
+  history: { ts: number; ltp: number | null; bidQty: number | null; askQty: number | null; totalBidQty: number | null; totalAskQty: number | null; ratio: number | null; spread: number | null; vwap: number | null }[];
+  /** Derived figures; `value` null (with the reason in `hint`) when an input is missing. */
+  analytics: { label: string; value: string | null; hint?: string; tone?: 'up' | 'down' | 'neutral' }[];
 }
 
 /* ---------------------------- user data ---------------------------- */
@@ -448,8 +684,8 @@ export interface SavedStrategy {
   targetMtm?: number | null;
   stopLossMtm?: number | null;
   status: 'open' | 'closed' | 'expired';
-  /** Computed by the server on read. */
-  live?: { mtm: number; realized: number; spot: number; legsLtp: number[]; ts: number };
+  /** Computed by the server on read; null values are not live (reasons in `gaps`). */
+  live?: { mtm: number | null; realized: number; spot: number | null; legsLtp: (number | null)[]; ts: number; gaps?: Record<string, string> };
 }
 
 export type OrderType = 'MARKET' | 'LIMIT' | 'SL' | 'SL-M';
@@ -502,25 +738,33 @@ export interface Position {
   expiry: string;
   product: ProductType;
   netQty: number;
+  /** Lot size the contract traded with (from the orders). */
   lotSize: number;
   avgPrice: number;
   buyQty: number;
   sellQty: number;
   buyValue: number;
   sellValue: number;
-  ltp: number;
+  /** Live LTP of the session (expired: the exchange settlement value); null when not live. */
+  ltp: number | null;
+  /** Time of that price (epoch ms), null with it. */
+  ltpTs: number | null;
   realized: number;
-  unrealized: number;
-  pnl: number;
-  status: 'open' | 'closed' | 'expired';
+  unrealized: number | null;
+  pnl: number | null;
+  /** 'awaiting settlement' = expired, the exchange settlement price is not loaded yet (position stays open). */
+  status: 'open' | 'closed' | 'expired' | 'awaiting settlement';
+  /** Why `ltp`/`unrealized` are blank. */
+  reason?: string;
 }
 
-export interface Funds {
+/** Paper account. Margin is a SPAN-style estimate on live spot, IV and forward (null when those are not live). */
+export interface Funds extends DataGaps {
   openingBalance: number;
-  available: number;
-  usedMargin: number;
+  available: number | null;
+  usedMargin: number | null;
   realizedPnl: number;
-  unrealizedPnl: number;
+  unrealizedPnl: number | null;
   premiumPaid: number;
   premiumReceived: number;
 }
@@ -541,10 +785,16 @@ export interface AlertDef {
   note?: string;
   status: 'active' | 'triggered' | 'disabled';
   createdAt: number;
-  /** Market time the alert was last (re-)armed; ORB alerts only fire on breaks after this. */
+  /** Market time the alert was last (re-)armed; ORB and order-flow alerts only fire on minutes completed after this. */
   armedAt?: number;
   triggeredAt?: number;
   triggeredValue?: number;
+  /** Value seen at the last evaluation; null when its input was not live (the alert was skipped). */
+  lastValue?: number | null;
+  /** When the alert was last evaluated (epoch ms). */
+  checkedAt?: number;
+  /** Why the last evaluation was skipped (input not live) or why the alert was disabled; absent once it is evaluated. */
+  statusNote?: string;
 }
 
 export interface Notification {
@@ -569,14 +819,25 @@ export interface WatchItem {
   expiry?: string;
 }
 
+/** A watchlist row priced from the live market; values that are not live are null (reason in `reason`). */
 export interface WatchQuote extends WatchItem {
   label: string;
-  ltp: number;
-  change: number;
-  changePct: number;
-  oi?: number;
-  oiChangePct?: number;
-  iv?: number;
+  /** Live-session trade price (an expired contract: its settlement price); null when not live. */
+  ltp: number | null;
+  change: number | null;
+  changePct: number | null;
+  /** Live best bid/ask (open session, book ≤ 10 s old). */
+  bid: number | null;
+  ask: number | null;
+  oi: number | null;
+  oiChangePct: number | null;
+  /** Percent: options solved from the live premium, EQ the ATM IV; null otherwise. */
+  iv: number | null;
+  /** Time of the quote the values come from (epoch ms) and its age when served (s); null without a quote. */
+  ts: number | null;
+  ageSec: number | null;
+  /** Why values are blank. */
+  reason?: string;
 }
 
 export interface RecapRequest {
@@ -587,20 +848,24 @@ export interface RecapRequest {
   intervalMin?: number;
 }
 
+/** Replay of recorded sessions only: a leg's price is the close of its last traded minute in the window. */
 export interface RecapPoint {
   ts: number;
-  spot: number;
-  pnl: number;
-  legLtp: number[];
+  spot: number | null;
+  /** Null when a leg without an exit price did not trade in the window. */
+  pnl: number | null;
+  legLtp: (number | null)[];
 }
 
-export interface RecapResponse {
+export interface RecapResponse extends DataGaps {
   points: RecapPoint[];
-  maxPnl: number;
-  minPnl: number;
-  finalPnl: number;
+  maxPnl: number | null;
+  minPnl: number | null;
+  finalPnl: number | null;
   endTs: number;
   expired: boolean;
+  /** Recorded sessions the replay covers. */
+  sessions: string[];
 }
 
 export interface OptimizerRequest {
@@ -625,14 +890,18 @@ export interface OrbResponse {
   rangeStartTs: number;
   rangeEndTs: number;
   live: boolean;
+  /** Live price of the underlying (live session), else the last bar's close. */
   ltp: number;
-  changePct: number;
+  /** vs the previous session's close (quote, else the official close); null when unknown. */
+  changePct: number | null;
   dayHigh: number;
   dayLow: number;
   evaluation: OrbEvaluation;
   summary: string;
-  /** 1-minute candles from 09:15; the last one may still be forming when `live`. */
+  /** Traded 1-minute candles from 09:15 (minutes without a trade are absent); the last one may still be forming when `live`. */
   bars: MinuteBar[];
+  /** 'recorded' = the app's recorder; 'kotak' = Kotak historical 1-minute candles. */
+  source: 'recorded' | 'kotak';
 }
 
 export interface OrbScanRow {
@@ -641,7 +910,7 @@ export interface OrbScanRow {
   kind: 'index' | 'stock';
   sector: string;
   ltp: number;
-  changePct: number;
+  changePct: number | null;
   high: number;
   low: number;
   widthPct: number;
@@ -674,28 +943,63 @@ export interface OrbHistoryRow {
   /** Close beyond the first broken level, in the break direction, % (null if never broken). */
   followThroughPct: number | null;
   dayRangePct: number;
+  source: 'recorded' | 'kotak';
 }
 
-export interface OrbHistoryResponse {
+/** Sessions without recorded (or Kotak) 1-minute bars covering the whole day are left out (`gaps.sessions`). */
+export interface OrbHistoryResponse extends DataGaps {
   symbol: string;
   rangeMinutes: number;
   rule: OrbRule;
+  /** Sessions asked for. */
+  sessions: number;
   rows: OrbHistoryRow[];
   stats: { days: number; brokeUp: number; brokeDown: number; sideways: number; whipsaw: number; trendDays: number; avgFollowThroughPct: number };
 }
 
+/**
+ * Order flow is an ESTIMATE from live ticks (quote rule): each rise of the session volume is
+ * classified against the bid/ask seen just before it — at or above the ask = buyer-initiated, at or
+ * below the bid = seller-initiated, anything else (or no usable book) = unclassified. It is never
+ * split 50/50; the unclassified share is always reported.
+ */
+export const ORDER_FLOW_METHOD = 'estimated from live ticks (quote rule)' as const;
+
+/** One recorded minute of order flow. volume = buyVolume + sellVolume + unclassified (Δ cumulative volume). */
 export interface OrderFlowMinute {
   ts: number;
   volume: number;
   buyVolume: number;
   sellVolume: number;
+  unclassified: number;
+  /** buyVolume − sellVolume. */
   delta: number;
   cumDelta: number;
-  buyPct: number;
-  close: number;
+  /** Buy share of the classified volume (%); null when nothing was classified. */
+  buyPct: number | null;
+  /** Last trade price of the minute; null when the minute had no trade. */
+  close: number | null;
 }
 
-export interface OrderFlowResponse {
+/** Totals over recorded minutes (see ORDER_FLOW_METHOD). */
+export interface OrderFlowSummary {
+  buyVolume: number;
+  sellVolume: number;
+  unclassified: number;
+  /** All units traded = buyVolume + sellVolume + unclassified. */
+  volume: number;
+  /** buyVolume − sellVolume. */
+  delta: number;
+  /** Buy share of the classified volume (%); null when nothing was classified. */
+  buyPct: number | null;
+  /** Unclassified share of all volume (%); null when nothing traded. */
+  unclassifiedPct: number | null;
+  /** On the classified volume (±5 points around 50 % = balanced); 'Not classified' when trades happened but none could be classified. */
+  sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced' | 'No trades' | 'Not classified';
+}
+
+/** GET /api/order-flow/:symbol — recorded minutes only (503 when the contract was not recorded that session). */
+export interface OrderFlowResponse extends DataGaps {
   symbol: string;
   instrument: string;
   type: 'FUT' | 'CE' | 'PE';
@@ -703,27 +1007,39 @@ export interface OrderFlowResponse {
   strike?: number;
   date: string;
   live: boolean;
-  lotSize: number;
-  /** Last fully completed 1-minute candle. */
-  lastMinute: (FlowSummary & { ts: number; close: number }) | null;
-  /** The minute in progress (live only). */
-  currentMinute: (FlowSummary & { ts: number; elapsedSec: number }) | null;
-  last5: FlowSummary;
-  session: FlowSummary;
-  /** Completed minutes, oldest first (the most recent `limit`). */
+  /** Lot size of the contract (instrument master, else the official file of that day); null when unknown. */
+  lotSize: number | null;
+  /** Always ORDER_FLOW_METHOD: the split is an estimate. */
+  method: typeof ORDER_FLOW_METHOD;
+  /** Last completed recorded minute. */
+  lastMinute: (OrderFlowSummary & { ts: number; close: number | null }) | null;
+  /** The minute in progress (live only, when it has a record so far). */
+  currentMinute: (OrderFlowSummary & { ts: number; elapsedSec: number }) | null;
+  /** Recorded minutes of the 5 minutes ending with `lastMinute`; null without one. */
+  last5: OrderFlowSummary | null;
+  /** All recorded minutes of the session. */
+  session: OrderFlowSummary;
+  /** Completed recorded minutes, oldest first (the most recent `limit`). Minutes without a record are absent, never filled. */
   minutes: OrderFlowMinute[];
   signal: string;
-  /** Contracts listed on that session (for pickers when viewing a past date). */
+  /** Which minutes the figures cover (first–last recorded, minutes without a record). */
+  coverage: string;
+  /** Contracts listed (today) or recorded (a past session), for pickers. */
   expiries: string[];
   strikes: number[];
 }
 
 /* ------------------------------- websocket ------------------------------- */
 
+/**
+ * Server → client. 'ticks' carries the underlyings that changed since the last batch (at most one
+ * batch per second); a batch with no quotes is the periodic clock/feed-status heartbeat.
+ */
 export type ServerMessage =
   | { type: 'hello'; clock: MarketClockInfo }
   | { type: 'ticks'; clock: MarketClockInfo; quotes: Quote[] }
   | { type: 'notification'; notification: Notification }
   | { type: 'order'; order: Order };
 
+/** Client → server. `subscribe` lists underlying symbols (validated against the instrument master, at most 40). */
 export type ClientMessage = { type: 'auth'; token: string } | { type: 'subscribe'; symbols: string[] };

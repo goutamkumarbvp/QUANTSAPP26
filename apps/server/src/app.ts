@@ -5,11 +5,27 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { z, ZodError } from 'zod';
-import type { MetaResponse, ServerMessage, ClientMessage } from '@q26/core';
+import { expiryTs, type ClientMessage, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type ServerMessage, type SymbolInfo } from '@q26/core';
 import { profile } from './auth';
+import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
 import { SCANNERS } from './services/market-tools';
 import type { Services } from './services';
+import {
+  buildOptionChain,
+  candles,
+  clockInfo,
+  expiryCycle,
+  feedStatus,
+  futuresQuotes,
+  futuresQuotesAt,
+  Gaps,
+  httpError,
+  liveOptionExpiries,
+  recordedExpiries,
+  underlyingQuote,
+  underlyingQuoteAt,
+} from './services/live';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -17,7 +33,13 @@ declare module 'fastify' {
   }
 }
 
+/** Index underlyings by name: the websocket default and /api/indices while the instrument master is not loaded. */
 const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
+/** Websocket: at most one batch per socket per second; a heartbeat (clock + feed status) at least this often. */
+const WS_BATCH_MS = 1000;
+const WS_HEARTBEAT_MS = 5000;
+const WS_MAX_SYMBOLS = 40;
+const SYMBOL_RE = /^[A-Z0-9&_-]{1,32}$/;
 
 /* ------------------------------ validation ------------------------------ */
 
@@ -113,57 +135,115 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     req.user = h?.startsWith('Bearer ') ? svc.auth.verify(h.slice(7)) : null;
   });
 
-  app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply: FastifyReply) => {
+  app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, _req, reply: FastifyReply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    // Live/official data not available: 503 with the reason, never a 500 (the web shows it blank).
+    if (err instanceof NoLiveData || err.code === 'NO_LIVE_DATA') return reply.status(503).send({ error: err.message, code: 'NO_LIVE_DATA' });
     const code = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
     if (code >= 500) app.log.error(err);
     return reply.status(code).send({ error: code >= 500 ? 'Internal error' : err.message });
   });
 
-  const now = () => svc.clock.now();
-  /** Historical "as-of" timestamp (trade recap); never in the future. */
-  const at = (req: FastifyRequest) => {
-    const t = num(qs(req).at, NaN);
-    const n = now();
-    return Number.isFinite(t) && t < n ? t : n;
+  const md = svc.md;
+  const now = () => md.clock.now();
+  /**
+   * `?at=<epoch ms>` as-of time: undefined when absent or not in the past (= live). A past time is
+   * answered only from the recorder's minutes (md.intraday); the helpers throw NoLiveData for a
+   * time that was not recorded.
+   */
+  const at = (req: FastifyRequest): number | undefined => {
+    const raw = qs(req).at;
+    if (raw === undefined || raw === '') return undefined;
+    const t = Number(raw);
+    if (!Number.isFinite(t)) throw httpError(400, 'at must be a timestamp in epoch milliseconds');
+    return t < now() ? t : undefined;
   };
   const e = svc.engine;
   const an = svc.analytics;
 
+  /** Index underlyings from the instrument master (by name while it is not loaded). */
+  const indexSymbols = (): string[] => (md.ref.ready() ? md.ref.underlyings().filter((u) => u.kind === 'index').map((u) => u.symbol) : INDEX_SYMBOLS);
+  /** Quotes of the symbols that have one (live, or recorded at `asOf`); 503 when none has. */
+  const quotesOf = (symbols: string[], asOf?: number): Quote[] => {
+    const out: Quote[] = [];
+    const why: string[] = [];
+    for (const s of symbols) {
+      try {
+        out.push(asOf !== undefined ? underlyingQuoteAt(md, s, asOf) : underlyingQuote(md, s));
+      } catch (err) {
+        if (!(err instanceof NoLiveData)) throw err;
+        why.push(err.message);
+      }
+    }
+    if (!out.length && why.length) throw new NoLiveData(why.slice(0, 3).join('; '));
+    return out;
+  };
+
   /* ============================== market ============================== */
 
-  app.get('/api/health', async () => ({ ok: true, clock: svc.clock.info() }));
+  // Feed status + the provider's health report (LiveProvider.healthReport: JSON-safe, no secrets).
+  app.get('/api/health', async () => {
+    const feed = feedStatus(md);
+    const report = (md as { healthReport?: () => unknown }).healthReport;
+    return { ok: true, clock: clockInfo(md, feed), feed, ...(typeof report === 'function' ? { provider: report.call(md) } : {}) };
+  });
 
-  app.get('/api/meta', async (): Promise<MetaResponse> => ({
-    appName: 'Q26 Options',
-    dataSource: 'simulated',
-    riskFreeRate: svc.config.riskFreeRate,
-    clock: svc.clock.info(),
-    symbols: [...e.instruments.values()].map(({ symbol, name, kind, exchange, sector, lotSize, strikeStep, expiryRule }) => ({ symbol, name, kind, exchange, sector, lotSize, strikeStep, expiryRule })),
-  }));
+  app.get('/api/meta', async (): Promise<MetaResponse> => {
+    const gaps = new Gaps();
+    let symbols: SymbolInfo[] = [];
+    if (!md.ref.ready()) gaps.add('symbols', 'Instrument master not loaded yet');
+    else {
+      symbols =
+        gaps.try('symbols', () =>
+          md.ref.underlyings().map((u) => {
+            let cycle: SymbolInfo['expiryCycle'] = null;
+            try {
+              cycle = expiryCycle(md.ref.expiries(u.symbol, 'OPT'));
+            } catch {
+              cycle = null;
+            }
+            return { symbol: u.symbol, name: u.name, kind: u.kind, exchange: u.exchange, sector: u.sector, lotSize: u.lotSize, strikeStep: u.strikeStep, expiryCycle: cycle };
+          }),
+        ) ?? [];
+    }
+    return { appName: 'Q26 Options', dataSource: 'live', riskFreeRate: svc.config.riskFreeRate, clock: clockInfo(md), symbols, ...gaps.out() };
+  });
 
-  app.get('/api/clock', async () => svc.clock.info());
+  app.get('/api/clock', async () => clockInfo(md));
 
   app.get('/api/quotes', async (req) => {
-    const list = (qs(req).symbols ?? INDEX_SYMBOLS.join(',')).split(',').filter(Boolean).slice(0, 80);
-    const ts = at(req);
-    return list.map((s) => e.quote(s, ts));
+    const list = [...new Set((qs(req).symbols ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))].slice(0, 80);
+    return quotesOf(list.length ? list : indexSymbols(), at(req));
   });
 
-  app.get('/api/indices', async (req) => INDEX_SYMBOLS.map((s) => e.quote(s, at(req))));
+  app.get('/api/indices', async (req) => quotesOf(indexSymbols(), at(req)));
 
   app.get<{ Params: { symbol: string } }>('/api/expiries/:symbol', async (req) => {
-    const ts = at(req);
-    return { options: e.expiries(req.params.symbol, ts), futures: e.futureExpiries(req.params.symbol, ts) };
+    const t = at(req);
+    if (t !== undefined) return recordedExpiries(md, md.ref.underlying(req.params.symbol).symbol, t);
+    const symbol = md.ref.underlying(req.params.symbol).symbol;
+    const n = now();
+    return { options: liveOptionExpiries(md, symbol, n), futures: [...md.ref.expiries(symbol, 'FUT')].sort().filter((x) => expiryTs(x) > n) };
   });
 
-  app.get<{ Params: { symbol: string } }>('/api/chain/:symbol', async (req) => e.chain(req.params.symbol, qs(req).expiry, at(req)));
+  app.get<{ Params: { symbol: string } }>('/api/chain/:symbol', async (req) => buildOptionChain(md, req.params.symbol, qs(req).expiry || undefined, { at: at(req) }));
 
-  app.get<{ Params: { symbol: string } }>('/api/futures/:symbol', async (req) => an.futures(req.params.symbol, at(req)));
+  app.get<{ Params: { symbol: string } }>('/api/futures/:symbol', async (req) => {
+    const t = at(req);
+    return t !== undefined ? futuresQuotesAt(md, req.params.symbol, t) : futuresQuotes(md, req.params.symbol);
+  });
 
+  // Spot candles; `type=FUT|CE|PE&expiry=…[&strike=…]` for a contract. Ranges are capped per interval (MAX_CANDLE_SESSIONS).
   app.get<{ Params: { symbol: string } }>('/api/candles/:symbol', async (req) => {
     const q = qs(req);
-    return an.candles(req.params.symbol, q.interval ?? '5', Math.min(400, num(q.days, q.interval === 'D' ? 120 : 1)), at(req));
+    const symbol = md.ref.underlying(req.params.symbol).symbol;
+    let target: string | InstrumentKey = symbol;
+    if (q.type === 'FUT' || q.type === 'CE' || q.type === 'PE') {
+      if (!q.expiry || !/^\d{4}-\d{2}-\d{2}$/.test(q.expiry)) throw httpError(400, 'expiry (YYYY-MM-DD) is required for contract candles');
+      if (q.type !== 'FUT' && !(num(q.strike, NaN) > 0)) throw httpError(400, 'strike is required for option candles');
+      target = q.type === 'FUT' ? { symbol, kind: 'FUT', expiry: q.expiry } : { symbol, kind: q.type, expiry: q.expiry, strike: num(q.strike, NaN) };
+    }
+    return candles(md, target, q.interval ?? '5', num(q.days, q.interval === 'D' ? 120 : 1), { at: at(req) });
   });
 
   app.get('/api/dashboard', async () => {
@@ -465,22 +545,88 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   /* ============================== websocket ============================== */
 
+  // One provider tick listener fanned out to the sockets: a tick of an underlying's spot or future
+  // marks the symbol changed; each socket gets at most one batch a second with the changed symbols it
+  // subscribed to. Quotes are rebuilt from md.live.quote() (underlyingQuote), so an update of an
+  // older session is never sent as live. Quotes and the feed status are shared for up to a second.
+  interface WsClient {
+    symbols: Set<string>;
+    dirty: Set<string>;
+  }
+  const clients = new Set<WsClient>();
+  const quoteCache = new Map<string, { at: number; quote: Quote | null }>();
+  let feedCache: { at: number; feed: FeedStatus } | null = null;
+  const cachedClock = (): MarketClockInfo => {
+    const t = Date.now();
+    if (!feedCache || t - feedCache.at >= WS_BATCH_MS) feedCache = { at: t, feed: feedStatus(md) };
+    return clockInfo(md, feedCache.feed);
+  };
+  const cachedQuote = (symbol: string): Quote | null => {
+    const t = Date.now();
+    const hit = quoteCache.get(symbol);
+    if (hit && t - hit.at < WS_BATCH_MS) return hit.quote;
+    let quote: Quote | null = null;
+    try {
+      quote = underlyingQuote(md, symbol);
+    } catch {
+      quote = null; // no live price (or unknown symbol): left out of the batch
+    }
+    quoteCache.set(symbol, { at: t, quote });
+    return quote;
+  };
+  const offTick = md.live.onTick((q) => {
+    if (q.key.kind !== 'SPOT' && q.key.kind !== 'FUT') return;
+    for (const c of clients) if (c.symbols.has(q.key.symbol)) c.dirty.add(q.key.symbol);
+  });
+  app.addHook('onClose', async () => {
+    offTick();
+  });
+  /** Requested symbols: upper-cased, well-formed, at most 40, and listed in the instrument master once it is loaded. */
+  const subscription = (symbols: unknown): string[] => {
+    if (!Array.isArray(symbols)) return [];
+    const clean = [...new Set(symbols.filter((s): s is string => typeof s === 'string').map((s) => s.trim().toUpperCase()))].filter((s) => SYMBOL_RE.test(s));
+    const known = md.ref.ready()
+      ? clean.filter((s) => {
+          try {
+            md.ref.underlying(s);
+            return true;
+          } catch {
+            return false;
+          }
+        })
+      : clean;
+    return known.slice(0, WS_MAX_SYMBOLS);
+  };
+
   app.register(async (scope) => {
     scope.get('/ws', { websocket: true }, (socket) => {
       let uid: string | null = null;
-      let symbols = new Set<string>(INDEX_SYMBOLS);
+      const client: WsClient = { symbols: new Set(indexSymbols()), dirty: new Set() };
+      client.dirty = new Set(client.symbols); // the first batch is a snapshot
+      clients.add(client);
+      let lastSent = Date.now();
       const send = (m: ServerMessage) => {
         if (socket.readyState === 1) socket.send(JSON.stringify(m));
       };
-      send({ type: 'hello', clock: svc.clock.info() });
+      try {
+        send({ type: 'hello', clock: cachedClock() });
+      } catch {
+        /* the next batch carries the clock */
+      }
       const timer = setInterval(() => {
         try {
-          const ts = now();
-          send({ type: 'ticks', clock: svc.clock.info(), quotes: [...symbols].map((s) => e.quote(s, ts)) });
+          const batch = [...client.dirty].filter((s) => client.symbols.has(s));
+          client.dirty.clear();
+          const quotes = batch.map(cachedQuote).filter((x): x is Quote => x !== null);
+          const t = Date.now();
+          if (quotes.length || t - lastSent >= WS_HEARTBEAT_MS) {
+            send({ type: 'ticks', clock: cachedClock(), quotes });
+            lastSent = t;
+          }
         } catch {
-          /* ignore */
+          /* keep the socket; the next batch retries */
         }
-      }, 1000);
+      }, WS_BATCH_MS);
       const offNotify = svc.notifier.onPush((target, notification) => {
         if (target === uid) send({ type: 'notification', notification });
       });
@@ -493,7 +639,9 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
           const msg = JSON.parse(raw.toString()) as ClientMessage;
           if (msg.type === 'auth') uid = svc.auth.verify(msg.token)?.id ?? null;
           if (msg.type === 'subscribe') {
-            symbols = new Set([...INDEX_SYMBOLS, ...msg.symbols.filter((s) => e.instruments.has(s)).slice(0, 40)]);
+            const next = new Set([...indexSymbols(), ...subscription(msg.symbols)]);
+            for (const s of next) if (!client.symbols.has(s)) client.dirty.add(s);
+            client.symbols = next;
           }
         } catch {
           /* ignore malformed */
@@ -501,6 +649,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
       });
       socket.on('close', () => {
         clearInterval(timer);
+        clients.delete(client);
         offNotify();
         svc.orderListeners.delete(onOrder);
       });

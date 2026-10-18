@@ -20,11 +20,9 @@ for (const file of [path.resolve(here, '../../../.env'), path.resolve(here, '../
 }
 
 const config = loadConfig();
-const services = createServices(config);
-const app = await buildApp(services, { logger: true });
-services.start();
 
-// Live market data (Kotak Neo + NSE/BSE EOD). start() returns at once; it never blocks listen.
+// Live market data (Kotak Neo + NSE/BSE EOD): the only market-data source of the app.
+let log: { debug(m: string): void; info(m: string): void; warn(m: string): void; error(m: string): void } = console;
 const provider = new LiveProvider(
   {
     dataDir: config.dataDir,
@@ -37,19 +35,30 @@ const provider = new LiveProvider(
   },
   {
     logger: {
-      debug: (m) => app.log.debug(m),
-      info: (m) => app.log.info(m),
-      warn: (m) => app.log.warn(m),
-      error: (m) => app.log.error(m),
+      debug: (m) => log.debug(m),
+      info: (m) => log.info(m),
+      warn: (m) => log.warn(m),
+      error: (m) => log.error(m),
     },
   },
 );
+
+const services = createServices(config, {
+  provider,
+  onError: (where, e) => log.warn(`${where} failed: ${e instanceof Error ? e.message : String(e)}`),
+});
+const app = await buildApp(services, { logger: true });
+log = { debug: (m) => app.log.debug(m), info: (m) => app.log.info(m), warn: (m) => app.log.warn(m), error: (m) => app.log.error(m) };
+services.start();
+
+// start() returns at once; it never blocks listen.
 void provider.start();
 void provider.whenStarted().then(() => app.log.info(provider.healthLine()));
 
 const shutdown = async () => {
-  services.stop();
+  // Provider first: services.stop() then clears the user contracts without triggering a universe update.
   await provider.stop().catch((e) => app.log.warn(`live data provider stop failed: ${e instanceof Error ? e.message : String(e)}`));
+  services.stop();
   await app.close();
   process.exit(0);
 };
@@ -57,6 +66,7 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 await app.listen({ port: config.port, host: config.host });
-const clock = services.clock.info();
-app.log.info(`Q26 Options API on :${config.port} — clock ${clock.mode} ${clock.date} ${clock.time} (speed ${clock.speed}x)`);
+const clock = provider.clock.info();
+app.log.info(`Q26 Options API on :${config.port} — live data only, IST ${clock.date} ${clock.time} (market ${clock.status})`);
+// Health summary (no secrets): broker login, feed, instrument master, EOD files, recorded sessions.
 app.log.info(provider.healthLine());

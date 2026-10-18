@@ -1,10 +1,24 @@
 /**
- * Paper trading: a simulated broker (orders, trades, positions, funds with SPAN-style
- * margin) and the virtual strategy manager (saved multi-leg strategies with live MTM).
+ * Paper trading on live prices: a paper broker (orders, trades, positions, funds with a SPAN-style
+ * margin estimate) and the virtual strategy manager (saved multi-leg strategies with live MTM).
+ * PAPER ONLY: nothing here ever sends an order to the broker.
+ *
+ * Live-data rules:
+ *  - fills only against a live book: MARKET buys at the live ask, sells at the live bid; a MARKET
+ *    order without one is rejected ("No live bid/ask for <label>"); LIMIT/SL/SL-M orders keep working
+ *    until a live book (and, for triggers, a live-session LTP) is there, only while the market is open;
+ *  - positions are marked at the live-session LTP; without one, ltp/unrealized/pnl are null with the
+ *    reason (never a last-known price shown as live);
+ *  - margin = core estimateMargin on the live spot, each option leg's IV solved from its live premium
+ *    (else the expiry's ATM IV) and the expiry's live forward; an order that adds risk is rejected
+ *    with the reason when those inputs are not live;
+ *  - an expired contract settles only at the exchange settlement price (md.history.settlement);
+ *    until it is published the position stays open as 'awaiting settlement'.
  */
 import { randomUUID } from 'node:crypto';
 import {
   estimateMargin,
+  expiryTs,
   INDEX_MARGIN,
   STOCK_MARGIN,
   type Funds,
@@ -16,15 +30,13 @@ import {
   type SavedStrategy,
   type Trade,
 } from '@q26/core';
-import type { MarketEngine } from '../market/engine';
+import { NoLiveData } from '../live/types';
+import type { InstrumentKey, MarketDataProvider } from '../live/types';
 import type { Db } from '../store/db';
-import { instrumentKey, instrumentLabel, type Pricer } from './pricer';
+import { Gaps, httpError, livePrice, r2, spotKey } from './live';
+import { instrumentKey, instrumentLabel, specKey, type InstrumentSpec, type Pricer } from './pricer';
 
 const MAX_LOTS_PER_ORDER = 50;
-
-function httpError(statusCode: number, message: string) {
-  return Object.assign(new Error(message), { statusCode });
-}
 
 export type Notify = (userId: string, n: Omit<Notification, 'id' | 'ts' | 'read'>) => void;
 export type EmitOrder = (userId: string, order: Order) => void;
@@ -36,15 +48,33 @@ interface PositionAgg {
   strike?: number;
   expiry: string;
   product: Position['product'];
+  /** Lot size the contract traded with (order quantity / lots). */
+  lotSize: number;
   buyQty: number;
   sellQty: number;
   buyValue: number;
   sellValue: number;
 }
 
+const specOf = (p: { symbol: string; type: Position['type']; strike?: number; expiry: string }): InstrumentSpec => ({
+  symbol: p.symbol,
+  type: p.type,
+  strike: p.type === 'FUT' ? undefined : p.strike,
+  expiry: p.expiry,
+});
+
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const isClientError = (e: unknown): boolean => e instanceof NoLiveData || ((e as { statusCode?: number }).statusCode ?? 500) < 500;
+
+/** `price` is a whole multiple of `tick` (paise tolerance). */
+function onTick(price: number, tick: number): boolean {
+  const n = price / tick;
+  return Math.abs(n - Math.round(n)) < 1e-6;
+}
+
 export class PaperBroker {
   constructor(
-    private readonly engine: MarketEngine,
+    private readonly md: MarketDataProvider,
     private readonly db: Db,
     private readonly pricer: Pricer,
     private readonly now: () => number,
@@ -63,11 +93,12 @@ export class PaperBroker {
   private aggregate(trades: Trade[], orders: Order[]): PositionAgg[] {
     const byOrder = new Map(orders.map((o) => [o.id, o]));
     const map = new Map<string, PositionAgg>();
-    for (const t of trades) {
+    for (const t of [...trades].reverse()) {
       const o = byOrder.get(t.orderId);
       if (!o) continue;
       const key = instrumentKey({ symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product });
-      const agg = map.get(key) ?? { key, symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product, buyQty: 0, sellQty: 0, buyValue: 0, sellValue: 0 };
+      const lotSize = o.lots > 0 ? o.quantity / o.lots : 1;
+      const agg = map.get(key) ?? { key, symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product, lotSize, buyQty: 0, sellQty: 0, buyValue: 0, sellValue: 0 };
       if (t.side === 'BUY') {
         agg.buyQty += t.quantity;
         agg.buyValue += t.quantity * t.price;
@@ -82,41 +113,67 @@ export class PaperBroker {
 
   private toPositions(aggs: PositionAgg[], ts: number): Position[] {
     return aggs.map((a) => {
-      const inst = this.engine.inst(a.symbol);
-      const px = this.pricer.price({ symbol: a.symbol, type: a.type, strike: a.strike, expiry: a.expiry }, ts);
+      const spec = specOf(a);
+      const label = instrumentLabel(spec);
       const netQty = a.buyQty - a.sellQty;
       const buyAvg = a.buyQty ? a.buyValue / a.buyQty : 0;
       const sellAvg = a.sellQty ? a.sellValue / a.sellQty : 0;
       const closed = Math.min(a.buyQty, a.sellQty);
       let realized = closed * (sellAvg - buyAvg);
       const avgPrice = netQty > 0 ? buyAvg : netQty < 0 ? sellAvg : 0;
-      let unrealized = netQty * (px.ltp - avgPrice);
+      let ltp: number | null = null;
+      let ltpTs: number | null = null;
+      let unrealized: number | null = 0;
       let status: Position['status'] = netQty === 0 ? 'closed' : 'open';
-      if (px.expired && netQty !== 0) {
-        realized += unrealized;
-        unrealized = 0;
-        status = 'expired';
+      let reason: string | undefined;
+      let shownQty = netQty;
+      if (netQty !== 0 && expiryTs(a.expiry) < ts) {
+        const settle = this.md.history.settlement(specKey(spec));
+        if (settle !== undefined) {
+          ltp = settle;
+          realized += netQty * (settle - avgPrice);
+          unrealized = 0;
+          status = 'expired';
+          shownQty = 0;
+        } else {
+          unrealized = null;
+          status = 'awaiting settlement';
+          reason = `Awaiting the exchange settlement price for ${label}`;
+        }
+      } else if (netQty !== 0) {
+        try {
+          const px = this.pricer.price(spec, ts);
+          ltp = px.ltp;
+          ltpTs = ltp !== null ? px.ts : null;
+          if (ltp === null) reason = px.reason ?? `No live price for ${label}`;
+        } catch (e) {
+          if (!isClientError(e)) throw e;
+          reason = errMsg(e);
+        }
+        unrealized = ltp !== null ? netQty * (ltp - avgPrice) : null;
       }
       return {
         key: a.key,
-        instrument: instrumentLabel({ symbol: a.symbol, type: a.type, strike: a.strike, expiry: a.expiry }),
+        instrument: label,
         symbol: a.symbol,
         type: a.type,
         strike: a.strike,
         expiry: a.expiry,
         product: a.product,
-        netQty: status === 'expired' ? 0 : netQty,
-        lotSize: inst.lotSize,
+        netQty: shownQty,
+        lotSize: a.lotSize,
         avgPrice: +avgPrice.toFixed(2),
         buyQty: a.buyQty,
         sellQty: a.sellQty,
         buyValue: +a.buyValue.toFixed(2),
         sellValue: +a.sellValue.toFixed(2),
-        ltp: px.ltp,
+        ltp,
+        ltpTs,
         realized: +realized.toFixed(2),
-        unrealized: +unrealized.toFixed(2),
-        pnl: +(realized + unrealized).toFixed(2),
+        unrealized: r2(unrealized),
+        pnl: unrealized !== null ? +(realized + unrealized).toFixed(2) : null,
         status,
+        ...(reason ? { reason } : {}),
       };
     });
   }
@@ -125,47 +182,93 @@ export class PaperBroker {
     return this.toPositions(this.aggregate(this.trades(uid), this.orders(uid)), this.now());
   }
 
+  /**
+   * Margin estimate of one underlying's open positions (0 when nothing is short and there is no
+   * future). NoLiveData when the live spot, a leg's IV or an expiry's forward is not available.
+   */
+  private marginFor(symbol: string, positions: Position[], ts: number): number {
+    const open = positions.filter((p) => p.status === 'open' && p.netQty !== 0);
+    if (!open.some((p) => p.netQty < 0 || p.type === 'FUT')) return 0;
+    const md = this.md;
+    const u = md.ref.underlying(symbol);
+    const S = livePrice(md, md.live.quote(spotKey(symbol)));
+    if (S === null) throw new NoLiveData(`Margin estimate needs a live ${symbol} price`);
+    const carry = new Map<string, number>();
+    for (const e of new Set(open.map((p) => p.expiry))) carry.set(e, md.pricing.r - md.pricing.forward(symbol, e).carry);
+    const atmIv = md.pricing.atmIv(symbol);
+    const legs: Leg[] = open.map((p) => {
+      let iv: number | undefined;
+      if (p.type !== 'FUT') {
+        let solved: number | null = null;
+        try {
+          const pxIv = this.pricer.price(specOf(p), ts).iv;
+          solved = pxIv !== null ? pxIv / 100 : null;
+        } catch (e) {
+          if (!isClientError(e)) throw e;
+        }
+        solved ??= md.pricing.atmIv(symbol, p.expiry) ?? atmIv;
+        if (solved === null) throw new NoLiveData(`No live IV for ${p.instrument}: margin cannot be estimated`);
+        iv = solved;
+      }
+      return { side: p.netQty > 0 ? 'BUY' : 'SELL', type: p.type, strike: p.strike ?? 0, expiry: p.expiry, lots: Math.abs(p.netQty) / p.lotSize, lotSize: p.lotSize, price: p.avgPrice, iv };
+    });
+    const ivs = legs.map((l) => l.iv).filter((v): v is number => v !== undefined);
+    const defaultIv = atmIv ?? (ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : undefined);
+    const carryOf = (e: string): number => {
+      const q = carry.get(e);
+      if (q === undefined) throw new NoLiveData(`No live forward for ${symbol} ${e}`);
+      return q;
+    };
+    const m = estimateMargin(legs, S, ts, { r: md.pricing.r, carry: carryOf, defaultIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
+    return m.total;
+  }
+
   private fundsFor(uid: string, positions: Position[], ts: number): Funds {
     const user = this.db.data.users[uid];
     const opening = user?.openingBalance ?? 1_000_000;
+    const gaps = new Gaps();
     let realized = 0;
-    let unrealized = 0;
+    let unrealized: number | null = 0;
     let premiumPaid = 0;
     let premiumReceived = 0;
-    let mtmLossBlock = 0;
-    const legsBySymbol = new Map<string, Leg[]>();
+    let mtmLossBlock: number | null = 0;
+    const bySymbol = new Map<string, Position[]>();
     for (const p of positions) {
       realized += p.realized;
-      unrealized += p.unrealized;
+      if (p.unrealized === null) {
+        unrealized = null;
+        gaps.add('unrealizedPnl', p.reason ?? `No live price for ${p.instrument}`);
+      } else if (unrealized !== null) unrealized += p.unrealized;
       if (p.netQty === 0) continue;
       const isOpt = p.type !== 'FUT';
       if (isOpt && p.netQty > 0) premiumPaid += p.netQty * p.avgPrice;
       else {
         if (isOpt) premiumReceived += -p.netQty * p.avgPrice;
-        mtmLossBlock += Math.min(0, p.unrealized);
+        if (p.unrealized === null) mtmLossBlock = null;
+        else if (mtmLossBlock !== null) mtmLossBlock += Math.min(0, p.unrealized);
       }
-      const legs = legsBySymbol.get(p.symbol) ?? [];
-      legs.push({ side: p.netQty > 0 ? 'BUY' : 'SELL', type: p.type, strike: p.strike ?? 0, expiry: p.expiry, lots: Math.abs(p.netQty) / p.lotSize, lotSize: p.lotSize, price: p.ltp });
-      legsBySymbol.set(p.symbol, legs);
+      const list = bySymbol.get(p.symbol) ?? [];
+      list.push(p);
+      bySymbol.set(p.symbol, list);
     }
-    let usedMargin = 0;
-    for (const [symbol, legs] of legsBySymbol) {
-      const inst = this.engine.inst(symbol);
-      if (!legs.some((l) => l.side === 'SELL' || l.type === 'FUT')) continue;
-      const spot = this.engine.spot(symbol, ts);
-      const iv = this.engine.atmIv(symbol, ts);
-      const m = estimateMargin(legs.map((l) => ({ ...l, iv })), spot, ts, { r: this.engine.r, carry: () => inst.divYield, defaultIv: iv }, inst.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
-      usedMargin += m.total;
+    let usedMargin: number | null = 0;
+    for (const [symbol, list] of bySymbol) {
+      const m = gaps.try('margin', () => this.marginFor(symbol, list, ts));
+      if (m === null) usedMargin = null;
+      else if (usedMargin !== null) usedMargin += m;
     }
-    const available = opening + realized + mtmLossBlock - usedMargin - premiumPaid;
+    let available: number | null = null;
+    if (mtmLossBlock !== null && usedMargin !== null) available = opening + realized + mtmLossBlock - usedMargin - premiumPaid;
+    else gaps.add('available', mtmLossBlock === null ? 'A short position has no live price: its loss cannot be blocked' : 'Margin cannot be estimated');
     return {
       openingBalance: opening,
-      available: +available.toFixed(2),
-      usedMargin: +usedMargin.toFixed(2),
+      available: r2(available),
+      usedMargin: r2(usedMargin),
       realizedPnl: +realized.toFixed(2),
-      unrealizedPnl: +unrealized.toFixed(2),
+      unrealizedPnl: r2(unrealized),
       premiumPaid: +premiumPaid.toFixed(2),
       premiumReceived: +premiumReceived.toFixed(2),
+      ...gaps.out(),
     };
   }
 
@@ -180,15 +283,24 @@ export class PaperBroker {
     if (req.type !== 'FUT' && !(Number(req.strike) > 0)) throw httpError(400, 'Strike is required for options');
     if ((req.orderType === 'LIMIT' || req.orderType === 'SL') && !(Number(req.price) > 0)) throw httpError(400, 'Limit price is required');
     if ((req.orderType === 'SL' || req.orderType === 'SL-M') && !(Number(req.triggerPrice) > 0)) throw httpError(400, 'Trigger price is required');
-    const spec = { symbol: req.symbol, type: req.type, strike: req.type === 'FUT' ? undefined : Number(req.strike), expiry: req.expiry };
-    this.pricer.validate(spec, ts);
-    const inst = this.engine.inst(req.symbol);
+    const symbol = this.md.ref.underlying(req.symbol).symbol;
+    const spec: InstrumentSpec = { symbol, type: req.type, strike: req.type === 'FUT' ? undefined : Number(req.strike), expiry: req.expiry };
+    const listing = this.pricer.validate(spec, ts, { trade: true });
+    const tick = listing.tickSize;
+    if (tick && tick > 0) {
+      for (const [name, v] of [['Price', req.price], ['Trigger price', req.triggerPrice]] as const) {
+        if (v !== undefined && Number(v) > 0 && !onTick(Number(v), tick)) throw httpError(400, `${name} must be a multiple of the tick size ₹${tick}`);
+      }
+    }
+    // Stream it now; the user-contract tier picks working orders up within a minute.
+    this.md.live.watch([specKey(spec)], 'quote');
     const order: Order = {
       ...req,
+      symbol,
       strike: spec.strike,
       id: `ORD-${randomUUID().slice(0, 8).toUpperCase()}`,
       instrument: instrumentLabel(spec),
-      quantity: req.lots * inst.lotSize,
+      quantity: req.lots * listing.lotSize,
       status: req.orderType === 'SL' || req.orderType === 'SL-M' ? 'TRIGGER_PENDING' : 'OPEN',
       avgPrice: 0,
       filledQty: 0,
@@ -201,36 +313,79 @@ export class PaperBroker {
     return order;
   }
 
-  /** Try to fill / trigger a working order against the current book. */
+  /** The order only reduces an existing position of the same contract and product (never flips it). */
+  private reducesRisk(uid: string, order: Order): boolean {
+    const key = instrumentKey({ symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry, product: order.product });
+    const agg = this.aggregate(this.trades(uid), this.orders(uid)).find((a) => a.key === key);
+    if (!agg) return false;
+    const net = agg.buyQty - agg.sellQty;
+    return (order.side === 'BUY' ? net < 0 : net > 0) && order.quantity <= Math.abs(net);
+  }
+
+  /** Try to trigger / fill a working order against the live market. */
   private process(uid: string, order: Order, ts: number): void {
     if (order.status !== 'OPEN' && order.status !== 'TRIGGER_PENDING') return;
-    const px = this.pricer.price({ symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry }, ts);
-    if (px.expired) {
+    const spec: InstrumentSpec = { symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry };
+    if (expiryTs(order.expiry) < ts) {
       this.finish(uid, order, 'CANCELLED', 'Contract expired before execution', ts);
       return;
     }
+    const isMarket = order.orderType === 'MARKET';
+    let px;
+    try {
+      px = this.pricer.price(spec, ts);
+    } catch (e) {
+      if (!isClientError(e)) throw e;
+      if (isMarket) this.finish(uid, order, 'REJECTED', `No live bid/ask for ${order.instrument}: ${errMsg(e)}`, ts);
+      return; // working orders wait for live prices
+    }
+    const open = this.md.calendar.session(this.md.clock.now()).status === 'open';
     if (order.status === 'TRIGGER_PENDING') {
+      if (!open || px.ltp === null) return;
       const hit = order.side === 'BUY' ? px.ltp >= order.triggerPrice! : px.ltp <= order.triggerPrice!;
       if (!hit) return;
       order.status = 'OPEN';
       order.updatedAt = ts;
     }
     const market = order.side === 'BUY' ? px.ask : px.bid;
+    if (market === null) {
+      if (isMarket) this.finish(uid, order, 'REJECTED', `No live bid/ask for ${order.instrument}${open ? '' : ' (market closed)'}`, ts);
+      return;
+    }
     let fillPrice: number | null = null;
-    if (order.orderType === 'MARKET' || order.orderType === 'SL-M') fillPrice = market;
+    if (isMarket || order.orderType === 'SL-M') fillPrice = market;
     else if (order.side === 'BUY' && market <= order.price!) fillPrice = market;
     else if (order.side === 'SELL' && market >= order.price!) fillPrice = market;
     if (fillPrice === null) return;
 
-    // Margin check on the post-trade portfolio; risk-reducing orders always pass.
     const trades = this.trades(uid);
     const orders = this.orders(uid);
     const trade: Trade = { id: `TRD-${randomUUID().slice(0, 8).toUpperCase()}`, orderId: order.id, instrument: order.instrument, symbol: order.symbol, side: order.side, quantity: order.quantity, price: fillPrice, ts };
-    const before = this.fundsFor(uid, this.toPositions(this.aggregate(trades, orders), ts), ts);
-    const after = this.fundsFor(uid, this.toPositions(this.aggregate([...trades, trade], orders), ts), ts);
-    if (after.available < 0 && after.available < before.available) {
-      this.finish(uid, order, 'REJECTED', `Insufficient funds: requires ₹${Math.round(before.available - after.available).toLocaleString('en-IN')}, available ₹${Math.round(before.available).toLocaleString('en-IN')}`, ts);
-      return;
+
+    // Margin check on the post-trade portfolio; orders that only reduce a position always pass.
+    if (!this.reducesRisk(uid, order)) {
+      const before = this.fundsFor(uid, this.toPositions(this.aggregate(trades, orders), ts), ts);
+      const afterPositions = this.toPositions(this.aggregate([trade, ...trades], orders), ts);
+      // The traded contract without a live-session trade yet is marked at its fill (a live bid/ask).
+      const key = instrumentKey({ symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry, product: order.product });
+      for (const p of afterPositions) {
+        if (p.key === key && p.status === 'open' && p.ltp === null) {
+          p.ltp = fillPrice;
+          p.unrealized = p.netQty * (fillPrice - p.avgPrice);
+          p.pnl = p.realized + p.unrealized;
+        }
+      }
+      const after = this.fundsFor(uid, afterPositions, ts);
+      if (after.available === null) {
+        const why = after.gaps?.margin ?? after.gaps?.available ?? 'live prices are missing';
+        this.finish(uid, order, 'REJECTED', `Margin cannot be estimated: ${why}`, ts);
+        return;
+      }
+      if (after.available < 0 && (before.available === null || after.available < before.available)) {
+        const need = before.available !== null ? before.available - after.available : -after.available;
+        this.finish(uid, order, 'REJECTED', `Insufficient funds: requires ₹${Math.round(need).toLocaleString('en-IN')}, available ₹${Math.round(Math.max(0, before.available ?? 0)).toLocaleString('en-IN')}`, ts);
+        return;
+      }
     }
     trades.unshift(trade);
     order.avgPrice = fillPrice;
@@ -260,6 +415,7 @@ export class PaperBroker {
   exitPosition(uid: string, key: string): Order {
     const pos = this.positions(uid).find((p) => p.key === key);
     if (!pos || pos.netQty === 0) throw httpError(404, 'No open position');
+    if (pos.status === 'awaiting settlement') throw httpError(400, `${pos.instrument} has expired: it closes at the exchange settlement price`);
     return this.place(uid, {
       symbol: pos.symbol, type: pos.type, strike: pos.strike, expiry: pos.expiry, side: pos.netQty > 0 ? 'SELL' : 'BUY', lots: Math.abs(pos.netQty) / pos.lotSize, orderType: 'MARKET', product: pos.product, tag: 'exit',
     });
@@ -271,20 +427,29 @@ export class PaperBroker {
     this.db.save();
   }
 
-  /** Called every second: works pending orders for all users. */
+  /** Called every second: works pending orders for all users (never throws). */
   tick(): void {
     const ts = this.now();
     for (const [uid, orders] of Object.entries(this.db.data.orders)) {
       for (const o of orders) {
-        if (o.status === 'OPEN' || o.status === 'TRIGGER_PENDING') {
-          try {
-            this.process(uid, o, ts);
-          } catch {
-            /* keep ticking other orders */
-          }
+        if (o.status !== 'OPEN' && o.status !== 'TRIGGER_PENDING') continue;
+        try {
+          this.process(uid, o, ts);
+        } catch {
+          /* keep working the other orders; this one is retried next tick */
         }
       }
     }
+  }
+
+  /** Contracts of working orders and open positions of every user (streamed in the provider's 'user' tier). */
+  openContracts(): InstrumentKey[] {
+    const out: InstrumentKey[] = [];
+    for (const [uid, orders] of Object.entries(this.db.data.orders)) {
+      for (const o of orders) if (o.status === 'OPEN' || o.status === 'TRIGGER_PENDING') out.push(specKey(specOf(o)));
+      for (const a of this.aggregate(this.trades(uid), orders)) if (a.buyQty !== a.sellQty) out.push(specKey(specOf(a)));
+    }
+    return out;
   }
 }
 
@@ -302,10 +467,20 @@ export interface StrategyInput {
 }
 
 export class StrategyManager {
-  constructor(private readonly engine: MarketEngine, private readonly db: Db, private readonly pricer: Pricer, private readonly now: () => number) {}
+  constructor(
+    private readonly md: MarketDataProvider,
+    private readonly db: Db,
+    private readonly pricer: Pricer,
+    private readonly now: () => number,
+  ) {}
 
+  /**
+   * Legs of a live contract are validated against the instrument master and take its lot size; a leg
+   * without an entry price takes the live-session LTP (NoLiveData without one). Legs of an expired
+   * contract that carry their price are kept with the lot size given (the master no longer lists them).
+   */
   private normaliseLegs(symbol: string, legs: Leg[], ts: number): Leg[] {
-    const inst = this.engine.inst(symbol);
+    const u = this.md.ref.underlying(symbol);
     if (!Array.isArray(legs) || !legs.length) throw httpError(400, 'At least one leg is required');
     if (legs.length > 12) throw httpError(400, 'Maximum 12 legs');
     return legs.map((l, i) => {
@@ -313,11 +488,14 @@ export class StrategyManager {
       if (!['CE', 'PE', 'FUT'].includes(l.type)) throw httpError(400, 'Invalid instrument type');
       const lots = Math.round(Number(l.lots));
       if (!(lots >= 1 && lots <= 500)) throw httpError(400, 'Invalid lots');
-      const spec = { symbol, type: l.type, strike: l.type === 'FUT' ? undefined : Number(l.strike), expiry: l.expiry };
+      const spec: InstrumentSpec = { symbol: u.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : Number(l.strike), expiry: l.expiry };
       let price = Number(l.price);
+      const expiredWithPrice = price > 0 && typeof l.expiry === 'string' && expiryTs(l.expiry) < ts;
+      const listing = expiredWithPrice ? undefined : this.pricer.validate(spec, ts);
       if (!(price > 0)) {
-        this.pricer.validate(spec, ts);
-        price = this.pricer.price(spec, ts).ltp;
+        const ltp = this.pricer.price(spec, ts).ltp;
+        if (ltp === null) throw new NoLiveData(`No live price for ${instrumentLabel(spec)} to use as the entry price`);
+        price = ltp;
       }
       return {
         id: l.id ?? `leg-${i}-${randomUUID().slice(0, 6)}`,
@@ -326,7 +504,7 @@ export class StrategyManager {
         strike: l.type === 'FUT' ? 0 : Number(l.strike),
         expiry: l.expiry,
         lots,
-        lotSize: inst.lotSize,
+        lotSize: listing?.lotSize ?? (Number(l.lotSize) > 1 ? Number(l.lotSize) : u.lotSize),
         price: +price.toFixed(2),
         iv: l.iv,
         exitPrice: l.exitPrice ?? null,
@@ -335,30 +513,53 @@ export class StrategyManager {
     });
   }
 
+  /** Live MTM: open legs at their live-session LTP (null MTM when one is not live), exited legs at their exit; expired legs exit at the settlement. */
   private withLive(s: SavedStrategy, ts: number): SavedStrategy {
+    const gaps = new Gaps();
     let mtm = 0;
+    let mtmKnown = true;
     let realized = 0;
     let changed = false;
     const legsLtp = s.legs.map((l) => {
-      const px = this.pricer.price({ symbol: s.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : l.strike, expiry: l.expiry }, ts);
-      if (px.expired && l.exitPrice == null) {
-        l.exitPrice = px.ltp;
-        changed = true;
+      const spec: InstrumentSpec = { symbol: s.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : l.strike, expiry: l.expiry };
+      const label = instrumentLabel(spec);
+      let ltp: number | null = null;
+      try {
+        const px = this.pricer.price(spec, ts);
+        ltp = px.ltp;
+        if (px.expired && l.exitPrice == null && px.ltp !== null) {
+          l.exitPrice = px.ltp;
+          changed = true;
+        }
+        if (ltp === null && l.exitPrice == null && l.active !== false) gaps.add(label, px.reason ?? `No live price for ${label}`);
+      } catch (e) {
+        if (!isClientError(e)) throw e;
+        if (l.exitPrice == null && l.active !== false) gaps.add(label, errMsg(e));
       }
-      const sign = l.side === 'BUY' ? 1 : -1;
-      const qty = l.lots * l.lotSize * sign;
-      const exit = l.exitPrice ?? px.ltp;
-      const pnl = qty * (exit - l.price);
-      if (l.active === false) return px.ltp;
+      if (l.active === false) return ltp;
+      const exit = l.exitPrice ?? ltp;
+      if (exit === null) {
+        mtmKnown = false;
+        return ltp;
+      }
+      const pnl = l.lots * l.lotSize * (l.side === 'BUY' ? 1 : -1) * (exit - l.price);
       mtm += pnl;
       if (l.exitPrice != null) realized += pnl;
-      return px.ltp;
+      return ltp;
     });
     if (changed) {
       if (s.legs.every((l) => l.exitPrice != null)) s.status = 'expired';
       this.db.save();
     }
-    return { ...s, live: { mtm: +mtm.toFixed(2), realized: +realized.toFixed(2), spot: this.engine.spot(s.symbol, ts), legsLtp, ts } };
+    let spot: number | null = null;
+    try {
+      spot = livePrice(this.md, this.md.live.quote(spotKey(s.symbol)));
+    } catch {
+      spot = null;
+    }
+    if (spot === null) gaps.add('spot', `No live ${s.symbol} price`);
+    const g = gaps.out();
+    return { ...s, live: { mtm: mtmKnown ? +mtm.toFixed(2) : null, realized: +realized.toFixed(2), spot, legsLtp, ts, ...(g.gaps ? { gaps: g.gaps } : {}) } };
   }
 
   list(uid: string): SavedStrategy[] {
@@ -374,11 +575,12 @@ export class StrategyManager {
 
   create(uid: string, input: StrategyInput): SavedStrategy {
     const ts = this.now();
-    const legs = this.normaliseLegs(input.symbol, input.legs, ts);
+    const symbol = this.md.ref.underlying(input.symbol).symbol;
+    const legs = this.normaliseLegs(symbol, input.legs, ts);
     const s: SavedStrategy = {
       id: randomUUID(),
-      name: (input.name ?? '').trim() || `${input.symbol} strategy`,
-      symbol: input.symbol,
+      name: (input.name ?? '').trim() || `${symbol} strategy`,
+      symbol,
       legs,
       notes: input.notes,
       createdAt: ts,
@@ -396,26 +598,37 @@ export class StrategyManager {
     const s = this.db.list('strategies', uid).find((x) => x.id === id);
     if (!s) throw httpError(404, 'Strategy not found');
     const ts = this.now();
+    if (patch.legs) s.legs = this.normaliseLegs(s.symbol, patch.legs, ts);
     if (patch.name !== undefined) s.name = patch.name.trim() || s.name;
     if (patch.notes !== undefined) s.notes = patch.notes;
     if (patch.targetMtm !== undefined) s.targetMtm = patch.targetMtm;
     if (patch.stopLossMtm !== undefined) s.stopLossMtm = patch.stopLossMtm;
-    if (patch.legs) s.legs = this.normaliseLegs(s.symbol, patch.legs, ts);
     s.status = s.legs.every((l) => l.exitPrice != null) ? 'closed' : 'open';
     s.updatedAt = ts;
     this.db.save();
     return this.withLive(s, ts);
   }
 
+  /**
+   * Exit legs at live prices: a long leg at the live bid, a short leg at the live ask, else the
+   * live-session LTP; an expired leg at its settlement. All-or-nothing: NoLiveData when any leg has
+   * no live price (nothing is changed then).
+   */
   exit(uid: string, id: string, legIds?: string[]): SavedStrategy {
     const s = this.db.list('strategies', uid).find((x) => x.id === id);
     if (!s) throw httpError(404, 'Strategy not found');
     const ts = this.now();
+    const exits = new Map<Leg, number>();
     for (const l of s.legs) {
       if (l.exitPrice != null) continue;
       if (legIds && legIds.length && !legIds.includes(l.id!)) continue;
-      l.exitPrice = this.pricer.price({ symbol: s.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : l.strike, expiry: l.expiry }, ts).ltp;
+      const spec: InstrumentSpec = { symbol: s.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : l.strike, expiry: l.expiry };
+      const px = this.pricer.price(spec, ts);
+      const price = px.expired ? px.ltp : ((l.side === 'BUY' ? px.bid : px.ask) ?? px.ltp);
+      if (price === null) throw new NoLiveData(`No live price to exit ${instrumentLabel(spec)}`);
+      exits.set(l, price);
     }
+    for (const [l, price] of exits) l.exitPrice = price;
     if (s.legs.every((l) => l.exitPrice != null)) s.status = 'closed';
     s.updatedAt = ts;
     this.db.save();
@@ -428,5 +641,20 @@ export class StrategyManager {
     if (idx < 0) throw httpError(404, 'Strategy not found');
     list.splice(idx, 1);
     this.db.save();
+  }
+
+  /** Legs of open strategies still running (streamed in the provider's 'user' tier). */
+  openContracts(): InstrumentKey[] {
+    const out: InstrumentKey[] = [];
+    for (const list of Object.values(this.db.data.strategies)) {
+      for (const s of list) {
+        if (s.status !== 'open') continue;
+        for (const l of s.legs) {
+          if (l.exitPrice != null || l.active === false) continue;
+          out.push(specKey({ symbol: s.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : l.strike, expiry: l.expiry }));
+        }
+      }
+    }
+    return out;
   }
 }

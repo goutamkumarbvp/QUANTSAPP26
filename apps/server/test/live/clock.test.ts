@@ -15,7 +15,7 @@ describe('LiveClock', () => {
   it('follows the wall clock during the session', () => {
     now = ist('2026-10-12', 10, 30, 42);
     expect(clock.now()).toBe(now);
-    expect(clock.info()).toEqual({ ts: now, date: '2026-10-12', time: '10:30', status: 'open', sessionMinute: 75, mode: 'live', speed: 1 });
+    expect(clock.info()).toEqual({ ts: now, date: '2026-10-12', time: '10:30', status: 'open', sessionMinute: 75 });
   });
 
   it('reports pre-open with sessionMinute 0', () => {

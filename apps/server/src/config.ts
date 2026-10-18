@@ -16,17 +16,11 @@ export interface AppConfig {
   host: string;
   dataDir: string;
   webDist: string;
-  /** @deprecated removed in Phase C. 'demo' = always-open simulated session; 'live' = follow the real IST clock. */
-  clockMode: 'demo' | 'live';
-  /** @deprecated removed in Phase C */
-  simSpeed: number;
-  /** @deprecated removed in Phase C. Optional fixed demo start, e.g. "2026-10-09T10:30". */
-  simStart?: string;
+  /** Risk-free rate for IV/Greeks and margin estimates (config input, not market data). */
   riskFreeRate: number;
   authSecret: string;
+  /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
-  /** @deprecated removed in Phase C */
-  seed: string;
   persist: boolean;
   /** Kotak Neo credentials from the environment (.env); null when missing or invalid. Never log it. */
   neo: NeoEnv | null;
@@ -56,13 +50,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     host: process.env.HOST ?? '0.0.0.0',
     dataDir: process.env.DATA_DIR ?? path.resolve(here, '../data'),
     webDist: process.env.WEB_DIST ?? path.resolve(here, '../../web/dist'),
-    clockMode: process.env.CLOCK_MODE === 'live' ? 'live' : 'demo',
-    simSpeed: Math.max(0.1, num('SIM_SPEED', 1)),
-    simStart: process.env.SIM_START || undefined,
     riskFreeRate: num('RISK_FREE_RATE', 0.065),
     authSecret: process.env.AUTH_SECRET || randomBytes(32).toString('hex'),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
-    seed: process.env.MARKET_SEED ?? 'q26',
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),
     eodBackfillDays: Math.max(0, Math.floor(num('EOD_BACKFILL_DAYS', 30))),

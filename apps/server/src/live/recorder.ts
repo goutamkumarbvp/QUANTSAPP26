@@ -14,7 +14,8 @@
  *    any seen before that falls in the minute (index packets: a new index time). A trade time of an
  *    earlier minute marks that minute only while it is still open. Quote-only minutes (bid/ask/OI
  *    moved, no trade) are still written, with traded false;
- *  - oi / bid / ask / total buy & sell qty / ATP = last value seen;
+ *  - oi / bid / ask / total buy & sell qty / ATP = last value seen; bidQty / askQty = the level-1
+ *    quantities reported with that bid / ask (absent when that update carried none);
  *  - each positive Δvolume is classified with the quote rule against the bid/ask seen BEFORE the
  *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
  *    estimate, and only meaningful if the feed is per trade (critic U4).
@@ -102,6 +103,9 @@ interface Inst {
   oi?: number;
   bid?: number;
   ask?: number;
+  /** Level-1 quantities reported with the latest bid / ask (undefined when that update carried none). */
+  bidQty?: number;
+  askQty?: number;
   totalBuyQty?: number;
   totalSellQty?: number;
   atp?: number;
@@ -272,8 +276,15 @@ export class Recorder implements LiveBarSource {
     const oldTrade = (isNum(q.ltt) && calendar.session(q.ltt).date !== today) || (q.volume === 0 && q.ts >= calendar.ts(today, 0));
     if (isPos(q.ltp) && !oldTrade) inst.ltp = q.ltp;
     if (isNum(q.oi) && q.oi >= 0) inst.oi = q.oi;
-    if (isPos(q.bid)) inst.bid = q.bid;
-    if (isPos(q.ask)) inst.ask = q.ask;
+    // A quantity belongs to the price it was reported with: a new bid/ask without one clears it.
+    if (isPos(q.bid)) {
+      inst.bid = q.bid;
+      inst.bidQty = isNum(q.bidQty) && q.bidQty >= 0 ? q.bidQty : undefined;
+    }
+    if (isPos(q.ask)) {
+      inst.ask = q.ask;
+      inst.askQty = isNum(q.askQty) && q.askQty >= 0 ? q.askQty : undefined;
+    }
     if (isNum(q.totalBuyQty) && q.totalBuyQty >= 0) inst.totalBuyQty = q.totalBuyQty;
     if (isNum(q.totalSellQty) && q.totalSellQty >= 0) inst.totalSellQty = q.totalSellQty;
     if (isPos(q.atp)) inst.atp = q.atp;
@@ -319,6 +330,10 @@ export class Recorder implements LiveBarSource {
     if (inst.oi !== undefined) bar.oi = inst.oi;
     if (inst.bid !== undefined) bar.bid = inst.bid;
     if (inst.ask !== undefined) bar.ask = inst.ask;
+    if (inst.bidQty !== undefined) bar.bidQty = inst.bidQty;
+    else delete bar.bidQty;
+    if (inst.askQty !== undefined) bar.askQty = inst.askQty;
+    else delete bar.askQty;
     if (inst.totalBuyQty !== undefined) bar.totalBuyQty = inst.totalBuyQty;
     if (inst.totalSellQty !== undefined) bar.totalSellQty = inst.totalSellQty;
     if (inst.atp !== undefined) bar.atp = inst.atp;
