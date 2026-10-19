@@ -7,6 +7,36 @@ synthetic value are removed. Paper trading stays paper (no real orders are sent 
 Research this design is based on: `docs/live-data/research/` (Kotak REST/auth, Kotak SFeed websocket,
 NSE/BSE public files, the app dependency map, and a critic's reconciliation of all four).
 
+## Status (2026-10-19)
+
+Phases **A–D are implemented** (§5): the Kotak and NSE/BSE clients, stores, recorder, calendar, clock and
+pricing; the `LiveProvider` with `/api/health`; every service rewired to the provider with the simulator
+deleted; the web app with the feed chip, blank states with reasons and no simulated wording. Tests run against
+a test-only fake provider and documented sample payloads; e2e runs in live-empty (offline, no credentials) and
+fixture modes. Phase E (adversarial review) is not marked complete here.
+
+Known limitations:
+
+- **Not yet run against the real endpoints.** The development sandbox could not reach Kotak, NSE or BSE, so
+  login, REST, SFeed and the file downloads are tested only against documentation, SDK test vectors and sample
+  files. The first live session should be watched through `/api/health`.
+- **Unconfirmed against a live account / site** (handled defensively; values are blank rather than guessed
+  when they do not parse):
+  - SFeed per-trade granularity — order flow (quote-rule estimate) is only meaningful if every trade is sent;
+    SFeed auth reply codes, timestamp units, OI/volume units, index names, 3,000-token cap semantics.
+  - Kotak quotas — the client-side token bucket (§1.5) follows the docs; real limits, session lifetime and
+    re-login behaviour are unknown. `Retry-After` / rate-limit headers are recorded in health.
+  - Kotak quote field meanings (`last_volume`, `total_buy`/`total_sell`), historical-candle symbol names and
+    timestamps, option-chain `count` limits.
+  - BSE F&O bhavcopy units (volume / OI in units vs contracts, from one sample row), path case, expiry-day
+    close quirk; NSE `SttlmPric` as the final settlement price.
+  - FII/DII and holiday master use unofficial `www.nseindia.com` JSON endpoints whose shape and availability
+    may change; the screens are blank when they are blocked.
+  - Whether NSE/BSE accept the server's headers and TLS fingerprint from the deployment IP.
+- **History starts with recording**: intraday history only exists for sessions the server recorded (plus
+  Kotak 1-minute candles for still-listed contracts); algo backtests and Trade Recap use recorded sessions only.
+- **Paper trading only**: no order is ever sent to Kotak.
+
 ## 1. Principles
 
 1. **Source or blank.** A service either returns a value derived from a live/official source or throws

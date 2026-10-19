@@ -4,3 +4,6 @@ node_modules
 apps/server/data
 apps/web/test-results
 .git
+.env
+.env.*
+!.env.example

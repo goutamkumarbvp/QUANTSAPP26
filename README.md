@@ -3,78 +3,166 @@
 An options-analytics and paper-trading platform for Indian F&O (NSE / BSE), modelled on the feature set of
 Quantsapp — option chain, open-interest suite, implied-volatility suite, strategy builder, strategy wizard,
 optimizer, straddle & strategy charts, trade recap, scanners, unusual option activity, synopsis heat-map,
-order-book analytics, FII/DII & participant data, watchlists, alerts and a paper broker.
+order-book analytics, FII/DII & participant data, watchlists, alerts, rule-based algos and a paper broker.
 
-> **Market data is simulated.** A deterministic market engine generates realistic prices, IV smiles, OI and
-> volumes for 6 indices and 58 F&O stocks. Nothing here is live exchange data or investment advice.
-> See [docs/AUDIT.md](docs/AUDIT.md) for the module-by-module parity map and known gaps.
+> **Live data only.** Market data comes from the Kotak Neo Trade API (your own account) and from the official
+> NSE/BSE end-of-day files. Nothing is synthesised: a value the sources do not provide is shown as **—** with
+> the reason. **Paper trading only** — no order is ever sent to the broker. Not investment advice.
+> See [docs/AUDIT.md](docs/AUDIT.md) for the feature map and [docs/live-data/DESIGN.md](docs/live-data/DESIGN.md)
+> for the data architecture.
+
+## Data sources
+
+| Source | What it provides |
+|---|---|
+| **Kotak Neo Trade API v2** — TOTP + MPIN login | Session for everything below |
+| Kotak scrip master (daily CSV) | Instrument list: underlyings, expiries, strikes, lot sizes, tokens |
+| Kotak SFeed websocket | Live ticks for index spots (incl. INDIA VIX), near futures, index option chains (2 nearest expiries, ±8 % strikes, re-centred), every contract you use (orders, positions, strategies, alerts, watchlists, running algos), and 5-level depth for open Order Book views |
+| Kotak REST | Quotes on demand, option-chain sweep for stock options (one stock per ≥1.5 s), 1-minute historical candles for **active** contracts |
+| NSE / BSE official EOD files | F&O and cash bhavcopy (NSE UDiFF, BSE F&O), index closes, participant-wise OI / volume, FII/DII cash flows, holiday master |
+
+**Derived on the server from those inputs** (labelled where they are estimates):
+
+- **IV and Greeks** — solved from live option premiums (Black-Scholes on the forward from the future, put-call
+  parity or spot); daily IV history is solved from bhavcopy premiums. `RISK_FREE_RATE` is a config input.
+- **PCR, max pain, build-up** (long/short build-up, short covering, long unwinding) — from live OI and price.
+- **Margin** — a SPAN-style *estimate* on live spot, IV and forward; broker margins differ.
+- **Order flow** — an *estimate*: each traded volume increment is classified buyer- or seller-initiated with the
+  quote rule (last price at/above the prior ask = buy, at/below the prior bid = sell, otherwise unclassified).
+  Only meaningful if the feed reports each trade.
+- **HV, IV rank / percentile, volatility cone** — from official daily closes and daily IV.
+
+**When a value is blank:** without Kotak credentials or before login, nothing live is shown; before the
+instrument master loads, no contract is known; before the first stock-option sweep, stock scanners are empty;
+an official file that is not published yet (or is blocked) leaves its screen blank; an illiquid contract with
+no live bid/ask cannot be paper-traded at market. Each blank shows its reason.
+
+### History
+
+There is no back-catalogue of synthetic history. History comes from:
+
+- **The recorder** — while the server runs it writes every streamed instrument's minutes and chain aggregates to
+  `DATA_DIR/market/YYYY-MM-DD/`. Intraday history (OI trend, multi-strike OI, intraday PCR / max pain,
+  straddle, strategy chart, ORB, order flow, Trade Recap, as-of chains `GET /api/chain/NIFTY?at=<epoch ms>`,
+  algo backtests) exists **from the first recorded session onward** and only for what was streamed.
+- **Kotak 1-minute historical candles** — fill some intraday charts for contracts that are still listed (recent
+  sessions only; expired contracts are not served).
+- **Official EOD backfill** — at start and daily (≈18:30–23:30 IST) the server fetches missing NSE/BSE files for
+  the last `EOD_BACKFILL_DAYS` sessions into `DATA_DIR/eod/`. Daily PCR, IV rank / percentile, HV, cone,
+  participant and FII/DII history come from these.
 
 ## Quick start
 
-Requires Node.js ≥ 20.12.
+Requires Node.js ≥ 20.12 (the server loads `.env` with `process.loadEnvFile`).
 
 ```bash
 npm install
-npm run dev          # API on :8787 + web on :5173 (proxied) → open http://localhost:5173
+cp .env.example .env     # then fill in the NEO_* values (see below)
+npm run dev              # API on :8787 + web on :5173 (proxied) → open http://localhost:5173
 ```
 
 Production (single process serving API, WebSocket and the built web app):
 
 ```bash
 npm run build
-npm start            # http://localhost:8787
+npm start                # http://localhost:8787
 ```
 
-Docker:
+Docker (the image does not contain `.env`; pass it at run time):
 
 ```bash
 docker build -t q26-options .
-docker run -p 8787:8787 -v q26-data:/app/apps/server/data q26-options
+docker run -p 8787:8787 --env-file .env -v q26-data:/app/apps/server/data q26-options
 ```
+
+## Configuration
+
+The server reads `.env` from the repository root (and then `apps/server/.env`); variables already set in the
+environment win. Credential values are never logged, returned by an API or written anywhere else; errors name
+the variable only.
+
+**Kotak Neo credentials** (all five required for live data; without them the app starts, shows why it is not
+logged in, and serves only official EOD files and already-recorded history):
+
+| Variable | Meaning |
+|---|---|
+| `NEO_CONSUMER_KEY` | API access token from the Neo dashboard |
+| `NEO_MOBILE_NUMBER` | Registered mobile number (10 digits, optionally +91) |
+| `NEO_UCC` | Client code (UCC) |
+| `NEO_MPIN` | MPIN (digits) |
+| `NEO_TOTP_SECRET` | Base32 TOTP setup key (the server generates the 6-digit codes) |
+
+**Other settings** (`apps/server/src/config.ts`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` / `HOST` | `8787` / `0.0.0.0` | API listen address |
+| `RISK_FREE_RATE` | `0.065` | Used for IV, Greeks and margin estimates |
+| `HOLIDAYS` | — | Comma-separated `YYYY-MM-DD` exchange holidays, merged with NSE's holiday master |
+| `AUTH_SECRET` | random per boot | HMAC secret for app session tokens — **set it in production** so sessions survive restarts |
+| `DATA_DIR` | `apps/server/data` | User data (`db.json`), recorded sessions and EOD files |
+| `PERSIST` | `true` | `false` keeps user data in memory only |
+| `EOD_BACKFILL_DAYS` | `30` | Sessions checked for missing NSE/BSE files at start and daily (`0` = none) |
+| `SFEED_TOKEN_BUDGET` | `2700` | Cap on streamed SFeed subscriptions (max 2,700 of Kotak's 3,000) |
+| `WEB_DIST` | `apps/web/dist` | Built web app served by the API |
+
+### Network allowlist
+
+The server needs outbound HTTPS (and WSS for the feed) to:
+
+- `*.kotaksecurities.com` — login, REST, scrip master, SFeed websocket
+- `nsearchives.nseindia.com`, `archives.nseindia.com` — NSE bhavcopy, index closes, participant files
+- `www.nseindia.com` — FII/DII and holiday master (unofficial JSON; blank when blocked)
+- `www.bseindia.com` — SENSEX / BANKEX F&O bhavcopy
+
+## Health
+
+- **`GET /api/health`** — clock, feed status and the provider's report (no secrets): Kotak login state, feed
+  connection and subscriptions, instrument master, recorder (`firstRecordedSession`, number of sessions), EOD
+  files loaded per source, stock-option sweep, background jobs with their last error and next retry. The same
+  summary is logged at start (`live data: …`).
+- **Feed chip** (top bar of the web app) — `LIVE` / `CONNECTING` / `OFFLINE` with an amber dot when the feed is
+  connected but quiet; click it for the reason, login / feed / instrument-master state, last tick, recording
+  start and the date of each official file loaded. A banner under the header explains blanks while the feed is
+  not live.
 
 ## Features (38 screens)
 
 | Area | Screens |
 |---|---|
 | Market | Home dashboard, Watchlist, Option Chain, Synopsis heat-map, FII/DII, Participant-wise OI |
-| Trend & flow | 15-min opening range breakout (trend detector), 1-minute order flow (buyer vs seller volume) |
-| Open interest | OI analysis (strike-wise OI & change), Multi-strike OI, OI trend, PCR, Max pain, Futures OI & build-up, Build-up breadth |
+| Trend & flow | Opening range breakout (trend detector), 1-minute order flow (buyer vs seller volume estimate) |
+| Open interest | OI analysis, Multi-strike OI, OI trend, PCR, Max pain, Futures OI & build-up, Build-up breadth |
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
 | Trade | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts |
-| Algo | Algo Strategies panel — backtest (one day / many days) and deploy rule-based algos on the paper account; algos: Strategy 2 (₹20 premium ladder) and Strategy 3 (₹50 premium ladder) |
-| Scanners | 20 F&O scanners, Unusual option activity, Order-book analytics |
+| Algo | Algo Strategies — Strategy 2 (₹20 premium ladder) and Strategy 3 (₹50 premium ladder) |
+| Scanners | 23 F&O scanners (incl. 3 opening-range scans), Unusual option activity, Order-book analytics |
 | More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
 
 Highlights:
 
-- **Strategy builder** — editable legs, payoff at expiry and on any target date, IV what-if, ±1σ/±2σ bands,
-  breakevens, max profit/loss (with unlimited detection), probability of profit, expected P&L, net Greeks,
-  SPAN-style margin with hedge benefit, scenario grid, shareable links, save as virtual strategy, execute as a
-  paper basket order.
-- **Optimizer** — scans ~460,000 1–4 leg combinations on the live chain and ranks them by reward-to-risk,
-  profit at target or POP, honouring stop-loss, max legs and capital limits.
-- **Trade recap** — load the option chain as it was at any past minute, build a position at those prices and
-  replay its P&L to expiry.
-- **15-minute opening range breakout** — the high and low of the first 15-minute candle (09:15–09:30) are
-  recorded every session; a 1-minute close beyond either level marks the market as trending up or down
-  (sideways while inside), with whipsaw / failed-breakout detection, an all-F&O scanner, a 20-session record,
-  trend scanners, a dashboard column and break alerts. 5- and 30-minute ranges and a "any touch" rule are
-  selectable.
-- **1-minute order flow** — each minute's traded volume of a future or option is split into aggressive buy vs
-  sell volume (delta, buy %, cumulative delta) with the last completed minute, the minute in progress,
-  last-5-minute and session totals; also shown in Order Book Analytics, on the dashboard and as an alert.
-- **Algo Strategies** — a separate panel for automated strategies, built so new algos plug in (each algo is a
-  pure state machine in `packages/core/src/algo`, registered in `ALGOS`). The first one is **Strategy 2 · starting
-  premium ₹20**: at 09:20 sell an OTM CE and PE nearest ₹20 (NIFTY strikes in multiples of 100); each time either
-  leg's premium climbs another 50% (₹20 → ₹30 → ₹45 → ₹67.5 …, no limit) buy back the opposite leg and sell the OTM
-  strike nearest the new level; if no eligible OTM strike exists, square off and stop for the day; square off
-  everything at 15:25. Backtest any past session minute by minute (charts, trade log, charges) or the last 20–250
-  sessions (win rate, drawdown, equity curve), then deploy it on the paper account: it trades through the paper
-  broker every 2 seconds (MIS orders tagged `algo:<id>`), sends notifications, and runs every trading day until
-  stopped. **Strategy 3 · starting premium ₹50** uses exactly the same rules from ₹50 premiums
-  (₹50 → ₹75 → ₹112.5 → ₹168.75 …), i.e. strikes closer to the money.
-- **Live updates** — WebSocket ticker and notifications; analytics views poll every few seconds.
+- **Strategy builder** — editable legs on the live chain, payoff at expiry and on any target date, IV what-if,
+  ±1σ/±2σ bands, breakevens, max profit/loss, probability of profit, net Greeks, SPAN-style margin estimate,
+  scenario grid, shareable links, save as virtual strategy, execute as a paper basket order.
+- **Optimizer** — scans hundreds of thousands of 1–4 leg combinations on the live chain and ranks them by
+  reward-to-risk, profit at target or POP, honouring stop-loss, max legs and capital limits.
+- **Trade recap** — load the option chain as recorded at any past minute, build a position at those prices
+  and replay its P&L. Only dates the recorder captured are available.
+- **Opening range breakout** — the high and low of the first 5/15/30 minutes from recorded (or Kotak) 1-minute
+  bars; a close beyond either level marks the market trending, with whipsaw detection, scanners and alerts.
+- **Order flow** — each minute's traded volume split into estimated buyer vs seller volume (plus an
+  unclassified share) from live ticks; shown with the method and unclassified %.
+- **Paper broker** — market / limit / SL / SL-M, NRML / MIS; fills at the live bid/ask (a market order with no
+  live bid/ask is rejected); expiry settlement from the official settlement price.
+- **Algo Strategies** — each algo is a pure state machine in `packages/core/src/algo`, registered in `ALGOS`.
+  **Strategy 2**: at 09:20 sell an OTM CE and PE nearest ₹20 (NIFTY strikes in multiples of 100); each time
+  either leg's premium climbs another 50 % buy back the opposite leg and sell the OTM strike nearest the new
+  level; square off at 15:25 or when no eligible strike exists. **Strategy 3** uses the same rules from ₹50.
+  Deployed runs trade **on the live chain through the paper broker** (MIS orders tagged `algo:<id>`).
+  **Backtests replay only sessions the recorder captured**, minute by minute at recorded prices; with no
+  recorded session the backtest is blank.
+- **Live updates** — WebSocket ticker, feed status and notifications; analytics views poll every few seconds.
 - **Installable PWA** — mobile-first layout with bottom tabs, dark/light themes, offline app shell.
 
 ## Architecture
@@ -82,69 +170,44 @@ Highlights:
 ```
 packages/core   Pure TypeScript analytics shared by server and browser
                 Black-Scholes & Greeks, IV solver, IST expiry calendar, payoff/breakeven/POP,
-                max pain, PCR, build-up, HV/IVR/IVP/cone, SPAN-style margin, templates, optimizer
+                max pain, PCR, build-up, HV/IVR/IVP/cone, SPAN-style margin estimate, templates,
+                optimizer, algos
 apps/server     Fastify REST + WebSocket API
-                market/   deterministic market engine, clock, instrument universe, FII/DII & participant flows
-                services/ analytics per tool, scanners/UOA/synopsis/order book, pricer, paper broker,
-                          strategy manager, alerts, watchlists
-                store/    JSON document store (atomic writes)
+                live/     Kotak session/REST/scrip master/SFeed, NSE/BSE EOD files, recorder, stores,
+                          exchange calendar, IST clock, pricing, provider (health)
+                services/ analytics, market tools, pricer, paper broker, strategies, alerts,
+                          watchlists, algos
+                store/    JSON document store for user data (atomic writes)
 apps/web        React 18 + Vite + Tailwind + ECharts PWA (React Query, Zustand)
 ```
 
-### How the simulated market works
-
-Every observable is a **pure function of (instrument, contract, timestamp)**:
-
-- Daily closes come from a GARCH-clustered market factor plus sector and idiosyncratic factors with mild mean
-  reversion; ATM IV mean-reverts and jumps when prices fall (leverage effect).
-- Intraday prices are Brownian bridges between each day's open and close with a U-shaped volatility profile;
-  stocks are correlated with the index path.
-- Option IV follows a skew/smile in standardised moneyness with a term structure; premiums are Black-Scholes
-  on the forward implied by futures carry. Chains are tested to be free of static arbitrage.
-- OI is a closed-form function of moneyness, sessions-to-expiry, round-number strikes and slowly varying
-  per-contract factors (with occasional heavy-writing events), interpolated through each session so OI is
-  continuous across days.
-
-- Realised close-to-close vol is normalised to sit a little below implied vol (NIFTY ≈ 11% realised vs ≈ 12%
-  implied), with about 15% of daily variance arriving in the overnight gap.
-- Options decay in **trading time**: each session carries 88% of a trading day's variance and each overnight
-  or weekend 12%, so premiums lose value through the day as NSE weeklies do. Quoted IVs are the calendar-time
-  equivalent, so they drift down through a session and rise after weekends.
-- The live LTP adds per-second micro-structure noise; candle highs/lows (and the opening range) include those
-  intra-minute prints.
-
-Because nothing is stored, any past minute can be recomputed exactly — that is what powers Trade Recap,
-multi-strike OI history, IV percentiles and "as-of" option chains (`GET /api/chain/NIFTY?at=<epoch ms>`).
-
-## Configuration
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PORT` / `HOST` | `8787` / `0.0.0.0` | API listen address |
-| `CLOCK_MODE` | `demo` | `demo` = always-open simulated session; `live` = follow the real IST clock (closed outside 09:15–15:30) |
-| `SIM_SPEED` | `1` | Demo clock speed multiplier |
-| `SIM_START` | now / 10:30 | Demo start, e.g. `2026-10-09T11:30` (IST) |
-| `MARKET_SEED` | `q26` | Seed for the market generator |
-| `RISK_FREE_RATE` | `0.065` | Used for pricing and Greeks |
-| `HOLIDAYS` | — | Comma-separated `YYYY-MM-DD` exchange holidays |
-| `AUTH_SECRET` | random per boot | HMAC secret for session tokens — **set it in production** so sessions survive restarts |
-| `DATA_DIR` | `apps/server/data` | Where user data (`db.json`) is stored |
-| `PERSIST` | `true` | `false` keeps user data in memory only |
-
-> **Upgrading:** simulator calibration changes alter simulated history at the same timestamps. Paper orders,
-> strategies and alerts saved by an older version keep their old fill prices and will reprice against the new
-> history — reset the paper account (Positions → Funds) after upgrading if that matters to you.
+Services read market data only through the `MarketDataProvider` (`apps/server/src/live/provider.ts`). A missing
+value throws `NoLiveData(reason)` (HTTP 503, `code: 'NO_LIVE_DATA'`) or is returned as `null` with the reason in
+`gaps`.
 
 ## Testing
 
 ```bash
-npm test             # core unit tests (pricing, Greeks, calendar, payoff, margin, optimizer) + API integration tests
-npm run typecheck
-npm run build && npm run test:e2e   # Playwright: every screen on desktop & mobile + key user flows
+npm run typecheck    # core, server, web
+npm test             # core, server and web unit/integration tests (test-only fake provider + sample payloads)
+npm run build        # required before e2e: both e2e servers serve apps/web/dist
+npm run test:e2e     # Playwright
 ```
 
-If Playwright browsers aren't installed, run `npx playwright install chromium` or point
-`CHROMIUM_PATH` at an existing Chromium binary.
+The e2e suite (`apps/web/playwright.config.ts`) starts its own servers in two modes:
+
+- **Live-empty** (`live-desktop`, `live-mobile`, `live-master-desktop`) — the production bundle with empty
+  `NEO_*`, an empty temporary data dir and network blocked: every page must show its blank states with reasons.
+  `live-master-desktop` adds a same-day cached instrument master (test rows), so contracts are known but
+  nothing is priced and a paper market order is rejected with "No live bid/ask".
+- **Fixture** (`fixture-desktop`) — a test-only server (`apps/server/test/support/e2e-server.ts`, fake provider
+  with sample data) where real values must render. It is never part of `npm start`.
+
+Ports: `E2E_PORT` (8790), `E2E_MASTER_PORT` (8792), `E2E_FIXTURE_PORT` (8791). If Playwright browsers are not
+installed, run `npx playwright install chromium` or point `CHROMIUM_PATH` at a Chromium binary.
+
+Tests never call Kotak, NSE or BSE; the code has not yet been run against the real endpoints from the
+development sandbox (see the Status section of the design doc).
 
 ## Publishing to Google Play
 
@@ -155,15 +218,18 @@ and add the generated Digital Asset Links file at `/.well-known/assetlinks.json`
 
 ## API overview
 
-All endpoints are under `/api`. Market data: `meta`, `quotes`, `indices`, `expiries/:symbol`, `chain/:symbol`,
-`futures/:symbol`, `candles/:symbol`, `dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`,
-`oi/futures`, `oi/breadth`, `participants`, `fii-dii`, `vol/{iv-chart,skew,surface,cone}/:symbol`, `vol/table`,
-`straddle/:symbol`, `orb`, `orb/:symbol`, `orb/:symbol/history`, `order-flow/:symbol`, `algos`, `algos/:id/defaults`,
-`algos/:id/backtest` (POST), `algos/:id/backtest-range` (POST), `strategy-chart` (POST), `optimizer` (POST), `recap` (POST), `scanners[/:id]`, `unusual`,
-`synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`, `strategies`, `broker/*`,
-`alerts`, `notifications`, `watchlists`, `algo-runs` (list/deploy, `:id/stop`, delete). WebSocket: `/ws` (ticks, notifications, order updates).
+All endpoints are under `/api`. Status: `health`, `meta`, `clock`. Market data: `quotes`, `indices`,
+`expiries/:symbol`, `chain/:symbol` (`?at=` for a recorded minute), `futures/:symbol`, `candles/:symbol`,
+`dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`, `oi/futures`, `oi/breadth`, `participants`,
+`fii-dii`, `vol/{iv-chart,skew,surface,cone}/:symbol`, `vol/table`, `straddle/:symbol`, `orb`, `orb/:symbol`,
+`orb/:symbol/history`, `order-flow/:symbol`, `algos`, `algos/:id/defaults`, `algos/:id/backtest` (POST),
+`algos/:id/backtest-range` (POST), `strategy-chart` (POST), `optimizer` (POST), `recap` (POST),
+`scanners[/:id]`, `unusual`, `synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`,
+`strategies`, `broker/*`, `alerts`, `notifications`, `watchlists`, `algo-runs` (list/deploy, `:id/stop`,
+delete). WebSocket: `/ws` (ticks, feed status, notifications, order updates).
 
 ## Disclaimer
 
-Educational and analytical software. Simulated data; paper trading only; not investment advice.
+Educational and analytical software. Live data from your own Kotak Neo account and public NSE/BSE files —
+respect their terms of use. Paper trading only; not investment advice.
 "Quantsapp" is a trademark of its owner; this project is independent and not affiliated with it.
