@@ -322,12 +322,15 @@ export class Analytics {
     return [...set].sort((a, b) => a - b);
   }
 
-  /** Runs `fn`; NoLiveData → `fallback`. */
-  private orElse<T>(fn: () => T, fallback: T): T {
+  /** Runs `fn`; NoLiveData → `fallback` (its reason handed to `onNoLive`). */
+  private orElse<T>(fn: () => T, fallback: T, onNoLive?: (reason: string) => void): T {
     try {
       return fn();
     } catch (e) {
-      if (e instanceof NoLiveData) return fallback;
+      if (e instanceof NoLiveData) {
+        onNoLive?.(e.message);
+        return fallback;
+      }
       throw e;
     }
   }
@@ -1128,7 +1131,9 @@ export class Analytics {
     const md = this.md;
     const gaps = new Gaps();
     const stocks = md.ref.underlyings().filter((u) => u.kind === 'stock');
-    const live = this.orElse(() => this.futuresBuildUp(), [] as FuturesBuildUpRow[]).filter((r) => r.kind === 'stock');
+    let noLive: string | undefined;
+    const live = this.orElse(() => this.futuresBuildUp(), [] as FuturesBuildUpRow[], (why) => (noLive = why)).filter((r) => r.kind === 'stock');
+    if (!live.length) gaps.add('overall', noLive ?? 'No live stock futures');
     const overall = emptyCounts();
     const sectors = new Map<string, { counts: BuildUpCounts; symbols: FuturesBuildUpRow[] }>();
     let classified = 0;

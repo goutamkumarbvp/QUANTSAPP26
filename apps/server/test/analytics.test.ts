@@ -352,6 +352,20 @@ describe('futures build-up and breadth', () => {
     ]);
     expect(b.gaps).toBeUndefined();
   });
+
+  it('breadth with official history but no live futures quote at all: the blank live counts carry the reason', () => {
+    const { p, book, an, m1 } = setup();
+    for (const k of Object.keys(book.futures)) {
+      const [symbol, expiry] = k.split('|');
+      p.live.clearQuote(futKey(symbol, expiry));
+    }
+    p.history.writeFo('2026-10-08', { futures: [{ symbol: 'RELIANCE', date: '2026-10-08', expiry: m1, close: 1391, oi: 1_000_000, volume: 10 }] });
+    p.history.writeFo(PREV, { futures: [{ symbol: 'RELIANCE', date: PREV, expiry: m1, close: 1387, oi: 1_050_000, volume: 10 }] });
+    const b = an.breadth();
+    expect([b.overall, b.classified]).toEqual([null, 0]);
+    expect(b.history.map((h) => h.source)).toEqual(['eod']);
+    expect(b.gaps?.overall).toMatch(/No live futures quotes yet/);
+  });
 });
 
 describe('official FII/DII and participant OI', () => {
