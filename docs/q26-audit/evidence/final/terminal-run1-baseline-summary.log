@@ -1,0 +1,33 @@
+# Terminal run 1 (baseline ea1be96 build, before the terminal fixes): 2073 lines
+per-request JSON line: 1420 (68%)
+NSE retry line: 424 (20%)
+EOD line: 122 (6%)
+other JSON line: 93 (4%)
+Kotak line: 14 (1%)
+
+# first 25 lines
+{"level":30,"time":1792411166077,"pid":9964,"hostname":"vm","msg":"Server listening at http://127.0.0.1:8787"}
+{"level":30,"time":1792411166078,"pid":9964,"hostname":"vm","msg":"Server listening at http://192.0.2.2:8787"}
+{"level":30,"time":1792411166078,"pid":9964,"hostname":"vm","msg":"Q26 Options API on :8787 — live data only, IST 2026-10-19 17:29 (market closed)"}
+{"level":30,"time":1792411166079,"pid":9964,"hostname":"vm","msg":"live data: Kotak not logged in (Not logged in to Kotak Neo); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0"}
+{"level":40,"time":1792411166083,"pid":9964,"hostname":"vm","msg":"www.nseindia.com/: www.nseindia.com/: fetch failed (ENOTFOUND); retry 1/2 in 2 s"}
+{"level":40,"time":1792411166084,"pid":9964,"hostname":"vm","msg":"Kotak TOTP login failed: network error (fetch failed); next automatic login not before 2026-10-19T12:00:26.084Z"}
+{"level":40,"time":1792411166084,"pid":9964,"hostname":"vm","msg":"live: login failed (Kotak TOTP login failed: network error (fetch failed)); next attempt 2026-10-19T12:00:27.084Z"}
+{"level":30,"time":1792411166085,"pid":9964,"hostname":"vm","msg":"live data: Kotak not logged in (Kotak TOTP login failed: network error (fetch failed)); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0"}
+{"level":40,"time":1792411169089,"pid":9964,"hostname":"vm","msg":"www.nseindia.com/: www.nseindia.com/: fetch failed (ENOTFOUND); retry 2/2 in 4 s"}
+{"level":30,"time":1792411169234,"pid":9964,"hostname":"vm","reqId":"req-1","req":{"method":"GET","url":"/api/health","host":"127.0.0.1:8787","remoteAddress":"127.0.0.1","remotePort":39972},"msg":"incoming request"}
+{"level":30,"time":1792411169245,"pid":9964,"hostname":"vm","reqId":"req-1","res":{"statusCode":200},"responseTime":9.568466000000171,"msg":"request completed"}
+{"level":30,"time":1792411169258,"pid":9964,"hostname":"vm","reqId":"req-2","req":{"method":"GET","url":"/api/health","host":"127.0.0.1:8787","remoteAddress":"127.0.0.1","remotePort":39974},"msg":"incoming request"}
+{"level":30,"time":1792411169260,"pid":9964,"hostname":"vm","reqId":"req-2","res":{"statusCode":200},"responseTime":1.7343810000002122,"msg":"request completed"}
+{"level":40,"time":1792411173096,"pid":9964,"hostname":"vm","msg":"EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)"}
+{"level":40,"time":1792411173105,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/indices/ind_close_all_16102026.csv: nsearchives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND); retry 1/2 in 2 s"}
+{"level":40,"time":1792411175110,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/indices/ind_close_all_16102026.csv: nsearchives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND); retry 2/2 in 4 s"}
+{"level":40,"time":1792411179118,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND); trying archives.nseindia.com"}
+{"level":40,"time":1792411179124,"pid":9964,"hostname":"vm","msg":"archives.nseindia.com/content/indices/ind_close_all_16102026.csv: archives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND); retry 1/2 in 2 s"}
+{"level":40,"time":1792411181130,"pid":9964,"hostname":"vm","msg":"archives.nseindia.com/content/indices/ind_close_all_16102026.csv: archives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND); retry 2/2 in 4 s"}
+{"level":40,"time":1792411185135,"pid":9964,"hostname":"vm","msg":"EOD: index 2026-10-16 failed: archives.nseindia.com/content/indices/ind_close_all_16102026.csv: fetch failed (ENOTFOUND)"}
+{"level":40,"time":1792411185139,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: fetch failed (ENOTFOUND); retry 1/2 in 2 s"}
+{"level":40,"time":1792411187144,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: fetch failed (ENOTFOUND); retry 2/2 in 4 s"}
+{"level":40,"time":1792411191152,"pid":9964,"hostname":"vm","msg":"nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: fetch failed (ENOTFOUND); trying archives.nseindia.com"}
+{"level":40,"time":1792411191161,"pid":9964,"hostname":"vm","msg":"archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: fetch failed (ENOTFOUND); retry 1/2 in 2 s"}
+{"level":40,"time":1792411193166,"pid":9964,"hostname":"vm","msg":"archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20261016_F_0000.csv.zip: fetch failed (ENOTFOUND); retry 2/2 in 4 s"}

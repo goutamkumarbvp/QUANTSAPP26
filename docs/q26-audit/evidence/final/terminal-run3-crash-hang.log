@@ -1,0 +1,45 @@
+21:43:14 SUPER supervisor: supervising apps/server/dist/server.mjs; health http://127.0.0.1:8798/api/health
+21:43:14 SUPER supervisor: server started (pid 17364)
+21:43:14 INFO  Server listening at http://127.0.0.1:8798
+21:43:14 INFO  Server listening at http://192.0.2.2:8798
+21:43:14 INFO  Q26 Options on :8798 — open http://localhost:8798 — live data only, paper trading only; IST 2026-10-19 21:43 (market closed)
+21:43:14 INFO  Kotak credentials: found (.env); logging in…
+21:43:14 INFO  login monitor every 5 s, watchdog every 30 s (supervised), weekly audit Saturdays 10:00 IST
+21:43:14 WARN  Kotak TOTP login failed: network error (fetch failed); next automatic login not before 21:43:19 IST
+21:43:14 INFO  live data: Kotak not logged in (Kotak TOTP login failed: network error (fetch failed)); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0
+21:43:15 INFO  weekly audit (manual) started
+21:43:21 WARN  EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)
+21:43:44 WARN  watchdog: Broker login: not logged in; the login monitor is retrying (last problem: Kotak TOTP login failed: network error (fetch failed))
+21:43:44 WARN  watchdog: Instrument master: not loaded; needs a Kotak login to download
+21:44:03 WARN  EOD: NSE/BSE unreachable (fetch failed (ENOTFOUND)); end-of-day backfill stopped — next attempt right away (today's files)
+21:44:14 WARN  watchdog: End-of-day files: NSE/BSE unreachable (fetch failed (ENOTFOUND)); backfill retries on schedule
+21:44:23 SUPER supervisor: server killed by SIGKILL after 69 s; starting again in 1 s
+21:44:24 SUPER supervisor: server started (pid 18959, restart #1)
+21:44:25 INFO  Server listening at http://127.0.0.1:8798
+21:44:25 INFO  Server listening at http://192.0.2.2:8798
+21:44:25 INFO  Q26 Options on :8798 — open http://localhost:8798 — live data only, paper trading only; IST 2026-10-19 21:44 (market closed)
+21:44:25 INFO  Kotak credentials: found (.env); logging in…
+21:44:25 INFO  login monitor every 5 s, watchdog every 30 s (supervised), weekly audit Saturdays 10:00 IST
+21:44:25 WARN  Kotak TOTP login failed: network error (fetch failed); next automatic login not before 21:44:30 IST
+21:44:25 INFO  live data: Kotak not logged in (Kotak TOTP login failed: network error (fetch failed)); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0
+21:44:32 WARN  EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)
+21:46:04 SUPER supervisor: health check failed (The operation was aborted due to timeout), 1/3
+21:46:34 SUPER supervisor: health check failed (The operation was aborted due to timeout), 2/3
+21:47:04 SUPER supervisor: health check failed (The operation was aborted due to timeout), 3/3
+21:47:04 SUPER supervisor: server not answering: restarting it
+21:47:19 SUPER supervisor: server killed by SIGKILL after 175 s; starting again in 2 s
+21:47:21 SUPER supervisor: server started (pid 19808, restart #2)
+21:47:22 INFO  Server listening at http://127.0.0.1:8798
+21:47:22 INFO  Server listening at http://192.0.2.2:8798
+21:47:22 INFO  Q26 Options on :8798 — open http://localhost:8798 — live data only, paper trading only; IST 2026-10-19 21:47 (market closed)
+21:47:22 INFO  Kotak credentials: found (.env); logging in…
+21:47:22 INFO  login monitor every 5 s, watchdog every 30 s (supervised), weekly audit Saturdays 10:00 IST
+21:47:22 WARN  Kotak TOTP login failed: network error (fetch failed); next automatic login not before 21:47:27 IST
+21:47:22 INFO  live data: Kotak not logged in (Kotak TOTP login failed: network error (fetch failed)); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0
+21:47:29 WARN  EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)
+21:47:51 WARN  watchdog: Broker login: not logged in; the login monitor is retrying (last problem: Kotak TOTP login failed: network error (fetch failed))
+21:47:51 WARN  watchdog: Instrument master: not loaded; needs a Kotak login to download
+21:48:11 WARN  EOD: NSE/BSE unreachable (fetch failed (ENOTFOUND)); end-of-day backfill stopped — next attempt right away (today's files)
+21:48:21 WARN  watchdog: End-of-day files: NSE/BSE unreachable (fetch failed (ENOTFOUND)); backfill retries on schedule
+21:48:28 SUPER supervisor: SIGINT: stopping the server
+21:48:28 SUPER supervisor: server stopped; supervisor exiting

@@ -265,6 +265,8 @@ interface JobSpec {
   notBefore?: () => number | undefined;
   /** Do not retry after a failure (e.g. no credentials: nothing changes until a restart). */
   once?: boolean;
+  /** The failure is already logged by the job itself (no second line). */
+  quiet?: boolean;
 }
 
 export class LiveProvider implements MarketDataProvider {
@@ -464,7 +466,8 @@ export class LiveProvider implements MarketDataProvider {
     if (!this.session) {
       this.log.warn(`live: ${this.kotakError}; streaming and REST are off`);
       // A same-day cached instrument master loads without Kotak (no network).
-      await this.execJob('refdata', () => this.refreshRefdata(), { ...REFDATA_BACKOFF, once: true });
+      // The instrument master logs its own failure ("Instrument master refresh … failed").
+      await this.execJob('refdata', () => this.refreshRefdata(), { ...REFDATA_BACKOFF, once: true, quiet: true });
       return;
     }
     await this.execJob('login', () => this.login(), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil });
@@ -524,7 +527,7 @@ export class LiveProvider implements MarketDataProvider {
       j.attempts++;
       j.lastError = errMsg(e);
       if (spec.once || this.stopped) {
-        this.log.warn(`live: ${name} failed: ${j.lastError}`);
+        if (!spec.quiet) this.log.warn(`live: ${name} failed: ${j.lastError}`);
         return;
       }
       let at = this.now() + Math.min(spec.maxMs, spec.baseMs * 2 ** (j.attempts - 1));

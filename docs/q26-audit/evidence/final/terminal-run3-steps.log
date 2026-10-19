@@ -1,0 +1,7 @@
+== audit run: Audit started
+== audit finished after ~60s
+== 16:14:23 kill -9 child 17364 (crash test)
+== 16:14:38 SIGSTOP child 18959 (hang test)
+== 16:18:28 child now 19808 (was 18959)
+== health after hang restart: 200
+== done

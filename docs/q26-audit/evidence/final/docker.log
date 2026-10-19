@@ -1,0 +1,59 @@
+# docker build (sandbox CA + proxy build-args only; committed Dockerfile otherwise unchanged)
+8a9,11
+> # SANDBOX ONLY: the audit environment's HTTPS proxy CA (not in the committed Dockerfile)
+> COPY --from=sandboxca ca.crt /tmp/sandbox-ca.crt
+> ENV NODE_EXTRA_CA_CERTS=/tmp/sandbox-ca.crt
+
+#4 DONE 0.0s
+#5 [context sandboxca] load from client
+#5 DONE 0.0s
+#6 [build  1/10] FROM docker.io/library/node:22-alpine
+#6 DONE 0.0s
+#7 [internal] load build context
+#7 DONE 0.5s
+#8 [build  2/10] WORKDIR /app
+#8 DONE 9.0s
+#9 [build  3/10] COPY package.json package-lock.json ./
+#9 DONE 1.2s
+#10 [build  4/10] COPY packages/core/package.json packages/core/
+#10 DONE 1.2s
+#11 [build  5/10] COPY apps/server/package.json apps/server/
+#11 DONE 1.1s
+#12 [build  6/10] COPY apps/web/package.json apps/web/
+#12 DONE 1.1s
+#13 [build  7/10] COPY --from=sandboxca ca.crt /tmp/sandbox-ca.crt
+#13 DONE 1.1s
+#14 [build  8/10] RUN npm ci
+#14 DONE 11.6s
+#15 [build  9/10] COPY . .
+#15 DONE 2.9s
+#16 [build 10/10] RUN npm run build && npm prune --omit=dev
+#16 DONE 23.9s
+#17 [stage-1 3/8] COPY --from=build /app/node_modules ./node_modules
+#17 DONE 1.2s
+#18 [stage-1 4/8] COPY --from=build /app/apps/server/dist ./apps/server/dist
+#18 DONE 1.4s
+#19 [stage-1 5/8] COPY --from=build /app/apps/server/package.json ./apps/server/
+#19 DONE 2.2s
+#20 [stage-1 6/8] COPY --from=build /app/apps/web/dist ./apps/web/dist
+#20 DONE 1.9s
+#21 [stage-1 7/8] COPY --from=build /app/scripts/supervise.mjs ./scripts/
+#21 DONE 2.6s
+#22 [stage-1 8/8] RUN mkdir -p /app/apps/server/data && chown -R node:node /app/apps/server/data
+#22 DONE 2.1s
+#23 naming to docker.io/library/q26-options:audit done
+#23 DONE 1.4s
+build exit 0
+
+# docker run checks
+image: q26-options:audit 266MB
+history mentions proxy/sandbox-ca: 0
+docker run -d --name q26audit --network host -e PORT=8899 -e HOST=127.0.0.1 -e AUTH_SECRET=<random 48 hex> -e EOD_BACKFILL_DAYS=0 q26-options:audit   (no NEO_* credentials)
+GET /api/health -> 200
+docker exec id -> uid=1000(node) gid=1000(node)
+ps: PID 1 node scripts/supervise.mjs ; PID 14 /usr/local/bin/node /app/apps/server/dist/server.mjs (user node)
+/app/apps/server/data owned by node:node, ops/journal created
+GET /api/ops -> broker DISCONNECTED | feed DATA UNAVAILABLE | live NOT READY | login NO_CREDENTIALS | watchdog supervised true
+GET / -> 200 (web app); GET /..%2f..%2fpackage.json, /../../package.json, /%2e%2e/%2e%2e/apps/server/package.json -> the SPA index.html (no file disclosure)
+docker inspect health -> healthy (failing streak 0, probe exit codes 0 0)
+docker stop -t 20 -> supervisor: SIGTERM: stopping the server / server stopped; supervisor exiting; container exit 0

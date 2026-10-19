@@ -103,7 +103,7 @@ app.log.info(`Q26 Options on :${config.port} — open http://localhost:${config.
 app.log.info(
   config.neo
     ? `Kotak credentials: found (${envFiles.length ? envFiles.map((f) => path.relative(process.cwd(), f) || f).join(', ') : 'environment'}); logging in…`
-    : `Kotak credentials: ${config.neoError ?? 'missing'} — live quotes are off until they are set`,
+    : `${config.neoError ?? 'Kotak credentials missing'} — live quotes are off until they are set`,
 );
 if (services.db.recoveredFrom) {
   app.log.error(`db.json could not be read and was moved to ${path.basename(services.db.recoveredFrom)}: users, paper trades and alerts start empty. Restore it from a backup (see docs/q26-audit/ROLLBACK_AND_RECOVERY.md)`);

@@ -1,0 +1,23 @@
+21:40:35 SUPER supervisor: supervising apps/server/dist/server.mjs; health http://127.0.0.1:8797/api/health
+21:40:35 SUPER supervisor: server started (pid 15148)
+21:40:36 INFO  Server listening at http://127.0.0.1:8797
+21:40:36 INFO  Server listening at http://192.0.2.2:8797
+21:40:36 INFO  Q26 Options on :8797 — open http://localhost:8797 — live data only, paper trading only; IST 2026-10-19 21:40 (market closed)
+21:40:36 INFO  Kotak credentials: found (.env); logging in…
+21:40:36 INFO  login monitor every 5 s, watchdog every 30 s (supervised), weekly audit Saturdays 10:00 IST
+21:40:36 WARN  Kotak TOTP login failed: network error (fetch failed); next automatic login not before 21:40:41 IST
+21:40:36 INFO  live data: Kotak not logged in (Kotak TOTP login failed: network error (fetch failed)); feed off; instrument master not loaded; EOD F&O none loaded; recorded sessions 0
+21:40:43 WARN  EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)
+21:40:50 INFO  login monitor: Re-login requested from the dashboard
+21:40:50 WARN  watchdog: Broker login: Logging in to Kotak Neo (last problem: Kotak TOTP login failed: network error (fetch failed)) (the login monitor is handling it)
+21:40:50 ERROR watchdog: Instrument master: not loaded; needs a Kotak login to download
+21:40:50 INFO  weekly audit (manual) started
+21:41:05 WARN  watchdog: Broker login: Not logged in: Kotak TOTP login failed: network error (fetch failed). Next automatic attempt 21:41:11 IST (the login monitor is handling it)
+21:41:25 WARN  EOD: NSE/BSE unreachable (fetch failed (ENOTFOUND)); end-of-day backfill stopped — next attempt 21:41:25 IST
+21:41:32 WARN  EOD: holidays: www.nseindia.com/: fetch failed (ENOTFOUND) (HOLIDAYS env list only)
+21:41:35 WARN  watchdog: Background jobs: login: 3 failed attempts (Kotak TOTP login failed: network error (fetch failed)), next 21:41:51 IST
+21:41:35 WARN  watchdog: End-of-day files: NSE/BSE unreachable (fetch failed (ENOTFOUND)); backfill retries on schedule
+21:42:21 WARN  EOD: 2026-10-19 files not fetched — NSE/BSE unreachable (fetch failed (ENOTFOUND)); next attempt 22:41:25 IST
+21:43:55 SUPER supervisor: SIGTERM: stopping the server
+21:43:55 SUPER supervisor: server stopped; supervisor exiting
+exit 124
