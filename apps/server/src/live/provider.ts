@@ -128,7 +128,7 @@ export type MinuteCandle = Candle & { open: number; high: number; low: number };
 /**
  * N-minute bars from real one-minute bars: buckets of N minutes from 09:15 IST, OHLC of the minutes
  * present (a bucket without any minute is not produced), volume summed over the minutes that report
- * one (absent when none does).
+ * one (absent when none does); gapVolume summed likewise, partial when any minute is.
  */
 export function resampleMinutes(minutes: readonly MinuteCandle[], step: number, calendar: TradingCalendar): MinuteCandle[] {
   const sorted = [...minutes].sort((a, b) => a.ts - b.ts);
@@ -142,11 +142,15 @@ export function resampleMinutes(minutes: readonly MinuteCandle[], step: number, 
       cur.low = Math.min(cur.low, m.low);
       cur.close = m.close;
       if (m.volume !== undefined) cur.volume = (cur.volume ?? 0) + m.volume;
+      if (m.gapVolume !== undefined) cur.gapVolume = (cur.gapVolume ?? 0) + m.gapVolume;
+      if (m.partial) cur.partial = true;
       continue;
     }
     if (cur) out.push(cur);
     cur = { ts, open: m.open, high: m.high, low: m.low, close: m.close };
     if (m.volume !== undefined) cur.volume = m.volume;
+    if (m.gapVolume !== undefined) cur.gapVolume = m.gapVolume;
+    if (m.partial) cur.partial = true;
   }
   if (cur) out.push(cur);
   return out;
@@ -154,7 +158,8 @@ export function resampleMinutes(minutes: readonly MinuteCandle[], step: number, 
 
 /**
  * Recorded one-minute bars of an instrument on the given dates: traded minutes only (quote-only
- * minutes carry no trade), plus today's minute in progress when it traded. `missing` lists the
+ * minutes carry no trade), plus today's minute in progress when it traded; each keeps its
+ * gapVolume / partial labels. `missing` lists the
  * dates the recorder has nothing for.
  */
 export function recordedMinutes(intraday: IntradayStore, key: InstrumentKey, dates: readonly string[], today: string): { minutes: MinuteCandle[]; missing: string[] } {
@@ -167,7 +172,17 @@ export function recordedMinutes(intraday: IntradayStore, key: InstrumentKey, dat
       if (lb?.traded && !recs.some((r) => r.ts === lb.ts)) recs.push(lb);
     }
     if (!recs.length) missing.push(d);
-    for (const r of recs) minutes.push({ ts: r.ts, open: r.open, high: r.high, low: r.low, close: r.close, ...(r.volume !== undefined ? { volume: r.volume } : {}) });
+    for (const r of recs)
+      minutes.push({
+        ts: r.ts,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        ...(r.volume !== undefined ? { volume: r.volume } : {}),
+        ...(r.gapVolume !== undefined ? { gapVolume: r.gapVolume } : {}),
+        ...(r.partial ? { partial: true as const } : {}),
+      });
   }
   return { minutes, missing };
 }

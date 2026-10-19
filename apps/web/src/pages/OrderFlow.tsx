@@ -138,12 +138,20 @@ export default function OrderFlow() {
     return {
       ...baseOption(c),
       tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number | null) => formatCompact(v) },
-      xAxis: timeAxis(c),
-      yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatCompact(v) } },
+      // The axis spans the first to the last recorded minute (half a minute either side for the bars), with both end labels shown.
+      xAxis: timeAxis(c, {
+        ...(m.length ? { min: m[0].ts - 30_000, max: m[m.length - 1].ts + 30_000 } : {}),
+        axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => formatSessionTime(v), hideOverlap: true, showMinLabel: true, showMaxLabel: true },
+      }),
+      // Per-minute delta on the left axis, the cumulative delta on its own right axis (one scale would flatten the bars).
+      yAxis: [
+        { type: 'value', name: 'Delta / min', nameTextStyle: { color: c.muted, fontSize: 10 }, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatCompact(v) } },
+        { type: 'value', name: 'Cumulative', nameTextStyle: { color: c.muted, fontSize: 10 }, scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => formatCompact(v) } },
+      ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'Delta (buy − sell)', type: 'bar', itemStyle: { color: c.muted, opacity: 0.5 }, data: m.map((x) => ({ value: [x.ts, u(x.delta)], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: 0.5 } })) },
-        { name: 'Cumulative delta (classified volume)', type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: minuteLine(m, (x) => u(x.cumDelta)) },
+        { name: 'Delta (buy − sell)', type: 'bar', yAxisIndex: 0, itemStyle: { color: c.muted, opacity: 0.5 }, data: m.map((x) => ({ value: [x.ts, u(x.delta)], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: 0.5 } })) },
+        { name: 'Cumulative delta (classified volume)', type: 'line', yAxisIndex: 1, symbol: 'none', ...LINE_GAPS, lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: minuteLine(m, (x) => u(x.cumDelta)) },
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

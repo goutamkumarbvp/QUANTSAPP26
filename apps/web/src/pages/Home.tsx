@@ -7,7 +7,7 @@ import { AsOf, BuildUpBadge, Card, Chg, Coverage, Dash, flowTone, Gaps, Loadable
 import { useLive } from '../lib/hooks';
 import { NAV } from '../lib/nav';
 import { useApp, useTicks } from '../lib/store';
-import { formatCompact, formatDate, formatExpiry, formatFixed, formatIndian, formatSessionTime } from '../lib/format';
+import { formatCompact, formatDate, formatExpiry, formatFixed, formatIndian, formatSessionTime, isNum } from '../lib/format';
 
 /** Sparkline of today's 5-minute closes; blank (not an empty axis) while there are no candles. */
 function Spark({ symbol, up }: { symbol: string; up: boolean }) {
@@ -25,7 +25,19 @@ function Spark({ symbol, up }: { symbol: string; up: boolean }) {
     };
   }, [q.data, up, c]);
   if (!q.data?.length) return <div className="flex h-11 items-center text-2xs text-muted" title={q.error instanceof Error ? q.error.message : undefined}>No intraday candles</div>;
-  return <Chart option={option} height={44} />;
+  // Recorded candles whose volume leaves units out (a recording restart inside a minute, or units reported after a feed gap) say so.
+  const partial = q.data.some((d) => d.partial);
+  const gap = q.data.some((d) => isNum(d.gapVolume) && d.gapVolume > 0);
+  return (
+    <>
+      <Chart option={option} height={44} />
+      {(partial || gap) && (
+        <div className="text-2xs text-warn" title="Candle volume counts only the minutes recorded in full; units reported after a feed gap are not placed in any candle's volume">
+          {partial ? 'Some candle volumes are partial (recording restarted inside a minute)' : 'Some volume was reported after a feed gap (not in candle volume)'}
+        </div>
+      )}
+    </>
+  );
 }
 
 function IndexCard({ q }: { q: Quote }) {

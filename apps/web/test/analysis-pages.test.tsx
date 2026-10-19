@@ -347,6 +347,11 @@ describe('Volatility Skew', () => {
     curves: [{ expiry: '2026-10-20', label: '20 Oct 26', source: 'live', date: '2026-10-19', atmIv: null, forward: null, points: [{ strike: 24000, moneyness: -0.4, ceIv: null, peIv: 13, iv: null }, { strike: 24100, moneyness: 0, ceIv: 12, peIv: null, iv: 12 }] }],
     gaps: { '2026-10-27': 'No NIFTY 2026-10-27 strike has a live premium to solve' },
   };
+  it('a narrow smile has decimal y ticks (not every tick "13%")', () => {
+    render(<Skew />, [[exp, expiries], [key, data]]);
+    const y = (charts[0].option as { yAxis: { axisLabel: { formatter: (v: number) => string } } }).yAxis;
+    expect([12.25, 12.5, 12.75].map((v) => y.axisLabel.formatter(v))).toEqual(['12.25%', '12.50%', '12.75%']);
+  });
   it('missing IVs are gaps; the per-expiry reason is shown; no smoothing', () => {
     const out = decode(render(<Skew />, [[exp, expiries], [key, data]]));
     expect(out).not.toMatch(BAD);
@@ -368,6 +373,16 @@ describe('Volatility Surface', () => {
     symbol: 'NIFTY', spot: 24100, expiries: ['2026-10-20', '2026-10-27'], daysToExpiry: [0.9, 7.9], moneyness: [-2, 0, 2],
     iv: [[null, 13, null], [null, null, null]], strikes: [[null, 24100, null], [null, null, null]], gaps: { '2026-10-27': 'No listed NIFTY 2026-10-27 strike inside the moneyness buckets has a live premium' },
   };
+  it('row labels get the room they need and the colour scale sits below the axis title', () => {
+    render(<Surface />, [[key, data]]);
+    const o = charts[0].option as { grid: { left: number; bottom: number; containLabel: boolean }; yAxis: { data: string[] }; xAxis: { nameGap: number }; visualMap: { bottom: number; itemWidth: number } };
+    const longest = Math.max(...o.yAxis.data.map((l) => l.length));
+    expect(o.yAxis.data[1]).toMatch(/^27.*\(7\.9d\)$/);
+    expect(o.grid.containLabel).toBe(false);
+    expect(o.grid.left).toBeGreaterThanOrEqual(longest * 7);
+    // x labels + title (nameGap below the axis) end above the colour scale (its bar + handle labels).
+    expect(o.grid.bottom - o.xAxis.nameGap - 14).toBeGreaterThan(o.visualMap.bottom + o.visualMap.itemWidth + 30);
+  });
   it('only solved cells are drawn; the empty ones are counted, never interpolated', () => {
     const out = decode(render(<Surface />, [[key, data]]));
     expect(out).not.toMatch(BAD);
@@ -539,6 +554,15 @@ describe('Order Flow', () => {
     expect(out).toContain('Nothing in this minute could be classified as buy or sell');
     expect(out).not.toContain('Simulated');
   });
+  it('delta chart: cumulative delta on its own axis; the x axis runs to the last minute', () => {
+    render(<OrderFlow />, [[key, data]]);
+    const cum = charts.find((c) => JSON.stringify(c.option).includes('Cumulative delta'))!.option as { yAxis: unknown[]; xAxis: { max: number; axisLabel: { showMaxLabel: boolean } }; series: { name: string; yAxisIndex: number }[] };
+    expect(cum.yAxis).toHaveLength(2);
+    expect(cum.series.find((x) => x.name.startsWith('Delta'))!.yAxisIndex).toBe(0);
+    expect(cum.series.find((x) => x.name.startsWith('Cumulative'))!.yAxisIndex).toBe(1);
+    expect(cum.xAxis.max).toBeGreaterThanOrEqual(data.minutes.at(-1)!.ts);
+    expect(cum.xAxis.axisLabel.showMaxLabel).toBe(true);
+  });
   it('a window with no trades is "No trades", not a 50/50 bar', () => {
     const none = sum({ volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, delta: 0, buyPct: null, unclassifiedPct: null, sentiment: 'No trades' });
     const out = decode(render(<OrderFlow />, [[key, { ...data, lotSize: 75, minutes: [], lastMinute: { ...none, ts: T0, close: null }, last5: none, session: none }]]));
@@ -551,7 +575,7 @@ describe('Order Flow', () => {
 describe('Opening Range Breakout', () => {
   const bar = (m: number, o: number) => ({ ts: T0 + m * 60_000, open: o, high: o + 5, low: o - 5, close: o + 1 });
   const orb = (over: Partial<OrbResponse> = {}): OrbResponse => ({
-    symbol: 'NIFTY', date: '2026-10-19', rangeMinutes: 15, rule: 'close', rangeStartTs: T0, rangeEndTs: T0 + 15 * 60_000, live: false, ltp: null, changePct: null, dayHigh: null, dayLow: null,
+    symbol: 'NIFTY', date: '2026-10-19', rangeMinutes: 15, rule: 'close', rangeStartTs: T0, rangeEndTs: T0 + 15 * 60_000, live: false, ltp: null, changePct: null, dayHigh: null, dayLow: null, priceSource: 'close', priceTs: T0 + 4 * 60_000,
     evaluation: {
       rangeMinutes: 15, rule: 'close', complete: true, high: 24105, low: 24095, width: 10, widthPct: 0.04, breaks: [], crossings: [], firstUp: null, firstDown: null, trend: 'sideways', whipsaw: false, position: 'inside', reentered: false, pending: null, last: 24101, toHighPct: 0.01, toLowPct: -0.02,
     },
@@ -569,6 +593,16 @@ describe('Opening Range Breakout', () => {
     expect(out).toContain('ends at 11:00');
     expect(out).toContain('an empty slot, not a candle');
     expect(out).toContain('Avg follow-through —');
+    // Price vs range names the price it is taken at (no live LTP here).
+    expect(out).toMatch(/24,101 \(last recorded 1-min close at \d\d:\d\d\)/);
+  });
+  it('a live session takes price vs range and % from price at the LTP shown', () => {
+    const live = orb({ live: true, ltp: 24120, priceSource: 'ltp', priceTs: T0 + 5 * 60_000, gaps: undefined, evaluation: { ...orb().evaluation, position: 'above', last: 24120, toHighPct: -0.06, toLowPct: -0.1 } });
+    const out = decode(render(<Orb />, keys(live, scan, hist)));
+    expect(out).not.toMatch(BAD);
+    expect(out).toContain('24,120 (LTP)');
+    expect(out).toContain('from LTP');
+    expect(out).not.toContain('last recorded 1-min close');
   });
   it('a forming range shows no position or break, from the bars that exist', () => {
     const forming = orb({ live: true, evaluation: { ...orb().evaluation, complete: false, trend: 'forming', position: 'inside', toHighPct: Number.NaN, toLowPct: Number.NaN, widthPct: Number.NaN }, gaps: undefined, ltp: 24101 });

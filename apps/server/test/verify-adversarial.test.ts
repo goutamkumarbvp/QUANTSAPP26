@@ -358,6 +358,38 @@ describe('?at= at the first and last recorded minute', () => {
     await expect(buildOptionChain(p, 'BANKNIFTY', e, { at: hm(d, '12:02') })).rejects.toThrow(/Nothing recorded for BANKNIFTY at 12:02 .*last recorded minute 11:59.*not running/);
   });
 
+  it('fresh spot, stale legs: legs last recorded > 2 min before `at` keep their own ts but are left out of PCR, max pain, ATM IV and IV (gaps.staleLegs)', async () => {
+    const { p, book } = setup({ date: '2026-10-12', time: '11:00' });
+    const d = book.recordedDate;
+    const e = book.expiries.BANKNIFTY[0];
+    const rec = (from: string, to: string, price: number, extra: Partial<MinuteRecord> = {}): MinuteRecord[] => {
+      const out: MinuteRecord[] = [];
+      for (let t = hm(d, from); t < hm(d, to); t += MIN) out.push({ ts: t, open: price, high: price, low: price, close: price, traded: true, ...extra });
+      return out;
+    };
+    p.intraday.addMinutes(spotKey('BANKNIFTY'), rec('09:15', '12:00', 56000));
+    // 56000 legs: last recorded 09:59 (stale at 12:00); 56100 legs: recorded through 11:59.
+    for (const type of ['CE', 'PE'] as const) p.intraday.addMinutes(optKey('BANKNIFTY', e, type, 56000), rec('09:15', '10:00', 800, { oi: 90_000 }));
+    p.intraday.addMinutes(optKey('BANKNIFTY', e, 'CE', 56100), rec('09:15', '12:00', 760, { oi: 40_000 }));
+    p.intraday.addMinutes(optKey('BANKNIFTY', e, 'PE', 56100), rec('09:15', '12:00', 850, { oi: 20_000 }));
+    const c = await buildOptionChain(p, 'BANKNIFTY', e, { at: hm(d, '12:00') });
+    expect(c.spotTs).toBe(hm(d, '11:59'));
+    expect(c.gaps?.staleLegs).toMatch(/^2 of 4 recorded legs were last recorded more than 2 min before 12:00/);
+    const stale = leg(c, 56_000);
+    expect(stale).toMatchObject({ ltp: 800, ts: hm(d, '09:59'), iv: null, ivSource: null, ivTs: null, delta: null });
+    const freshCe = leg(c, 56_100);
+    expect(freshCe.ts).toBe(hm(d, '11:59'));
+    expect(freshCe.iv).not.toBeNull();
+    // Aggregates over the fresh strike only.
+    expect([c.totalCeOi, c.totalPeOi, c.pcr, c.maxPain]).toEqual([40_000, 20_000, 0.5, 56_100]);
+    expect(c.coverage).toMatch(/^1 recorded strikes/);
+    expect(nonFinite(c)).toEqual([]);
+    // Asked at 10:00 the same legs are fresh: no gap, all four in the aggregates.
+    const early = await buildOptionChain(p, 'BANKNIFTY', e, { at: hm(d, '10:00') });
+    expect(early.gaps?.staleLegs).toBeUndefined();
+    expect(early.totalCeOi).toBe(130_000);
+  });
+
   it('a chain with recorded books: ?at=18:00 equals ?at=15:30 (same books, same IV source), not a bookless re-derivation', async () => {
     const { p, book } = setup({ date: '2026-10-12', time: '11:00' });
     const d = book.recordedDate;

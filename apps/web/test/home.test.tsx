@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { ORDER_FLOW_METHOD, type DashboardChain, type DashboardResponse, type Quote } from '@q26/core';
+import { ORDER_FLOW_METHOD, type Candle, type DashboardChain, type DashboardResponse, type Quote } from '@q26/core';
 import Home from '../src/pages/Home';
 import { ApiError } from '../src/lib/api';
 
@@ -60,11 +60,12 @@ const blank: DashboardResponse = {
   },
 };
 
-function render(data: DashboardResponse | ApiError): string {
+function render(data: DashboardResponse | ApiError, seeds: [unknown[], unknown][] = []): string {
   // retryOnMount off: the server-side render must show the cached error state, not start a fetch.
   const qc = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
   if (data instanceof ApiError) qc.getQueryCache().build(qc, { queryKey: ['dashboard'] }).setState({ status: 'error', error: data, fetchStatus: 'idle', errorUpdateCount: 1, errorUpdatedAt: 1 });
   else qc.setQueryData(['dashboard'], data);
+  for (const [key, value] of seeds) qc.setQueryData(key, value);
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -77,6 +78,14 @@ function render(data: DashboardResponse | ApiError): string {
 const BAD = /NaN|undefined|Infinity|>null<|\bnull\b/;
 
 describe('Home dashboard, card by card', () => {
+  it('an index sparkline whose recorded candles carry partial volume says so', () => {
+    const c = (i: number, over: Partial<Candle> = {}): Candle => ({ ts: ts + i * 300_000, open: 24100, high: 24110, low: 24090, close: 24100 + i, volume: null, ...over });
+    const html = render(populated, [[['candles', 'NIFTY', 5], [c(0), c(1, { partial: true })]], [['candles', 'BANKNIFTY', 5], [c(0), c(1)]]]);
+    expect(html).not.toMatch(BAD);
+    expect(html).toContain('Some candle volumes are partial');
+    expect(html.match(/Some candle volumes are partial/g)).toHaveLength(1);
+  });
+
   it('fills the cards that have data and blanks the others with their own reasons', () => {
     const html = render(populated);
     expect(html).not.toMatch(BAD);

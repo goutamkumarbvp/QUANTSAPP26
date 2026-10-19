@@ -165,9 +165,10 @@ describe('LiveProvider end to end (fake fetch + fake socket)', () => {
     expect(h.p.intraday.sessions()).toEqual([DAY]);
 
     const c1 = await h.p.candles(ce(25000), '1min', DAY, DAY);
-    expect(c1).toEqual([{ ts: minute, open: 120.5, high: 121.25, low: 120.5, close: 121.25, volume: 600 }]);
+    // The recording started inside this minute with session volume already traded: its volume is a lower bound (partial).
+    expect(c1).toEqual([{ ts: minute, open: 120.5, high: 121.25, low: 120.5, close: 121.25, volume: 600, partial: true }]);
     const c5 = await h.p.candles(ce(25000), '5min', DAY, DAY);
-    expect(c5).toEqual([{ ts: Date.parse(`${DAY}T04:30:00Z`), open: 120.5, high: 121.25, low: 120.5, close: 121.25, volume: 600 }]);
+    expect(c5).toEqual([{ ts: Date.parse(`${DAY}T04:30:00Z`), open: 120.5, high: 121.25, low: 120.5, close: 121.25, volume: 600, partial: true }]);
 
     const r = h.p.healthReport();
     expect(r.kotak.loggedIn).toBe(true);

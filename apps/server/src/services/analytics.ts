@@ -32,6 +32,7 @@ import {
   MARKET_CLOSE_MIN,
   maxPain,
   optimizeStrategies,
+  orbAtPrice,
   SESSION_MINUTES,
   sideSign,
   STOCK_MARGIN,
@@ -622,13 +623,17 @@ export class Analytics {
     const live = date === st.date && st.status === 'open';
     const day = this.recordedDay(s, date, live, true) ?? (await this.kotakDay(s, date));
     if (!day.bars.length) throw new NoLiveData(`No ${s} trade recorded on ${date} yet`);
-    const ev = this.evaluate(day, s, date, live ? now : md.calendar.ts(date, M), rangeMinutes, rule);
     const last = day.bars[day.bars.length - 1];
+    // Price vs range uses the price shown: the live LTP when there is one, else the last recorded close.
+    const spotQ = live ? md.live.quote(spotKey(s)) : undefined;
+    const liveLtp = live ? livePrice(md, spotQ) : null;
+    const ev0 = this.evaluate(day, s, date, live ? now : md.calendar.ts(date, M), rangeMinutes, rule);
+    const ev = liveLtp !== null ? orbAtPrice(ev0, liveLtp) : ev0;
     const gaps = new Gaps();
     // A completed session's close and day range come from bars that reach its close only.
     const whole = live || last.ts >= md.calendar.ts(date, M - ORB_CLOSE_SLACK_MIN);
     if (!whole) gaps.add('day', `${day.source === 'kotak' ? 'Kotak 1-minute history' : 'Recording'} of ${s} on ${date} ends at ${formatTimeIST(last.ts + MINUTE)}: the session's last price and day high/low are not known`);
-    const ltp = whole ? ((live ? livePrice(md, md.live.quote(spotKey(s))) : null) ?? last.close) : null;
+    const ltp = whole ? (liveLtp ?? last.close) : null;
     return {
       symbol: s,
       date,
@@ -642,6 +647,8 @@ export class Analytics {
       dayHigh: whole ? Math.max(...day.bars.map((b) => b.high)) : null,
       dayLow: whole ? Math.min(...day.bars.map((b) => b.low)) : null,
       evaluation: ev,
+      priceSource: liveLtp !== null ? 'ltp' : 'close',
+      priceTs: liveLtp !== null && spotQ ? spotQ.ts : last.ts,
       summary: describeOrb(ev),
       bars: day.bars,
       source: day.source,

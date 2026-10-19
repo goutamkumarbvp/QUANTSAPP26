@@ -5,7 +5,7 @@ import { formatExpiry, formatINR, formatIndian, type OptimizerCandidate } from '
 import { PayoffChart, StrategySummary, useStrategyView } from '../components/Payoff';
 import { ExpirySelect, SymbolSelect } from '../components/pickers';
 import { AsOf, Card, Coverage, cx, ErrorState, Field, NoData, PageHeader, Segmented, Spinner, Toggle } from '../components/ui';
-import { api } from '../lib/api';
+import { api, errorText } from '../lib/api';
 import { formatDateTime, isNum } from '../lib/format';
 import { useChain } from '../lib/hooks';
 import { useApp, useBuilder } from '../lib/store';
@@ -82,6 +82,16 @@ export default function Optimizer() {
   });
   const res = run.data;
   const chosen = res?.results[selected];
+  // Why "Find best strategies" is off, shown beside the button (not only as a tooltip).
+  const blockReason = !chain.data
+    ? chain.error
+      ? `The option chain is not available: ${errorText(chain.error)}`
+      : 'Loading the live option chain…'
+    : !(Number(target) > 0)
+      ? spot
+        ? 'Enter a target price'
+        : `Enter a target price (there is no live ${symbol} spot to pre-fill it from)`
+      : null;
 
   return (
     <div className="space-y-3">
@@ -126,9 +136,10 @@ export default function Optimizer() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Toggle checked={unlimited} onChange={setUnlimited} label="Allow unlimited-risk strategies" />
-          <button className="btn-primary" disabled={!chain.data || !target || run.isPending} title={!chain.data ? 'The live option chain has not loaded' : !target ? 'Enter a target price' : undefined} onClick={() => run.mutate()}>
+          <button className="btn-primary" disabled={!!blockReason || run.isPending} title={blockReason ?? undefined} onClick={() => run.mutate()}>
             {run.isPending ? 'Scanning combinations…' : '⚙ Find best strategies'}
           </button>
+          {blockReason && <span className="text-xs text-warn" role="note">{blockReason}</span>}
           {res && <span className="text-xs text-muted">Scanned <b className="text-ink">{res.scanned.toLocaleString('en-IN')}</b> combinations in {res.tookMs} ms · expiry {formatExpiry(res.expiry)}</span>}
         </div>
       </Card>

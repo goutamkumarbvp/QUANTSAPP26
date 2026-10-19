@@ -287,6 +287,13 @@ describe('Positions', () => {
     expect(html).not.toContain('Total P&L</div><div class="truncate text-base font-semibold tabular-nums">₹');
     expect(html).not.toMatch(BAD);
   });
+
+  it('an empty account: P&L totals are dashes with "No open positions", never ₹0', () => {
+    const html = render(<Positions />, seeds([], funds({ unrealizedPnl: 0, usedMargin: 0, available: 1_000_000, premiumPaid: 0 })));
+    expect(html).toContain('No open positions');
+    expect(html).not.toMatch(/P&amp;L<\/div><div[^>]*>₹0/);
+    expect(html).not.toMatch(BAD);
+  });
 });
 
 /* ------------------------------------------------------------------ watchlist */
@@ -320,6 +327,13 @@ describe('Strategy Manager', () => {
     expect(html).toContain('No live NIFTY price');
     expect(html).toMatch(/Open MTM <span[^>]*aria-label="Not available: No live MTM for 1 open strategy"/);
     expect(html).not.toMatch(BAD);
+  });
+
+  it('no strategy at all: the open MTM is a dash with "No open positions", not ₹0', () => {
+    const html = render(<Strategies />, [[['strategies'], []]]);
+    expect(html).toMatch(/Open MTM <span[^>]*aria-label="Not available: No open positions"/);
+    expect(html).toContain('No open positions</span>');
+    expect(html).not.toContain('₹0');
   });
 });
 
@@ -360,6 +374,19 @@ describe('Strategy Builder and payoff', () => {
     expect(html).not.toContain('Left out of today');
     expect(html).not.toMatch(BAD);
     expect(charts.some((c) => hasChartData(c.option))).toBe(true);
+  });
+
+  it('a leg IV solved from the LTP carries the chain\'s "L" marker; a mid-solved one does not; the BE labels sit apart from the spot label', () => {
+    seed('open', legs());
+    const html = render(<Builder />, seeds(chainOf({}, STRIKES.map((strike) => ({ strike, ce: strike === 24200 ? leg({ ltp: 60.5, iv: 12.8, ivSource: 'ltp' }) : leg({ iv: 13.2 }), pe: leg() })))));
+    expect(html.match(/title="Solved from the last traded price \(no fresh two-sided book\)">L<\/sup>/g)).toHaveLength(1);
+    const payoff = charts.find((c) => JSON.stringify(c.option).includes('"BE ')) as { option: { series: { markLine?: { data: { name: string; label?: { position: string } }[] } }[] } } | undefined;
+    const marks = payoff?.option.series.flatMap((x) => x.markLine?.data ?? []) ?? [];
+    const spotMark = marks.find((m) => m.name.startsWith('Spot'));
+    const be = marks.filter((m) => m.name.startsWith('BE'));
+    expect(be.length).toBeGreaterThan(0);
+    for (const m of be) expect(m.label?.position).not.toBe(spotMark?.label?.position);
+    expect(html).not.toMatch(BAD);
   });
 
   it('a leg without a premium / IV is flagged, left out of T+0 and of the margin, and its P&L is blank', () => {
@@ -427,6 +454,14 @@ describe('Strategy Optimizer', () => {
     const html = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], chainOf()]]);
     expect(html).toContain('Find best strategies');
     expect(html).not.toMatch(BAD);
+  });
+
+  it('the disabled button says why, as text', () => {
+    const noSpot = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], chainOf({ spot: null })]]);
+    expect(noSpot).toMatch(/<button class="btn-primary" disabled=""/);
+    expect(noSpot).toContain('role="note">Enter a target price (there is no live NIFTY spot to pre-fill it from)</span>');
+    const down = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], new ApiError('No live NIFTY option chain', 503, 'NO_LIVE_DATA')]]);
+    expect(down).toContain('The option chain is not available: No live NIFTY option chain');
   });
 });
 

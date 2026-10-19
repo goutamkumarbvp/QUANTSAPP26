@@ -22,6 +22,7 @@ export default function Surface() {
     d.iv.forEach((row, i) => row.forEach((v, j) => v !== null && data.push([j, i, v])));
     if (!data.length) return {};
     const vals = data.map((x) => x[2]);
+    const rowLabels = d.expiries.map((e, i) => `${formatExpiry(e)} (${formatFixed(d.daysToExpiry[i], 1)}d)`);
     return {
       ...baseOption(c),
       tooltip: {
@@ -34,10 +35,27 @@ export default function Surface() {
           return `${formatExpiry(d.expiries[p.value[1]])} · ${d.moneyness[p.value[0]]}%${k ? ` · strike ${formatIndian(k, 0)}` : ''}<br/>IV <b>${formatFixed(p.value[2], 2)}%</b> (solved from the live premium)`;
         },
       },
-      grid: { left: 8, right: 12, top: 10, bottom: 60, containLabel: true },
-      xAxis: { type: 'category', name: 'Moneyness (K/S − 1)', nameLocation: 'middle', nameGap: 28, nameTextStyle: { color: c.muted }, data: d.moneyness.map((m) => `${m}%`), ...axis(c, { splitLine: { show: false } }) },
-      yAxis: { type: 'category', data: d.expiries.map((e, i) => `${formatExpiry(e)} (${formatFixed(d.daysToExpiry[i], 1)}d)`), ...axis(c, { splitLine: { show: false } }) },
-      visualMap: { min: Math.min(...vals), max: Math.max(...vals), calculable: true, orient: 'horizontal', left: 'center', bottom: 0, textStyle: { color: c.muted }, inRange: { color: ['#1d4ed8', '#22d3ee', '#a3e635', '#facc15', '#f97316', '#dc2626'] } },
+      // Fixed margins (not containLabel, which clipped the first characters of the expiry labels): the left
+      // margin fits the longest row label at 11 px; the bottom stacks x labels, the axis title and the colour scale
+      // without overlap (labels ~16 px, title at 30 px below the axis, scale in the bottom 44 px).
+      grid: { left: Math.max(...rowLabels.map((l) => l.length)) * 7 + 16, right: 16, top: 10, bottom: 104, containLabel: false },
+      xAxis: { type: 'category', name: 'Moneyness (K/S − 1)', nameLocation: 'middle', nameGap: 30, nameTextStyle: { color: c.muted }, data: d.moneyness.map((m) => `${m}%`), ...axis(c, { splitLine: { show: false } }) },
+      yAxis: { type: 'category', data: rowLabels, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, fontSize: 11, margin: 8 } },
+      visualMap: {
+        min: Math.min(...vals),
+        max: Math.max(...vals),
+        calculable: true,
+        orient: 'horizontal',
+        left: 'center',
+        bottom: 6,
+        itemWidth: 12,
+        itemHeight: 220,
+        text: ['high IV', 'low IV'],
+        textGap: 10,
+        textStyle: { color: c.muted, fontSize: 11 },
+        formatter: (v: number) => `${formatFixed(v, 1)}%`,
+        inRange: { color: ['#1d4ed8', '#22d3ee', '#a3e635', '#facc15', '#f97316', '#dc2626'] },
+      },
       series: [{ type: 'heatmap', data, label: { show: true, color: '#0b1220', fontSize: 9, formatter: (p: { value: Cell }) => formatFixed(p.value[2], 1) } }],
     };
   }, [q.data, c]);
@@ -53,7 +71,7 @@ export default function Surface() {
             const total = d.iv.reduce((a, row) => a + row.length, 0);
             return (
               <>
-                <Chart option={option} height={Math.max(320, d.expiries.length * 46 + 90)} blank={cells ? undefined : 'No listed strike has a live premium to solve an IV from'} />
+                <Chart option={option} height={Math.max(340, d.expiries.length * 46 + 130)} blank={cells ? undefined : 'No listed strike has a live premium to solve an IV from'} />
                 <div className="mt-2 space-y-1">
                   <Coverage text={`${cells} of ${total} cells have an IV solved from a live premium (the listed strike nearest each moneyness bucket, OTM side). Empty cells have no live premium there — the surface is not interpolated or smoothed.`} />
                   <Gaps gaps={d.gaps} />

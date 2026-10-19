@@ -158,7 +158,8 @@ export default function Orb() {
           const first = e.breaks[0];
           // Minutes of the range that really traded (a minute without a trade has no bar).
           const traded = d.bars.filter((b) => b.ts < d.rangeEndTs).length;
-          const ref = d.live ? 'price' : isNum(d.ltp) ? 'close' : 'last recorded bar';
+          // Price vs range and the % distances are taken at the price the server names (priceSource).
+          const ref = d.priceSource === 'ltp' ? 'LTP' : `last recorded 1-min close at ${formatSessionTime(d.priceTs)}`;
           const dayWhy = d.gaps?.day ?? 'Not available';
           return (
             <>
@@ -175,7 +176,7 @@ export default function Orb() {
                     <div className={cx('mt-1 text-sm font-medium', e.trend === 'up' ? 'text-up' : e.trend === 'down' ? 'text-down' : 'text-muted')}>{d.summary}</div>
                   </div>
                   <div className="text-right">
-                    <div className="text-2xs text-muted">{d.live ? 'LTP' : 'Close'}</div>
+                    <div className="text-2xs text-muted">{d.priceSource === 'ltp' ? 'LTP' : isNum(d.ltp) ? `Last recorded 1-min close at ${formatSessionTime(d.priceTs)}` : 'Close'}</div>
                     <div className="text-2xl font-bold tabular-nums"><Val value={d.ltp} format={(x) => formatIndian(x, dec(x))} reason={dayWhy} /></div>
                     <Chg value={d.changePct} pct reason={isNum(d.ltp) ? 'Needs the previous session’s close' : dayWhy} />
                   </div>
@@ -196,6 +197,7 @@ export default function Orb() {
                   value={!e.complete ? null : e.position === 'above' ? 'Above high' : e.position === 'below' ? 'Below low' : 'Inside'}
                   reason="The opening range is still forming"
                   tone={e.position === 'above' ? 'up' : e.position === 'below' ? 'down' : undefined}
+                  sub={e.complete ? `${price(e.last)} (${ref})` : undefined}
                 />
                 <Stat
                   label="First break"

@@ -19,6 +19,7 @@ import {
   type Leg,
   type MarginEstimate,
   type OptionChain,
+  type OptionQuote,
   type PayoffCurve,
   type StrategyAnalysis,
   type ValuationContext,
@@ -44,6 +45,8 @@ export interface MarkedLeg extends Leg {
   marketIv: number | null;
   /** Why `marketIv` is blank. */
   ivReason: string | null;
+  /** Premium `marketIv` was solved from (the chain leg's ivSource): 'mid' of a fresh two-sided book, or 'ltp'; null without an IV. */
+  ivSource: OptionQuote['ivSource'];
   /** Position Greeks (qty × per-unit); null for a closed / switched-off leg and for a leg with no IV or carry to value it with. */
   delta: number | null;
   gamma: number | null;
@@ -74,7 +77,8 @@ export interface StrategyView {
   nearestChain?: OptionChain;
   futures: FuturesQuote[];
   legs: MarkedLeg[];
-  ctx: ValuationContext;
+  /** Valuation inputs (the server's risk-free rate, per-expiry carry); null until there is a chain and the rate is known. */
+  ctx: ValuationContext | null;
   analysis?: StrategyAnalysis;
   margin?: MarginEstimate;
   /** Σ MTM of the switched-on legs; null while any of them has no live price. */
@@ -139,10 +143,9 @@ export function useStrategyView(
   const dataKey = [...results.map((x) => x.dataUpdatedAt), futs.dataUpdatedAt, results.map((x) => (x.error ? 1 : 0)).join(''), futs.error ? 1 : 0, wanted.join('|')].join(',');
 
   return useMemo<StrategyView>(() => {
-    const ctx0: ValuationContext = { r: rate ?? 0 };
     const empty = (blank: string | null): StrategyView => ({
       ready: false, loading, blank, spot: null, nowTs: null, atmIv: null, lotSize: info?.lotSize ?? null, chains, nearestChain: base, futures: futuresOk,
-      legs: [], ctx: ctx0, mtm: null, mtmReason: null, targetBlank: false, targetTs: null, expiryTs: null, scenarioTs: [], gaps: {},
+      legs: [], ctx: null, mtm: null, mtmReason: null, targetBlank: false, targetTs: null, expiryTs: null, scenarioTs: [], gaps: {},
     });
     if (!base) {
       const why = Object.values(errors)[0];
@@ -168,6 +171,7 @@ export function useStrategyView(
       let ltpReason: string | null = null;
       let marketIv: number | null = null;
       let ivReason: string | null = null;
+      let ivSource: OptionQuote['ivSource'] = null;
       if (l.type === 'FUT') {
         const f = futuresOk.find((x) => x.expiry === l.expiry);
         ltp = f?.ltp ?? null;
@@ -183,8 +187,10 @@ export function useStrategyView(
           ltp = q.ltp;
           ltpTs = q.ts;
           if (ltp === null) ltpReason = 'Not traded in the live session';
-          if (isNum(q.iv)) marketIv = q.iv / 100;
-          else ivReason = ch.gaps?.iv ?? 'IV could not be solved: no usable live premium (neither a two-sided book nor a traded price)';
+          if (isNum(q.iv)) {
+            marketIv = q.iv / 100;
+            ivSource = q.ivSource;
+          } else ivReason = ch.gaps?.iv ?? 'IV could not be solved: no usable live premium (neither a two-sided book nor a traded price)';
         }
       }
       const qty = legQty(l) * sideSign(l.side);
@@ -192,7 +198,7 @@ export function useStrategyView(
       return {
         ...l,
         iv: marketIv ?? undefined,
-        ltp, ltpTs, ltpReason, marketIv, ivReason,
+        ltp, ltpTs, ltpReason, marketIv, ivReason, ivSource,
         delta: null, gamma: null, theta: null, vega: null,
         pnl: open && exit !== null ? qty * (exit - l.price) : null,
         pnlReason: !open ? 'Leg is switched off' : exit === null ? ltpReason ?? 'No live price' : null,
@@ -288,8 +294,9 @@ export function PayoffChart({ view, height = 340 }: { view: StrategyView; height
             silent: true,
             label: { color: c.ink, fontSize: 10, formatter: '{b}' },
             data: [
-              { name: `Spot ${formatIndian(spot, 0)}`, xAxis: spot, lineStyle: { color: c.accent, type: 'solid', width: 1.5 } },
-              ...view.analysis.breakevens.map((b) => ({ name: `BE ${formatIndian(b, 0)}`, xAxis: b, lineStyle: { color: c.warn, type: 'dashed' } })),
+              // Spot is labelled above the plot, breakevens inside it along their line from the bottom: the labels never collide.
+              { name: `Spot ${formatIndian(spot, 0)}`, xAxis: spot, label: { position: 'end' }, lineStyle: { color: c.accent, type: 'solid', width: 1.5 } },
+              ...view.analysis.breakevens.map((b) => ({ name: `BE ${formatIndian(b, 0)}`, xAxis: b, label: { position: 'insideStartTop', color: c.warn }, lineStyle: { color: c.warn, type: 'dashed' } })),
               { yAxis: 0, name: '', lineStyle: { color: c.muted, type: 'solid', opacity: 0.6 } },
             ],
           },

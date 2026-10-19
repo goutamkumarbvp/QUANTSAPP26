@@ -37,13 +37,17 @@ export default function Skew() {
         { name: `${tag} PE`, type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1.5, type: 'dotted' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.peIv)) },
       ];
     });
+    // Tick decimals from the IV span shown: a narrow smile (e.g. 13.8–14.6 %) must not label every tick "14%".
+    const ivs = d.curves.flatMap((cv) => cv.points.flatMap((p) => [p.iv, p.ceIv, p.peIv])).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    const span = ivs.length ? Math.max(...ivs) - Math.min(...ivs) : 0;
+    const ivDec = span < 2 ? 2 : span < 10 ? 1 : 0;
     const spotX = x === 'strike' ? d.spot : 0;
     if (series.length && spotX !== null) (series[0] as Record<string, unknown>).markLine = { symbol: 'none', silent: true, label: { formatter: 'Spot', color: c.accent }, lineStyle: { color: c.accent }, data: [{ xAxis: spotX }] };
     return {
       ...baseOption(c),
       tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number | null) => (typeof v === 'number' ? `${v.toFixed(2)}%` : '—') },
       xAxis: { type: 'value', scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => (x === 'strike' ? String(v) : `${v}%`) } },
-      yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => `${v.toFixed(0)}%` } },
+      yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => `${v.toFixed(ivDec)}%` } },
       dataZoom: [{ type: 'inside' }],
       series,
     };

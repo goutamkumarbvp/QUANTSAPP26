@@ -111,8 +111,10 @@ export default function Positions() {
   const working = (orders.data ?? []).filter((o) => o.status === 'OPEN' || o.status === 'TRIGGER_PENDING');
   // Total P&L needs every position priced; one without a live price makes the total unknown (it is never partial).
   const unpriced = (positions.data ?? []).filter((p) => p.pnl === null);
-  const totalPnl = positions.data && !unpriced.length ? positions.data.reduce((a, p) => a + (p.pnl ?? 0), 0) : null;
-  const totalWhy = unpriced.length ? `No live price for ${unpriced.map((p) => p.instrument).join(', ')}` : 'Positions have not loaded';
+  // An account with no position at all has no P&L to total: a dash with the reason, never ₹0.
+  const noPositions = !!positions.data && !positions.data.length;
+  const totalPnl = positions.data && !unpriced.length && !noPositions ? positions.data.reduce((a, p) => a + (p.pnl ?? 0), 0) : null;
+  const totalWhy = noPositions ? 'No open positions' : unpriced.length ? `No live price for ${unpriced.map((p) => p.instrument).join(', ')}` : 'Positions have not loaded';
   const fd = funds.data;
 
   return (
@@ -124,8 +126,13 @@ export default function Positions() {
           <Stat label="Total P&L" value={totalPnl === null ? null : formatINR(totalPnl)} reason={totalWhy} tone={totalPnl === null ? undefined : totalPnl >= 0 ? 'up' : 'down'} />
           <Stat label="Available funds" value={isNum(fd.available) ? formatINR(fd.available) : null} reason={fd.gaps?.available} />
           <Stat label="Margin used" value={isNum(fd.usedMargin) ? formatINR(fd.usedMargin) : null} reason={fd.gaps?.margin} hint="Margin estimate (SPAN-style)" />
-          <Stat label="Realised P&L" value={formatINR(fd.realizedPnl)} tone={fd.realizedPnl >= 0 ? 'up' : 'down'} />
-          <Stat label="Unrealised P&L" value={isNum(fd.unrealizedPnl) ? formatINR(fd.unrealizedPnl) : null} reason={fd.gaps?.unrealizedPnl} tone={isNum(fd.unrealizedPnl) ? (fd.unrealizedPnl >= 0 ? 'up' : 'down') : undefined} />
+          <Stat label="Realised P&L" value={noPositions ? null : formatINR(fd.realizedPnl)} reason="No open positions" tone={fd.realizedPnl >= 0 ? 'up' : 'down'} />
+          <Stat
+            label="Unrealised P&L"
+            value={!open.length && positions.data ? null : isNum(fd.unrealizedPnl) ? formatINR(fd.unrealizedPnl) : null}
+            reason={!open.length && positions.data ? 'No open positions' : fd.gaps?.unrealizedPnl}
+            tone={isNum(fd.unrealizedPnl) ? (fd.unrealizedPnl >= 0 ? 'up' : 'down') : undefined}
+          />
           <Stat label="Open positions" value={open.length} sub={`${working.length} working orders`} />
         </div>
       ) : funds.error ? (

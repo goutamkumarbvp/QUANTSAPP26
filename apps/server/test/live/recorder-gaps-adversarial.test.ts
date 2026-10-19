@@ -86,17 +86,40 @@ describe('feed gap ending before / spanning the 15:30 close', () => {
     expect(total(recs)).toBe(100);
   });
 
-  it('volume the first post-close tick reports for a gap that began in the session is neither volume nor gapVolume of any minute (CURRENT BEHAVIOUR: dropped, not labelled)', () => {
+  it('a gap that began in the session and ended after the close: the post-close tick\'s volume is gapVolume of the last session minute (labelled, not dropped)', () => {
     const { writer, tick, at, rec } = setup();
-    tick(FUT, t(15, 10, 5), { ltp: 100, volume: 1000 });
+    tick(FUT, t(15, 10, 5), { ltp: 100, volume: 1000, oi: 5000 });
     tick(FUT, t(15, 10, 30), { ltp: 100, volume: 1010 });
     // Feed dropped from 15:11; the reconnect snapshot arrives after the close with the day's final volume.
-    tick(FUT, t(15, 31, 5), { ltp: 101, volume: 1500 });
+    tick(FUT, t(15, 31, 5), { ltp: 101, volume: 1500, oi: 5200 });
     at(t(15, 32));
     rec.endSession();
     const recs = writer.of(FUT);
-    // Recorded 10 of the 500 units traded since the baseline; the other 490 are in no record at all.
-    expect(total(recs)).toBe(10);
+    // The 490 units traded somewhere in 15:11–15:30: booked on 15:29 as gapVolume, never as its trades.
+    expect(recs.map((r) => r.ts)).toEqual([t(15, 10), t(15, 29)]);
+    expect(recs.at(-1)).toMatchObject({ ts: t(15, 29), traded: false, volume: 0, gapVolume: 490, close: 101, oi: 5200 });
+    expect(total(recs)).toBe(500);
+    // A later post-close tick adds nothing.
+    expect(writer.of(FUT).filter((r) => r.gapVolume).length).toBe(1);
+  });
+
+  it('a gap ending after the close when 15:29 was already written: a gap-only 15:29 record merges into it (prices unchanged)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'q26-rec-adv-'));
+    dirs.push(dir);
+    const store = new IntradayFiles({ dataDir: dir });
+    const { tick, at, rec } = setup({ writer: store });
+    tick(FUT, t(15, 29, 10), { ltp: 100, volume: 1000 });
+    tick(FUT, t(15, 29, 30), { ltp: 100.5, volume: 1010 });
+    at(t(15, 30, 5)); // 15:29 written
+    const before = store.bars(FUT, D)[0];
+    tick(FUT, t(15, 31, 5), { ltp: 100.5, volume: 1040 }); // no tick 15:29:30–15:31:05: a gap
+    at(t(15, 32));
+    rec.endSession();
+    const bars = store.bars(FUT, D);
+    expect(bars).toHaveLength(1);
+    expect(bars[0]).toEqual({ ...before, gapVolume: 30 });
+    expect(bars[0]).toMatchObject({ ts: t(15, 29), close: 100.5, traded: true, volume: 10 });
+    expect(total(bars)).toBe(40);
   });
 });
 

@@ -299,7 +299,10 @@ export default function Builder() {
                         <PriceInput value={l.price} onCommit={(v) => b.update(l.id, { price: v })} />
                       </td>
                       <td className="num" title={m?.ltpTs ? `Quote of ${formatDateTime(m.ltpTs)}` : undefined}><Val value={m?.ltp} format={(x) => x.toFixed(2)} reason={m?.ltpReason ?? pending} /></td>
-                      <td className="num">{l.type === 'FUT' ? <Dash reason="A future has no IV" /> : <Val value={m && m.marketIv !== null ? m.marketIv * 100 : null} format={(x) => x.toFixed(1)} reason={m?.ivReason ?? pending} />}</td>
+                      <td className="num">
+                        {l.type === 'FUT' ? <Dash reason="A future has no IV" /> : <Val value={m && m.marketIv !== null ? m.marketIv * 100 : null} format={(x) => x.toFixed(1)} reason={m?.ivReason ?? pending} />}
+                        {l.type !== 'FUT' && m?.marketIv != null && m.ivSource === 'ltp' && <sup className="ml-0.5 text-muted" title="Solved from the last traded price (no fresh two-sided book)">L</sup>}
+                      </td>
                       <td className="num"><Val value={m?.delta} format={(x) => x.toFixed(1)} reason={greekWhy} /></td>
                       <td className="num"><Val value={m?.theta} format={(x) => x.toFixed(0)} reason={greekWhy} /></td>
                       <td className={cx('num font-medium', pnlClass(m?.pnl))}><Val value={m?.pnl} format={(x) => formatINR(x)} reason={m?.pnlReason ?? pending} /></td>

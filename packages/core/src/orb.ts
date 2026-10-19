@@ -117,8 +117,7 @@ export function evaluateOpeningRange(
   const firstUp = dedup.find((b) => b.direction === 'up') ?? null;
   const firstDown = dedup.find((b) => b.direction === 'down') ?? null;
   const trend: OrbTrend = !complete ? 'forming' : dedup.length ? dedup[dedup.length - 1].direction : 'sideways';
-  const position = !Number.isFinite(last) || !complete ? 'inside' : last > high ? 'above' : last < low ? 'below' : 'inside';
-  const pending = position === 'above' && trend !== 'up' ? 'up' : position === 'below' && trend !== 'down' ? 'down' : null;
+  const { position, pending, reentered, toHighPct, toLowPct } = priceVsRange(high, low, complete, trend, last);
   const width = high - low;
   return {
     rangeMinutes,
@@ -135,12 +134,33 @@ export function evaluateOpeningRange(
     trend,
     whipsaw: !!firstUp && !!firstDown,
     position,
-    reentered: (trend === 'up' || trend === 'down') && position === 'inside',
+    reentered,
     pending,
     last,
-    toHighPct: last > 0 ? ((high - last) / last) * 100 : NaN,
-    toLowPct: last > 0 ? ((low - last) / last) * 100 : NaN,
+    toHighPct,
+    toLowPct,
   };
+}
+
+/** Where `price` sits relative to the range, and its % distance to each level. */
+function priceVsRange(high: number, low: number, complete: boolean, trend: OrbTrend, price: number) {
+  const position: OrbEvaluation['position'] = !Number.isFinite(price) || !complete ? 'inside' : price > high ? 'above' : price < low ? 'below' : 'inside';
+  const pending: OrbEvaluation['pending'] = position === 'above' && trend !== 'up' ? 'up' : position === 'below' && trend !== 'down' ? 'down' : null;
+  return {
+    position,
+    pending,
+    reentered: (trend === 'up' || trend === 'down') && position === 'inside',
+    toHighPct: price > 0 ? ((high - price) / price) * 100 : NaN,
+    toLowPct: price > 0 ? ((low - price) / price) * 100 : NaN,
+  };
+}
+
+/**
+ * The evaluation with its price-dependent fields (position, pending, reentered, last, toHighPct,
+ * toLowPct) taken at `price` instead of the last bar's close, e.g. the live LTP. Breaks are unchanged.
+ */
+export function orbAtPrice(e: OrbEvaluation, price: number): OrbEvaluation {
+  return { ...e, ...priceVsRange(e.high, e.low, e.complete, e.trend, price), last: price };
 }
 
 /** Human summary used by UI, alerts and scanners. */

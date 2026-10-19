@@ -423,6 +423,10 @@ export interface Candle {
   close: number;
   /** Units traded in the bar; absent when the source reports no volume (index spots). */
   volume?: number;
+  /** Recorded bars: units reported after a feed gap that ended in the bar (MinuteRecord.gapVolume); not in `volume`. */
+  gapVolume?: number;
+  /** Recorded bars: some minute's volume is a lower bound (MinuteRecord.partial). */
+  partial?: true;
 }
 
 export interface MarketDataProvider {

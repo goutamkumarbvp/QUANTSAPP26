@@ -94,11 +94,13 @@ export default function Strategies() {
   // The open MTM adds up only when every open strategy has one: a partial sum would look like the whole.
   const openOnes = (q.data ?? []).filter((s) => s.status === 'open');
   const unknown = openOnes.filter((s) => !isNum(s.live?.mtm));
-  const total = unknown.length || !q.data ? null : openOnes.reduce((a, s) => a + (s.live?.mtm ?? 0), 0);
+  // No open strategy: there is no open MTM to show (a dash with the reason, never ₹0).
+  const none = !!q.data && !openOnes.length;
+  const total = unknown.length || !q.data || none ? null : openOnes.reduce((a, s) => a + (s.live?.mtm ?? 0), 0);
   return (
     <div className="space-y-3">
       <PageHeader title="Strategy Manager" subtitle="Virtual (paper) strategies tracked live — MTM, Greeks, payoff, leg-wise exits and MTM target / stop-loss alerts">
-        <span className={cx('text-sm font-semibold', tone(total))} title={total === null && unknown.length ? `No live MTM for ${unknown.map((s) => s.name).join(', ')}` : undefined}>Open MTM <Val value={total} format={(x) => formatINR(x)} reason={unknown.length ? `No live MTM for ${unknown.length} open strateg${unknown.length === 1 ? 'y' : 'ies'}` : 'Strategies have not loaded'} /></span>
+        <span className={cx('text-sm font-semibold', tone(total))} title={total === null && unknown.length ? `No live MTM for ${unknown.map((s) => s.name).join(', ')}` : undefined}>Open MTM <Val value={total} format={(x) => formatINR(x)} reason={none ? 'No open positions' : unknown.length ? `No live MTM for ${unknown.length} open strateg${unknown.length === 1 ? 'y' : 'ies'}` : 'Strategies have not loaded'} />{none && <span className="ml-1 text-2xs font-normal text-muted">No open positions</span>}</span>
       </PageHeader>
       <Loadable q={q}>
         {(list) =>

@@ -109,7 +109,12 @@ export interface Candle {
   high: number | null;
   low: number | null;
   close: number;
+  /** Units traded in the bar (recorded bars: excludes `gapVolume`; a lower bound when `partial`). */
   volume: number | null;
+  /** Recorded bars: units reported by the first tick after a feed gap that ended in the bar (traded at an unknown time during the gap); not in `volume`. */
+  gapVolume?: number | null;
+  /** Recorded bars: true when the volume of some minute of the bar is a lower bound (the recording or its subscription started inside it). */
+  partial?: boolean;
 }
 
 export interface OptionQuote {
@@ -926,7 +931,12 @@ export interface OrbResponse extends DataGaps {
   /** High/low of the bars so far (live session), else of the whole session (null when the bars stop before the close). */
   dayHigh: number | null;
   dayLow: number | null;
+  /** Price vs range (`evaluation.position`, `toHighPct`, `toLowPct`) is taken at this price: the live LTP ('ltp'), else the last recorded 1-minute close ('close'). */
   evaluation: OrbEvaluation;
+  /** Which price `evaluation` and `ltp` use: 'ltp' = the live LTP; 'close' = the close of the last recorded 1-minute bar (at `priceTs`). */
+  priceSource: 'ltp' | 'close';
+  /** Time of that price: the LTP quote's time, else the start of the last recorded 1-minute bar. */
+  priceTs: number;
   summary: string;
   /** Traded 1-minute candles from 09:15 (minutes without a trade are absent); the last one may still be forming when `live`. */
   bars: MinuteBar[];

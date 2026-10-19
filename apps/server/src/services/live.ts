@@ -539,7 +539,7 @@ interface ChainCtx {
  * valuation time, a live LTP at its own trade time (ivTs); prevOi/prevClose from the quote, else the
  * previous session's official row (its close only when it traded).
  */
-function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | undefined): OptionQuote {
+function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | undefined, stale = false): OptionQuote {
   if (!q) return blankLeg();
   const { md } = c;
   const ltp = c.asOf ? (isPos(q.ltp) ? q.ltp : null) : livePrice(md, q, c.dates ?? undefined);
@@ -549,8 +549,9 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
   const asOfBookFresh = c.asOf && asOfRef(md, c.evalTs) - q.ts < 2 * MINUTE;
   const book = c.asOf ? (asOfBookFresh && isPos(q.bid) && isPos(q.ask) && q.ask >= q.bid ? { bid: q.bid, ask: q.ask, bidQty: null, askQty: null, ts: q.ts } : null) : liveBook(md, q, c.evalTs);
   const mid = saneMid(book);
-  const premium = mid ?? ltp;
-  const ivSource: OptionQuote['ivSource'] = mid !== null ? 'mid' : ltp !== null ? 'ltp' : null;
+  // As-of: a leg last recorded well before `at` (stale) keeps its own ltp/ts but no IV is solved at `at` from it.
+  const premium = stale ? null : mid ?? ltp;
+  const ivSource: OptionQuote['ivSource'] = stale ? null : mid !== null ? 'mid' : ltp !== null ? 'ltp' : null;
   // A live LTP is valued at its own trade time (an older trade is not decayed to now); a mid at the chain's valuation time.
   const ivTs = ivSource === null ? null : ivSource === 'ltp' && !c.asOf ? md.pricing.valuationTs(c.valTs, q.ltt) : c.valTs;
   let iv: number | null = null;
@@ -602,7 +603,9 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
  * IV, Greeks, forward, carry and daysToExpiry are valued at md.pricing.valuationTs of now (or `at`):
  * outside the session the close of the last session, whose premiums they are.
  * NoLiveData when nothing of the chain is live (or recorded at `at`), and for an `at` at which the
- * recorder was not running (recordedNear on the spot, else on the newest recorded leg). 400 for an
+ * recorder was not running (recordedNear on the spot, else on the newest recorded leg). As-of, a leg
+ * (or the future) not itself recordedNear `at` keeps its ltp/OI and own `ts` but gets no IV and is left
+ * out of the forward, ATM IV and the OI aggregates (`gaps.staleLegs` counts them). 400 for an
  * expiry that is not listed or has expired.
  */
 export async function buildOptionChain(md: MarketDataProvider, symbol: string, expiry?: string | null, opts: BuildChainOptions = {}): Promise<OptionChain> {
@@ -629,6 +632,10 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   }
 
   let raw: RawChain;
+  /** As-of: the legs whose last record is not recordedNear `at` (`${type}|${strike}`); left out of IV and the aggregates. */
+  const staleLegs = new Set<string>();
+  /** `raw` without the stale legs (and a stale future): the input of the forward and ATM IV. */
+  let fresh: RawChain | undefined;
   if (asOf) {
     const rec = md.intraday.chainAt(s, exp, evalTs);
     if (!rec) throw new NoLiveData(`No recorded ${s} ${exp} option chain at ${formatTimeIST(evalTs)} on ${md.calendar.session(evalTs).date}`);
@@ -636,7 +643,29 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
     const newest = rec.spot?.ts ?? Math.max(...[rec.future, ...rec.rows.flatMap((row) => [row.ce, row.pe])].map((q) => q?.ts ?? -Infinity));
     if (!recordedNear(md, { ts: newest }, evalTs)) throw notRecordingAt(md, rec.spot ? s : `${s} ${exp} options`, evalTs, Number.isFinite(newest) ? newest : undefined);
     raw = rec;
+    // A leg whose last minute ended more than AS_OF_RECORDING_SLACK_MIN before `at` is not the leg at `at`.
+    for (const row of raw.rows)
+      for (const [type, q] of [['CE', row.ce], ['PE', row.pe]] as const) if (q && !recordedNear(md, q, evalTs)) staleLegs.add(`${type}|${row.strike}`);
+    const staleFuture = !!raw.future && !recordedNear(md, raw.future, evalTs);
+    if (staleLegs.size || staleFuture) {
+      const legs = raw.rows.reduce((a, row) => a + (row.ce ? 1 : 0) + (row.pe ? 1 : 0), 0);
+      gaps.add(
+        'staleLegs',
+        `${staleLegs.size} of ${legs} recorded legs${staleFuture ? ' and the future' : ''} were last recorded more than ${AS_OF_RECORDING_SLACK_MIN} min before ${formatTimeIST(asOfRef(md, evalTs))}: ` +
+          'they are shown at their own time (ts) and left out of IV, ATM IV, the forward, PCR, max pain and the OI totals',
+      );
+      fresh = {
+        ...raw,
+        rows: raw.rows.map((row) => ({
+          strike: row.strike,
+          ce: staleLegs.has(`CE|${row.strike}`) ? undefined : row.ce,
+          pe: staleLegs.has(`PE|${row.strike}`) ? undefined : row.pe,
+        })),
+        future: staleFuture ? undefined : raw.future,
+      };
+    }
   } else raw = await md.live.chain(s, exp);
+  fresh ??= raw;
 
   const session = asOf ? onOrBefore(md, md.calendar.session(evalTs).date) : currentSession(md, now);
   const prevDate = md.calendar.prev(session);
@@ -659,8 +688,8 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
     const p = asOf ? (q && isPos(q.ltp) ? q.ltp : null) : livePrice(md, q, dates ?? undefined);
     return p ?? undefined;
   };
-  const premiumRows: PremiumRow[] = raw.rows.map((row) => ({ strike: row.strike, ce: legPrice(row.ce), pe: legPrice(row.pe) }));
-  const sameFut = raw.future && raw.future.key.expiry === exp ? legPrice(raw.future) : undefined;
+  const premiumRows: PremiumRow[] = fresh.rows.map((row) => ({ strike: row.strike, ce: legPrice(row.ce), pe: legPrice(row.pe) }));
+  const sameFut = fresh.future && fresh.future.key.expiry === exp ? legPrice(fresh.future) : undefined;
   let forward: number | null = null;
   let forwardSource: OptionChain['forwardSource'] = null;
   let carry: number | null = null;
@@ -710,10 +739,14 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   }
   const rows: ChainRow[] = [...byStrike.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([strike, legs]) => ({ strike, ce: buildLeg(ctx, 'CE', strike, legs.ce), pe: buildLeg(ctx, 'PE', strike, legs.pe) }));
+    .map(([strike, legs]) => ({
+      strike,
+      ce: buildLeg(ctx, 'CE', strike, legs.ce, staleLegs.has(`CE|${strike}`)),
+      pe: buildLeg(ctx, 'PE', strike, legs.pe, staleLegs.has(`PE|${strike}`)),
+    }));
 
-  // OI aggregates over strikes with real OI on both sides.
-  const both = rows.filter((row) => row.ce.oi !== null && row.pe.oi !== null);
+  // OI aggregates over strikes with real OI on both sides (as-of: neither leg stale).
+  const both = rows.filter((row) => row.ce.oi !== null && row.pe.oi !== null && !staleLegs.has(`CE|${row.strike}`) && !staleLegs.has(`PE|${row.strike}`));
   const oiRows: StrikeOI[] = both.map((row) => ({
     strike: row.strike,
     ceOI: row.ce.oi as number,
@@ -743,7 +776,7 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   const ref = forward ?? spot;
   let atm: number | null = null;
   if (ref !== null) for (const row of rows) if (atm === null || Math.abs(row.strike - ref) < Math.abs(atm - ref)) atm = row.strike;
-  const atmIvDec = asOf ? (chainAtmIv(raw, r, valTs)?.iv ?? null) : md.pricing.atmIv(s, exp);
+  const atmIvDec = asOf ? (chainAtmIv(fresh, r, valTs)?.iv ?? null) : md.pricing.atmIv(s, exp);
   if (atmIvDec === null) gaps.add('atmIv', 'ATM IV could not be solved from the available premiums');
   const prevAtmIv = eodAtmIvOf(md, s, exp, prevDate);
   if (prevAtmIv === null) gaps.add('ivChange', `No traded official option closes of ${s} ${exp} for ${prevDate}`);
@@ -754,9 +787,9 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   let future: number | null = null;
   let futureExpiry: string | null = null;
   if (asOf) {
-    if (raw.future) {
-      future = isPos(raw.future.ltp) ? raw.future.ltp : null;
-      futureExpiry = raw.future.key.expiry ?? null;
+    if (fresh.future) {
+      future = isPos(fresh.future.ltp) ? fresh.future.ltp : null;
+      futureExpiry = fresh.future.key.expiry ?? null;
     }
   } else {
     futureExpiry = md.ref.listing(futKey(s, exp)) ? exp : nearFuture(md, s, now);
@@ -960,13 +993,15 @@ export function sessionsBack(md: MarketDataProvider, to: string, count: number):
   return out;
 }
 
-const toCandle = (c: { ts: number; open?: number; high?: number; low?: number; close: number; volume?: number }): Candle => ({
+const toCandle = (c: { ts: number; open?: number; high?: number; low?: number; close: number; volume?: number; gapVolume?: number; partial?: true }): Candle => ({
   ts: c.ts,
   open: c.open ?? null,
   high: c.high ?? null,
   low: c.low ?? null,
   close: c.close,
   volume: c.volume ?? null,
+  ...(c.gapVolume !== undefined ? { gapVolume: c.gapVolume } : {}),
+  ...(c.partial ? { partial: true } : {}),
 });
 
 /**

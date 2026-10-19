@@ -99,6 +99,42 @@ describe('opening range from recorded minutes', () => {
     expect(o.dayHigh).toBe(Math.max(...o.bars.map((b) => b.high)));
   });
 
+  it('price vs range and % from price use the price shown: the live LTP when live, else the last recorded close (priceSource/priceTs)', async () => {
+    const { p, an } = setup('11:30');
+    p.setNow(at(DAY, '11:30', 20));
+    record(p, DAY, 0, 135);
+    liveMinute(p, 135); // the bar closes below the range low…
+    p.setQuote(NIFTY, { ltp: 25020 }); // …and the live LTP is above the high
+    const o = await an.orb('NIFTY');
+    expect(o.priceSource).toBe('ltp');
+    expect(o.ltp).toBe(25020);
+    expect(o.evaluation.last).toBe(25020);
+    expect(o.evaluation.position).toBe('above');
+    expect(o.evaluation.toHighPct).toBeCloseTo(((25012 - 25020) / 25020) * 100, 6);
+    expect(o.evaluation.breaks.map((b) => b.direction)).toEqual(['up', 'down']); // breaks are from the bars, unchanged
+    // A completed session: the last recorded 1-minute close, with its bar time.
+    p.setNow(at('2026-10-13', '11:00'));
+    const past = await an.orb('NIFTY', undefined, { date: DAY });
+    expect(past.priceSource).toBe('close');
+    expect(past.priceTs).toBe(past.bars.at(-1)!.ts);
+    expect(past.evaluation.last).toBe(past.bars.at(-1)!.close);
+  });
+
+  it('candles label the volume they leave out: gapVolume summed per bar, partial when any minute is (live and ?at=)', async () => {
+    const { p } = setup('11:30');
+    for (let m = 0; m < 10; m++) {
+      const extra: Partial<MinuteRecord> = { volume: 100, ...(m === 3 ? { gapVolume: 500 } : {}), ...(m === 7 ? { partial: true } : {}) };
+      p.intraday.addMinutes(NIFTY, [rec(p, DAY, m, extra)]);
+    }
+    for (const opts of [{}, { at: at(DAY, '09:30') }]) {
+      const [a, b] = await candles(p, 'NIFTY', '5', 1, opts);
+      expect(a).toMatchObject({ volume: 500, gapVolume: 500 });
+      expect(a.partial).toBeUndefined();
+      expect(b).toMatchObject({ volume: 500, partial: true });
+      expect(b.gapVolume).toBeUndefined();
+    }
+  });
+
   it('uses exactly the first 15-minute candle high and low', async () => {
     const { p, an } = setup('11:30');
     record(p, DAY, 0, 135);

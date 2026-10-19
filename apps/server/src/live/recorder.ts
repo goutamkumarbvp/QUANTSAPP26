@@ -31,7 +31,7 @@
  * maxLag/maxLead from the clock (re-sent snapshots, skew) update state only. A tick for a minute
  * that was already written is folded into the next open minute instead of rewriting history.
  */
-import { maxPain } from '@q26/core';
+import { maxPain, SESSION_MINUTES } from '@q26/core';
 import { chainAtmIv } from './pricing';
 import type { IntradayWriter, LiveBarSource } from './store/intraday';
 import { keyId } from './types';
@@ -100,6 +100,8 @@ interface Inst {
   bar: MinuteRecord | null;
   /** ts of the last written minute. */
   lastWritten: number;
+  /** Close of the last written minute. */
+  lastClose?: number;
   /** Highest cumulative volume seen today (baseline). */
   cumVol?: number;
   tracksVolume: boolean;
@@ -323,7 +325,10 @@ export class Recorder implements LiveBarSource {
     if (oldTrade) return void this.st.stateOnly.oldTrade++;
     if (q.ts < now - this.maxLagMs) return void this.st.stateOnly.stale++;
     if (q.ts > now + this.maxLeadMs) return void this.st.stateOnly.ahead++;
-    if (at.status !== 'open') return void this.st.stateOnly.outsideSession++;
+    if (at.status !== 'open') {
+      if (inst.pendingGap > 0 && q.ts >= calendar.ts(today, SESSION_MINUTES)) this.bookGapAtClose(inst, today, q.ltp);
+      return void this.st.stateOnly.outsideSession++;
+    }
     let m = minuteOf(q.ts);
     if (inst.bar && inst.bar.ts > m) m = inst.bar.ts;
     if (inst.lastWritten + MINUTE_MS > m) m = inst.lastWritten + MINUTE_MS;
@@ -548,7 +553,37 @@ export class Recorder implements LiveBarSource {
     if (!rec) return null;
     inst.bar = null;
     inst.lastWritten = rec.ts;
+    inst.lastClose = rec.close;
     return rec;
+  }
+
+  /**
+   * A feed gap that began in the session and ended after the close (its first tick is post-close):
+   * the units it reports traded during the session, at an unknown time up to the close, so they are
+   * booked as gapVolume of the session's last minute (15:29), never as its trades. That minute is
+   * the open bar when it is 15:29; else a record of 15:29 carrying only the gap volume, which the
+   * store merges with a 15:29 record already written (at its close: no price is changed), or which
+   * stands as a quote-only (traded: false) minute at the post-close LTP (the session's last trade).
+   */
+  private bookGapAtClose(inst: Inst, date: string, ltp: number): void {
+    const last = this.opts.calendar.ts(date, SESSION_MINUTES - 1);
+    const gapVolume = inst.pendingGap;
+    inst.pendingGap = 0;
+    if (inst.bar && inst.bar.ts === last) {
+      inst.bar.gapVolume = (inst.bar.gapVolume ?? 0) + gapVolume;
+      return;
+    }
+    const done = this.takeBar(inst);
+    if (done) this.write([{ key: inst.key, rec: done }]);
+    if (inst.lastWritten >= last && inst.lastClose !== undefined) {
+      const c = inst.lastClose;
+      this.write([{ key: inst.key, rec: { ts: last, open: c, high: c, low: c, close: c, traded: false, gapVolume } }]);
+      return;
+    }
+    const bar: MinuteRecord = { ts: last, open: ltp, high: ltp, low: ltp, close: ltp, traded: false, gapVolume };
+    if (inst.tracksVolume) Object.assign(bar, { volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0 });
+    if (inst.oi !== undefined) bar.oi = inst.oi;
+    inst.bar = bar;
   }
 
   private write(items: { key: InstrumentKey; rec: MinuteRecord }[]): void {
