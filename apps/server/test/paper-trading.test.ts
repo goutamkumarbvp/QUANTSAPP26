@@ -108,6 +108,174 @@ describe('paper broker fills', () => {
   });
 });
 
+describe('paper broker: day orders, exits and the background tick', () => {
+  it('LIMIT / SL / SL-M orders are DAY orders: cancelled "Day order expired" at the close of their session, not before', () => {
+    const { p, book, broker, events } = setup(); // Monday 11:00
+    const limit = broker.place('u1', ce(book, 25000, { orderType: 'LIMIT', price: 1 }));
+    const sl = broker.place('u1', ce(book, 25100, { orderType: 'SL-M', triggerPrice: 9_999 }));
+    const slLimit = broker.place('u1', ce(book, 25200, { orderType: 'SL', triggerPrice: 9_999, price: 10_000 }));
+    expect([limit.status, sl.status, slLimit.status]).toEqual(['OPEN', 'TRIGGER_PENDING', 'TRIGGER_PENDING']);
+    const close = p.calendar.ts(book.date, 375);
+    p.setNow(close - 1_000);
+    broker.tick();
+    expect(broker.orders('u1').map((o) => o.status).sort()).toEqual(['OPEN', 'TRIGGER_PENDING', 'TRIGGER_PENDING']);
+    p.setNow(close);
+    broker.tick();
+    const orders = broker.orders('u1');
+    expect(orders.map((o) => [o.status, o.message])).toEqual([['CANCELLED', 'Day order expired'], ['CANCELLED', 'Day order expired'], ['CANCELLED', 'Day order expired']]);
+    expect(orders.every((o) => o.updatedAt === close)).toBe(true);
+    expect(events.filter((o) => o.status === 'CANCELLED')).toHaveLength(3);
+    // A cancelled order never fills later, whatever the market does.
+    p.setNow(close + 60_000);
+    broker.tick();
+    expect(broker.trades('u1')).toHaveLength(0);
+  });
+
+  it('an order placed outside the session lives until the close of the next session, not the one that just ended', () => {
+    const { p, book, broker } = setup();
+    const m1 = book.expiries.NIFTY[1]; // 2026-10-27: still listed after the weekend
+    const sat = '2026-10-17';
+    p.setNow(at(sat, '12:00'));
+    const o = broker.place('u1', ce(book, 25000, { expiry: m1, orderType: 'LIMIT', price: 1 }));
+    expect(o.status).toBe('OPEN');
+    const nextClose = p.calendar.ts(p.calendar.next(sat), 375);
+    p.setNow(p.calendar.ts(p.calendar.next(sat), 0));
+    broker.tick(); // the next session opens: the order is still alive
+    expect(broker.orders('u1')[0].status).toBe('OPEN');
+    p.setNow(nextClose - 1_000);
+    broker.tick();
+    expect(broker.orders('u1')[0].status).toBe('OPEN');
+    p.setNow(nextClose);
+    broker.tick();
+    expect(broker.orders('u1')[0]).toMatchObject({ status: 'CANCELLED', message: 'Day order expired' });
+    // After the close of a session, the same day: lives to the next close.
+    const fri = p.calendar.prev(p.calendar.next(sat));
+    expect(p.calendar.isTradingDay(fri)).toBe(true);
+    p.setNow(p.calendar.ts(fri, 375) + 3_600_000);
+    const late = broker.place('u1', ce(book, 25000, { expiry: m1, orderType: 'LIMIT', price: 1 }));
+    expect(late.status).toBe('OPEN');
+    p.setNow(p.calendar.ts(fri, 375) + 7_200_000);
+    broker.tick();
+    expect(broker.orders('u1').find((x) => x.id === late.id)?.status).toBe('OPEN');
+  });
+
+  it('tick works every order, leaves missing live data to the next tick, and reports an unexpected error after the others were worked', () => {
+    const { p, book, broker, pricer } = setup();
+    const a = broker.place('u1', ce(book, 25000, { orderType: 'LIMIT', price: 1 }));
+    const b = broker.place('u1', ce(book, 25100, { orderType: 'LIMIT', price: 1 }));
+    const c = broker.place('u1', ce(book, 25200, { orderType: 'LIMIT', price: 1 }));
+    // 25100 CE gets a marketable ask: it fills on the next tick.
+    p.setQuote(optKey('NIFTY', W(book), 'CE', 25100), { ltp: 0.9, bid: 0.8, ask: 0.9, volume: 90_000 });
+    const real = pricer.price.bind(pricer);
+    let fail: (strike: number) => Error | null = () => null;
+    pricer.price = (spec, ts) => {
+      const err = fail(spec.strike as number);
+      if (err) throw err;
+      return real(spec, ts);
+    };
+    // Missing live data (and any 4xx) is expected and silent.
+    fail = (k) => (k === 25000 ? new NoLiveData('feed down') : null);
+    expect(() => broker.tick()).not.toThrow();
+    expect(broker.orders('u1').find((o) => o.id === b.id)?.status).toBe('COMPLETE'); // worked although 25000 failed
+    // An unexpected error is thrown out of tick (the services' wrapper reports it) once the rest was worked.
+    p.setQuote(optKey('NIFTY', W(book), 'CE', 25200), { ltp: 0.9, bid: 0.8, ask: 0.9, volume: 90_000 });
+    fail = (k) => (k === 25000 ? new TypeError('boom') : null);
+    expect(() => broker.tick()).toThrow(new TypeError('boom'));
+    expect(broker.orders('u1').find((o) => o.id === c.id)?.status).toBe('COMPLETE'); // worked after the failing one
+    expect(broker.orders('u1').find((o) => o.id === a.id)?.status).toBe('OPEN'); // retried next tick
+    // Several: one error naming how many.
+    const d = broker.place('u1', ce(book, 24900, { orderType: 'LIMIT', price: 1 }));
+    fail = (k) => (k === 25000 || k === 24900 ? new Error(`bad ${k}`) : null);
+    let thrown: unknown;
+    try {
+      broker.tick();
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toHaveLength(2);
+    expect((thrown as Error).message).toMatch(/^2 working orders failed: bad (25000|24900); bad (25000|24900)$/);
+    expect(new Set((thrown as AggregateError).errors.map((e) => (e as Error).message))).toEqual(new Set(['bad 25000', 'bad 24900']));
+    expect(broker.orders('u1').find((o) => o.id === d.id)?.status).toBe('OPEN');
+  });
+
+  it('the services\' background tick reports a broker error to onError (and nothing for missing live data)', () => {
+    vi.useFakeTimers();
+    try {
+      const p = new FakeProvider();
+      providers.push(p);
+      const book = loadSampleBook(p);
+      const errors: { where: string; message: string }[] = [];
+      const svc = createServices(loadConfig({ persist: false }), { provider: p, onError: (where, e) => errors.push({ where, message: e instanceof Error ? e.message : String(e) }) });
+      expect(svc.broker.place('u1', ce(book, 25000, { orderType: 'LIMIT', price: 1 })).status).toBe('OPEN');
+      let err: Error = new NoLiveData('feed down');
+      svc.pricer.price = () => {
+        throw err;
+      };
+      svc.start();
+      vi.advanceTimersByTime(1_100);
+      expect(errors.filter((e) => e.where === 'broker.tick')).toEqual([]);
+      err = new TypeError('boom');
+      vi.advanceTimersByTime(1_000);
+      expect(errors.filter((e) => e.where === 'broker.tick')).toEqual([{ where: 'broker.tick', message: 'boom' }]);
+      svc.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exitPosition slices a position larger than the freeze quantity (whole lots below it); one order when none is listed; stops at the first slice that does not fill', () => {
+    const { p, book, broker } = setup();
+    const key = optKey('NIFTY', W(book), 'CE', 25300);
+    const lots = (n: number, side: 'BUY' | 'SELL' = 'BUY') => ({ ...ce(book, 25300, { lots: n, side }) });
+    expect(broker.place('u1', lots(50)).status).toBe('COMPLETE');
+    expect(broker.place('u1', lots(10)).status).toBe('COMPLETE');
+    expect(() => broker.place('u1', lots(51, 'SELL'))).toThrow(/Lots must be between 1 and 50/); // the order limit still holds for placed orders
+    const pos = broker.positions('u1')[0];
+    expect(pos).toMatchObject({ netQty: 60 * 75, status: 'open' });
+
+    // Freeze quantity 1801 (orders must stay below it): 24 lots of 75 per slice → 24 + 24 + 12.
+    (p.ref.listing(key) as { freezeQty?: number }).freezeQty = 1801;
+    const orders = broker.exitPosition('u1', pos.key);
+    expect(orders.map((o) => [o.side, o.lots, o.quantity, o.status, o.tag])).toEqual([
+      ['SELL', 24, 1800, 'COMPLETE', 'exit'],
+      ['SELL', 24, 1800, 'COMPLETE', 'exit'],
+      ['SELL', 12, 900, 'COMPLETE', 'exit'],
+    ]);
+    expect(broker.positions('u1')[0]).toMatchObject({ netQty: 0, status: 'closed' });
+
+    // No freeze quantity known: the full quantity in one order (the 50-lot user limit does not apply to an exit).
+    delete (p.ref.listing(key) as { freezeQty?: number }).freezeQty;
+    broker.place('u1', lots(50));
+    broker.place('u1', lots(10));
+    const one = broker.exitPosition('u1', broker.positions('u1')[0].key);
+    expect(one.map((o) => [o.lots, o.status])).toEqual([[60, 'COMPLETE']]);
+
+    // A position inside the freeze quantity is one order too; a short position is bought back.
+    (p.ref.listing(key) as { freezeQty?: number }).freezeQty = 1801;
+    broker.place('u1', lots(3, 'SELL'));
+    const buyBack = broker.exitPosition('u1', broker.positions('u1')[0].key);
+    expect(buyBack.map((o) => [o.side, o.lots, o.status])).toEqual([['BUY', 3, 'COMPLETE']]);
+    expect(() => broker.exitPosition('u1', broker.positions('u1')[0].key)).toThrow(/No open position/);
+  });
+
+  it('exitPosition stops at the first slice that is not filled and returns what was placed', () => {
+    const { p, book, db, pricer } = setup();
+    const key = optKey('NIFTY', W(book), 'CE', 25300);
+    // The book disappears as soon as the first exit slice has been filled.
+    const broker = new PaperBroker(p, db, pricer, () => p.now(), () => undefined, (_uid, o) => {
+      if (o.tag === 'exit' && o.status === 'COMPLETE') p.setQuote(key, { ltp: p.live.quote(key)!.ltp, bid: undefined, ask: undefined });
+    });
+    broker.place('u1', { ...ce(book, 25300, { lots: 50 }) });
+    broker.place('u1', { ...ce(book, 25300, { lots: 10 }) });
+    (p.ref.listing(key) as { freezeQty?: number }).freezeQty = 1801;
+    const orders = broker.exitPosition('u1', broker.positions('u1')[0].key);
+    expect(orders.map((o) => [o.lots, o.status])).toEqual([[24, 'COMPLETE'], [24, 'REJECTED']]);
+    expect(orders[1].message).toMatch(/^No live bid\/ask for NIFTY .* 25300 CE/);
+    expect(broker.positions('u1')[0]).toMatchObject({ netQty: 36 * 75, status: 'open' });
+  });
+});
+
 describe('positions, funds and margin', () => {
   it('marks positions at the live LTP; blank (with the reason) when the contract has no live price', () => {
     const { p, book, broker } = setup();
@@ -221,6 +389,24 @@ describe('strategy manager', () => {
     const s = strategies.create('u1', { symbol: 'NIFTY', legs: [{ side: 'SELL', type: 'PE', strike: 25000, expiry: W(book), lots: 1, lotSize: 1, price: 120 }] });
     expect(() => strategies.exit('u1', s.id)).toThrow(/No live price to exit/);
     expect(strategies.get('u1', s.id).legs[0].exitPrice).toBeNull();
+  });
+
+  it('an expired leg without a client lot size takes the lot size of that expiry from the official files, else the strategy is refused; never today\'s lot size', () => {
+    const { p, strategies } = setup(); // NIFTY lists lot size 75 today
+    const leg = (extra: Record<string, unknown> = {}) => ({ side: 'SELL' as const, type: 'PE' as const, strike: 24000, expiry: '2026-09-29', lots: 2, price: 12.5, lotSize: 1, ...extra });
+    // Nothing known about the 29-Sep-26 contracts: not 75, no guess.
+    expect(() => strategies.create('u1', { symbol: 'NIFTY', legs: [leg({ lotSize: 0 })] })).toThrow(NoLiveData);
+    expect(() => strategies.create('u1', { symbol: 'NIFTY', legs: [leg()] })).toThrow(/Lot size of NIFTY 29-Sep-26 24000 PE is unknown.*official F&O file of 2026-09-29/);
+    // The official row of the expiry day has it (65 then, 75 now).
+    p.history.writeFo('2026-09-29', {
+      options: [{ symbol: 'NIFTY', date: '2026-09-29', expiry: '2026-09-29', strike: 24000, type: 'PE', close: 12.5, oi: 10_000, volume: 7500, lotSize: 65 }],
+      futures: [{ symbol: 'NIFTY', date: '2026-09-29', expiry: '2026-09-29', close: 24100, oi: 0, volume: 1000, lotSize: 65 }],
+    });
+    const s = strategies.create('u1', { symbol: 'NIFTY', legs: [leg(), { side: 'BUY', type: 'FUT', strike: 0, expiry: '2026-09-29', lots: 1, lotSize: 1, price: 24100 }] });
+    expect(s.legs.map((l) => l.lotSize)).toEqual([65, 65]);
+    // A lot size sent by the client is kept; a strike the file does not hold has none to look up.
+    expect(strategies.create('u1', { symbol: 'NIFTY', legs: [leg({ lotSize: 70 })] }).legs[0].lotSize).toBe(70);
+    expect(() => strategies.create('u1', { symbol: 'NIFTY', legs: [leg({ strike: 23000 })] })).toThrow(/Lot size of NIFTY 29-Sep-26 23000 PE is unknown/);
   });
 
   it('expired legs exit at the settlement price; the strategy then reads expired', () => {

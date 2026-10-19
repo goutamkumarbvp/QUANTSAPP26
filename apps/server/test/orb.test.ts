@@ -154,6 +154,34 @@ describe('opening range from recorded minutes', () => {
     await expect(an.orb('NIFTY', undefined, { date: '2026-10-13' })).rejects.toMatchObject({ statusCode: 400 }); // future
   });
 
+  it('a past session whose recording stopped before the close has an opening range but no last price, change or day high/low', async () => {
+    const { p, an, book } = setup('11:30');
+    const early = p.calendar.prev(book.recordedDate);
+    record(p, early, 0, 150); // 09:15–11:44, then the recorder stopped
+    const o = await an.orb('NIFTY', undefined, { date: early });
+    expect(o.live).toBe(false);
+    expect(o.evaluation.complete).toBe(true); // the opening range itself is fully recorded
+    expect([o.evaluation.high, o.evaluation.low]).toEqual([25012, 24988]);
+    // 11:44's close is not the session's close and the bars' extremes are not the day's.
+    expect([o.ltp, o.changePct, o.dayHigh, o.dayLow]).toEqual([null, null, null, null]);
+    expect(o.gaps?.day).toMatch(/^Recording of NIFTY on 2026-10-08 ends at 11:45: the session's last price and day high\/low are not known$/);
+    // Recorded to the close (within the 5-minute slack): the values are the session's.
+    const full = p.calendar.prev(early);
+    record(p, full, 0, 372);
+    const f = await an.orb('NIFTY', undefined, { date: full });
+    expect(f.ltp).toBe(f.bars.at(-1)!.close);
+    expect(f.dayHigh).toBe(Math.max(...f.bars.map((b) => b.high)));
+    expect(f.dayLow).toBe(Math.min(...f.bars.map((b) => b.low)));
+    expect(f.gaps?.day).toBeUndefined();
+    // The live session keeps its running values (bars so far are the day so far).
+    record(p, DAY, 0, 135);
+    const live = await an.orb('NIFTY');
+    expect(live.live).toBe(true);
+    expect(live.ltp).not.toBeNull();
+    expect(live.dayHigh).not.toBeNull();
+    expect(live.gaps?.day).toBeUndefined();
+  });
+
   it('builds the range by time: untraded minutes have no bar and never pull a later bar into the range', async () => {
     const { p, an } = setup('09:40');
     // 09:25 is quote-only (its high is a carried price, not a trade); 09:29 has no record at all.

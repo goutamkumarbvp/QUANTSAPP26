@@ -123,8 +123,47 @@ describe('dashboard', () => {
     expect(n2.orb).not.toBeNull();
     expect(n2.orb!.high).toBeGreaterThanOrEqual(n2.orb!.low);
     expect(n2.orb!.summary).toEqual(expect.any(String));
-    expect(n2.flow).toEqual({ buyPct: 77.8, unclassifiedPct: 10, delta: 500, sentiment: 'Buyers dominant', method: ORDER_FLOW_METHOD, ts: hm(b.date, '10:58') });
+    // The ORB card names the session of its range; the flow card carries its (here empty) feed-gap and lower-bound fields.
+    expect(n2.orb).toMatchObject({ date: b.date, live: true, note: null });
+    expect(n2.flow).toEqual({ buyPct: 77.8, unclassifiedPct: 10, delta: 500, sentiment: 'Buyers dominant', method: ORDER_FLOW_METHOD, ts: hm(b.date, '10:58'), gapVolume: 0, partial: false, note: null });
     expect(n2.gaps).toBeUndefined();
+  });
+
+  it('the flow card shows a feed gap and a lower-bound minute explicitly: gap volume is never classified', async () => {
+    const { app, p, book } = await setup();
+    const b = book as SampleBook;
+    const fut = futKey('NIFTY', b.expiries.NIFTY[1]);
+    // 10:58: 800 units reported after a feed gap and nothing else; the card must not turn them into a buy/sell share.
+    p.intraday.addMinutes(fut, [
+      { ts: hm(b.date, '10:57'), open: 25100, high: 25101, low: 25099, close: 25100, traded: true, volume: 1000, buyVolume: 700, sellVolume: 200, unclassified: 100 },
+      { ts: hm(b.date, '10:58'), open: 25100, high: 25100, low: 25100, close: 25100, traded: false, volume: 0, gapVolume: 800, buyVolume: 0, sellVolume: 0, unclassified: 0 },
+    ]);
+    let d = (await call(app, 'GET', '/api/dashboard')).body as DashboardResponse;
+    expect(d.chains[0].flow).toMatchObject({ ts: hm(b.date, '10:58'), sentiment: 'Feed gap', buyPct: null, unclassifiedPct: null, delta: 0, gapVolume: 800, partial: false });
+    expect(d.chains[0].flow?.note).toBe('10:58: a feed gap ended in this minute — 800 units traded during the gap are not classified');
+    // A gap that ended inside a minute that also traded: the traded part is classified, the gap part is only reported.
+    p.intraday.addMinutes(fut, [{ ts: hm(b.date, '10:59'), open: 25100, high: 25101, low: 25099, close: 25100, traded: true, volume: 100, gapVolume: 50, buyVolume: 80, sellVolume: 20, unclassified: 0, partial: true }]);
+    d = (await call(app, 'GET', '/api/dashboard')).body as DashboardResponse;
+    expect(d.chains[0].flow).toMatchObject({ ts: hm(b.date, '10:59'), sentiment: 'Buyers dominant', buyPct: 80, delta: 60, gapVolume: 50, partial: true });
+    expect(d.chains[0].flow?.note).toBe('10:59: a feed gap ended in this minute — 50 units traded during the gap are not classified; 10:59: recording started inside this minute — its volume is a lower bound');
+  });
+
+  it('the ORB card names the session of its range: before 09:15 and on a holiday it is the previous session\'s, and says so', async () => {
+    const { app, p, book } = await setup();
+    const b = book as SampleBook;
+    // Monday 08:30: today\'s session has not opened; the range is Friday\'s (recorded in full).
+    p.setNow(hm(b.date, '08:30'));
+    let d = (await call(app, 'GET', '/api/dashboard')).body as DashboardResponse;
+    expect(d.chains[0].orb).toMatchObject({ date: b.recordedDate, live: false, note: `Previous session (${b.recordedDate}): today's session opens at 09:15` });
+    // Sunday: not a trading day.
+    p.setNow(hm('2026-10-11', '12:00'));
+    d = (await call(app, 'GET', '/api/dashboard')).body as DashboardResponse;
+    expect(d.chains[0].orb).toMatchObject({ date: b.recordedDate, live: false, note: `Last session (${b.recordedDate}): 2026-10-11 is not a trading day` });
+    // Open session: its own range, no note.
+    p.setNow(hm(b.date, '11:00'));
+    recordToday(p, b);
+    d = (await call(app, 'GET', '/api/dashboard')).body as DashboardResponse;
+    expect(d.chains[0].orb).toMatchObject({ date: b.date, live: true, note: null });
   });
 
   it('answers 200 with every card blank (and its reason) before the instrument master or any data exists', async () => {
@@ -254,6 +293,33 @@ describe('market routes never answer 500', () => {
   });
 });
 
+describe('straddle route', () => {
+  it('a malformed or out-of-range strike or width is a 400 with the reason, never snapped to ATM or to the end of the strip', async () => {
+    const { app, book } = await setup();
+    const b = book as SampleBook;
+    const url = (q: string) => `/api/straddle/NIFTY?date=${b.recordedDate}&expiry=${b.expiries.NIFTY[0]}&mode=fixed&interval=60${q}`;
+    for (const [q, re] of [
+      ['&strike=0', /strike must be a positive strike price or 'atm' \(got '0'\)/],
+      ['&strike=-1', /strike must be a positive strike price/],
+      ['&strike=abc', /strike must be a positive strike price/],
+      ['&strike=1e999', /strike must be a positive strike price/],
+      ['&strike=99999', /Strike 99999 is outside the NIFTY .* strikes/],
+      ['&strike=100', /Strike 100 is outside the NIFTY .* strikes/],
+      ['&strike=25000&width=-5', /width must be a non-negative number of points \(got '-5'\)/],
+      ['&strike=25000&width=abc', /width must be a non-negative number/],
+      ['&strike=25000&width=1000000', /Strangle width 1000000 is wider than the NIFTY .* allow/],
+    ] as [string, RegExp][]) {
+      const r = await call(app, 'GET', url(q));
+      expect(r.status, q).toBe(400);
+      expect(r.body.error, q).toMatch(re);
+    }
+    // Valid requests are unchanged: a listed strike, ATM, a strangle.
+    expect((await call(app, 'GET', url('&strike=25000'))).body.points[0]).toMatchObject({ strike: 25000, ceStrike: 25000, peStrike: 25000 });
+    expect((await call(app, 'GET', url('&strike=atm'))).status).toBe(200);
+    expect((await call(app, 'GET', url('&strike=25000&width=100'))).body.points[0]).toMatchObject({ ceStrike: 25100, peStrike: 24900 });
+  });
+});
+
 /* ------------------------------------------------------------------------------------------ */
 
 describe('official, OI and strategy-tool routes', () => {
@@ -377,7 +443,9 @@ describe('accounts and paper trading over HTTP', () => {
     expect(res.body).toHaveLength(1);
     expect(res.body[0]).toMatchObject({ netQty: 150, status: 'open', ltp: q.ltp });
     res = await call(app, 'POST', '/api/broker/positions/exit', { key: res.body[0].key }, token);
-    expect(res.body).toMatchObject({ side: 'SELL', status: 'COMPLETE', avgPrice: q.bid, quantity: 150 });
+    // The exit answers with the orders placed: one slice here (no freeze quantity is listed for the contract).
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({ side: 'SELL', status: 'COMPLETE', avgPrice: q.bid, quantity: 150, tag: 'exit' });
     expect((await call(app, 'GET', '/api/broker/positions', undefined, token)).body[0]).toMatchObject({ netQty: 0, status: 'closed' });
     expect((await call(app, 'GET', '/api/broker/trades', undefined, token)).body).toHaveLength(3);
     const funds = await call(app, 'GET', '/api/broker/funds', undefined, token);

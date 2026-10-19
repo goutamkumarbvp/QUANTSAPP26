@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { istTs, type MetaResponse, type OptionChain, type Quote, type ServerMessage } from '@q26/core';
+import { istTs, type MetaResponse, type OptionChain, type Quote, type QuotesResponse, type ServerMessage } from '@q26/core';
 import { buildApp } from '../src/app';
 import { loadConfig } from '../src/config';
 import { optKey, spotKey } from '../src/services/live';
@@ -74,10 +74,25 @@ describe('market routes', () => {
     const { app, p } = await setup();
     let { status, body } = await get(app, '/api/quotes?symbols=NIFTY,reliance');
     expect(status).toBe(200);
-    expect((body as Quote[]).map((q) => [q.symbol, q.ltp])).toEqual([
+    expect((body as QuotesResponse).quotes.map((q) => [q.symbol, q.ltp])).toEqual([
       ['NIFTY', 25000],
       ['RELIANCE', 1400],
     ]);
+    expect((body as QuotesResponse).gaps).toBeUndefined();
+    // An unknown symbol in a list is left out and named in `gaps`; the known ones are still answered.
+    ({ status, body } = await get(app, '/api/quotes?symbols=NIFTY,NOPE,reliance'));
+    expect(status).toBe(200);
+    expect((body as QuotesResponse).quotes.map((q) => q.symbol)).toEqual(['NIFTY', 'RELIANCE']);
+    expect(Object.keys((body as QuotesResponse).gaps ?? {})).toEqual(['NOPE']);
+    expect((body as QuotesResponse).gaps?.NOPE).toMatch(/NOPE/);
+    // A known symbol without a live price is a gap too.
+    const reliance = p.live.quote(spotKey('RELIANCE'));
+    p.live.clearQuote(spotKey('RELIANCE'));
+    ({ status, body } = await get(app, '/api/quotes?symbols=NIFTY,RELIANCE,NOPE'));
+    expect(status).toBe(200);
+    expect((body as QuotesResponse).quotes.map((q) => q.symbol)).toEqual(['NIFTY']);
+    expect(Object.keys((body as QuotesResponse).gaps ?? {}).sort()).toEqual(['NOPE', 'RELIANCE']);
+    if (reliance) p.setQuote(spotKey('RELIANCE'), { ltp: reliance.ltp, prevClose: reliance.prevClose });
     ({ body } = await get(app, '/api/indices'));
     expect((body as Quote[]).map((q) => q.symbol)).toEqual(['NIFTY', 'BANKNIFTY']);
     p.live.clearQuote(spotKey('BANKNIFTY'));
@@ -116,8 +131,16 @@ describe('market routes', () => {
 
     ({ status, body } = await get(app, `/api/chain/NIFTY?expiry=${book.expiries.NIFTY[1]}`));
     expect(body.forwardSource).toBe('future');
-    ({ status } = await get(app, '/api/chain/NIFTY?expiry=2026-12-29'));
+    ({ status, body } = await get(app, '/api/chain/NIFTY?expiry=2026-12-29'));
     expect(status).toBe(400);
+    expect(body.error).toBe('2026-12-29 is not a listed NIFTY option expiry');
+    // An expiry the instrument master still lists but whose time has passed is "expired", not "not listed".
+    p.ref.setStrikes('NIFTY', '2026-10-06', [25000]);
+    ({ status, body } = await get(app, '/api/chain/NIFTY?expiry=2026-10-06'));
+    expect(status).toBe(400);
+    expect(body.error).toBe('NIFTY expiry 2026-10-06 has expired');
+    ({ status, body } = await get(app, '/api/chain/NIFTY?expiry=2026-10-14'));
+    expect(body.error).toBe('2026-10-14 is not a listed NIFTY option expiry');
     ({ status } = await get(app, '/api/chain/NOPE'));
     expect(status).toBe(404);
     ({ status, body } = await get(app, `/api/chain/NIFTY?at=${at(book.recordedDate, '12:00')}`));

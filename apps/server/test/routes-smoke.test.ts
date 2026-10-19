@@ -295,7 +295,7 @@ describe('every route in every data state', () => {
 describe('values are traceable to the inputs (sample book)', () => {
   it('quotes, chain, futures, max pain, IV views and scanners reproduce the test inputs', async () => {
     const { app, p, b } = await setup();
-    const quotes = (await call(app, 'GET', '/api/quotes?symbols=NIFTY,RELIANCE')).body as Quote[];
+    const quotes = ((await call(app, 'GET', '/api/quotes?symbols=NIFTY,RELIANCE')).body as { quotes: Quote[] }).quotes;
     expect(quotes.map((q) => [q.symbol, q.ltp, q.prevClose, q.change])).toEqual([
       ['NIFTY', 25000, 24900, 100],
       ['RELIANCE', 1400, 1390, 10],

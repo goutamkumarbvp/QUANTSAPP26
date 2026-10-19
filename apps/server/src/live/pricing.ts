@@ -244,6 +244,20 @@ export function isLivePrice(q: Pick<LiveQuote, 'ts' | 'ltt' | 'volume'>, calenda
   return true;
 }
 
+/**
+ * A spot/future quote whose price is from the pre-open (09:00–09:15) of a session that has not opened
+ * yet, i.e. newer than the valuation time `val` (outside the session: the previous close). Premiums
+ * are valued at `val`; combined with such a price the overnight gap would be read as IV / carry (a
+ * future 0.5 % above Friday's close turns a 14 % IV into 9.6 %). It stays a live quote (shown); it is
+ * not an input of the forward / IV valuation until the session opens (then `val` is the clock). Its
+ * trade time (`ltt`, else the stamp) decides; options do not trade in the pre-open.
+ */
+export function isAfterValuation(q: Pick<LiveQuote, 'key' | 'ts' | 'ltt'>, calendar: TradingCalendar, val: number): boolean {
+  if (q.key.kind !== 'SPOT' && q.key.kind !== 'FUT') return false;
+  const t = q.ltt !== undefined && Number.isFinite(q.ltt) ? q.ltt : q.ts;
+  return Number.isFinite(t) && t > val && calendar.session(t).status === 'pre-open';
+}
+
 export class LivePricing implements Pricing {
   readonly r: number;
   private readonly now: () => number;
@@ -267,6 +281,8 @@ export class LivePricing implements Pricing {
     const q = this.opts.getQuote(key);
     if (!q || !isPos(q.ltp) || !isLivePrice(q, this.opts.calendar, dates)) return undefined;
     if (this.opts.maxQuoteAgeMs !== undefined && now - q.ts > this.opts.maxQuoteAgeMs) return undefined;
+    // A pre-open price is newer than the valuation time of the premiums (isAfterValuation).
+    if (isAfterValuation(q, this.opts.calendar, valuationTs(this.opts.calendar, now))) return undefined;
     return q.ltp;
   }
 
@@ -307,7 +323,9 @@ export class LivePricing implements Pricing {
     const f = forwardOf(inputs, T, this.r);
     if (f) return f;
     if (!impliedForward(inputs, T, this.r)) throw new NoLiveData(`No live future, put-call pair or spot price for ${symbol} ${expiry}`);
-    throw new NoLiveData(`No live spot price for ${symbol}: the carry of the ${expiry} forward cannot be implied`);
+    const sq = this.opts.getQuote({ symbol, kind: 'SPOT' });
+    const pre = sq && isAfterValuation(sq, this.opts.calendar, valuationTs(this.opts.calendar, now)) ? " (its latest price is a pre-open one, newer than the premiums' valuation time)" : '';
+    throw new NoLiveData(`No live spot price for ${symbol}${pre}: the carry of the ${expiry} forward cannot be implied`);
   }
 
   private forwardInputs(symbol: string, expiry: string, now: number, dates: Set<string>): ForwardInputs {

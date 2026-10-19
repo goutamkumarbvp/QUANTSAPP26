@@ -40,7 +40,7 @@ import {
   type StrikeOI,
 } from '@q26/core';
 import { isIsoDate } from '../live/calendar';
-import { atmIvOf, chainAtmIv, impliedForward, isLivePrice, liveSessionDates, timeToExpiry, type PremiumRow } from '../live/pricing';
+import { atmIvOf, chainAtmIv, impliedForward, isAfterValuation, isLivePrice, liveSessionDates, timeToExpiry, type PremiumRow } from '../live/pricing';
 import { recordedMinutes, resampleMinutes } from '../live/provider';
 import { NoLiveData, keyId } from '../live/types';
 import type { CandleInterval, DailyOption, InstrumentKey, LiveQuote, MarketDataProvider, MinuteRecord, OptKind, RawChain, UserContract, WatchLevel } from '../live/types';
@@ -544,8 +544,9 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
   const { md } = c;
   const ltp = c.asOf ? (isPos(q.ltp) ? q.ltp : null) : livePrice(md, q, c.dates ?? undefined);
   // As-of: the book recorded with the leg's minute, only when that minute is the one just completed
-  // at `at` (q.ts is the minute's start); an older minute's book is not the book at `at`.
-  const asOfBookFresh = c.asOf && c.evalTs - q.ts < 2 * MINUTE;
+  // at `at` (q.ts is the minute's start; after the close: at the close, so an `at` after 15:30 shows
+  // the last minute's book as ?at=15:30 does); an older minute's book is not the book at `at`.
+  const asOfBookFresh = c.asOf && asOfRef(md, c.evalTs) - q.ts < 2 * MINUTE;
   const book = c.asOf ? (asOfBookFresh && isPos(q.bid) && isPos(q.ask) && q.ask >= q.bid ? { bid: q.bid, ask: q.ask, bidQty: null, askQty: null, ts: q.ts } : null) : liveBook(md, q, c.evalTs);
   const mid = saneMid(book);
   const premium = mid ?? ltp;
@@ -653,6 +654,8 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   // Forward of this expiry (Black-76 input): md.pricing.forward when live; without a live spot the
   // forward itself can still come from the future or a put-call pair (carry then unknown).
   const legPrice = (q: LiveQuote | undefined): number | undefined => {
+    // Live: a pre-open future price is newer than the valuation time of the premiums (isAfterValuation).
+    if (!asOf && q && isAfterValuation(q, md.calendar, valTs)) return undefined;
     const p = asOf ? (q && isPos(q.ltp) ? q.ltp : null) : livePrice(md, q, dates ?? undefined);
     return p ?? undefined;
   };

@@ -9,6 +9,7 @@ import {
   chainAtmIv,
   forwardOf,
   impliedForward,
+  isAfterValuation,
   isLivePrice,
   liveSessionDates,
   premiumTs,
@@ -286,7 +287,7 @@ describe('LivePricing', () => {
     expect(setup([spot(25_020), ...traded]).forward('NIFTY', WEEKLY).forward).toBeCloseTo(F, 6);
     // Before Monday's open Friday is the last session: a Friday trade is live, a Thursday one is not.
     const preOpen = ist('2026-10-12', 9, 5);
-    const sp = spot(25_000, preOpen);
+    const sp = spot(25_000, ist('2026-10-09', 15, 29)); // the index's last value is Friday's close (a pre-open print is not combined with Friday's trades: see isAfterValuation)
     const fut = (ltt: number) => ({ key: { symbol: 'NIFTY', kind: 'FUT' as const, expiry: MONTHLY }, ts: preOpen, ltp: 25_180, ltt, volume: 0 });
     expect(setup([sp, fut(fri)], { now: () => preOpen }).forward('NIFTY', MONTHLY).source).toBe('future');
     expect(setup([sp, fut(thu)], { now: () => preOpen }).forward('NIFTY', MONTHLY).source).toBe('spot');
@@ -459,5 +460,45 @@ describe('valuation time (review: IV/Greeks/carry drifted outside the session on
     const at11 = black76Price('CE', F, 25_200, timeToExpiry(EXP, ist('2026-10-16', 11, 0)), r, 0.16);
     expect(p.valuationTs(undefined, ist('2026-10-16', 11, 0))).toBe(ist('2026-10-16', 11, 0));
     expect(p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium: at11, ltt: ist('2026-10-16', 11, 0) })).toBeCloseTo(0.16, 3);
+  });
+
+  it('a pre-open spot / future print is newer than the valuation time: not combined with the last close\'s premiums (verifier: a 0.5 % overnight move turned a 14 % IV into 9.6 %)', () => {
+    const EXP = '2026-10-20';
+    const MON = '2026-10-19';
+    const strikes = [24_800, 24_900, 25_000, 25_100, 25_200];
+    const ref = new FakeRef({ [`NIFTY|${EXP}`]: strikes }, { 'NIFTY|OPT': [EXP], 'NIFTY|FUT': [] });
+    const fri = ist('2026-10-16', 15, 29);
+    const F = 25_030;
+    const T = timeToExpiry(EXP, fri);
+    const key = (kind: 'SPOT' | 'FUT') => ({ symbol: 'NIFTY', kind, ...(kind === 'FUT' ? { expiry: EXP } : {}) }) as InstrumentKey;
+    const quotes: LiveQuote[] = [];
+    for (const K of strikes) for (const type of ['CE', 'PE'] as OptKind[]) quotes.push({ key: { symbol: 'NIFTY', kind: type, expiry: EXP, strike: K }, ts: fri, ltp: black76Price(type, F, K, T, r, 0.14) });
+    const map = new Map(quotes.map((x) => [keyId(x.key), x]));
+    const put = (x: LiveQuote) => map.set(keyId(x.key), x);
+    put({ key: key('SPOT'), ts: fri, ltp: 25_000 });
+    let t = ist(MON, 9, 10);
+    const p = new LivePricing({ r, ref, calendar: cal, getQuote: (k) => map.get(keyId(k)), now: () => t });
+    const base = { forward: p.forward('NIFTY', EXP), atm: p.atmIv('NIFTY') as number, ivCe: p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium: black76Price('CE', F, 25_200, T, r, 0.14) }) as number };
+    expect(base.atm).toBeCloseTo(0.14, 4);
+
+    // The pre-open prints: spot +0.2 % and a same-expiry future +0.5 % above Friday's forward.
+    put({ key: key('SPOT'), ts: ist(MON, 9, 5), ltp: 25_050 });
+    put({ key: key('FUT'), ts: ist(MON, 9, 8), ltp: 25_160 });
+    const pre = { ...map.get(keyId(key('SPOT')))! };
+    expect(isAfterValuation(pre, cal, p.valuationTs())).toBe(true);
+    expect(isAfterValuation({ ...pre, ts: fri }, cal, p.valuationTs())).toBe(false); // Friday's own print
+    expect(isAfterValuation({ ...pre, ltt: fri }, cal, p.valuationTs())).toBe(false); // stamped in the pre-open, last traded Friday
+    expect(isAfterValuation({ ...pre, key: { symbol: 'NIFTY', kind: 'CE', expiry: EXP, strike: 25_000 } }, cal, p.valuationTs())).toBe(false); // options do not trade in the pre-open
+    expect(isAfterValuation(pre, cal, ist(MON, 9, 10))).toBe(false); // once the clock is the valuation time (session open) it is a normal quote
+    const v = { forward: p.forward.bind(p), atm: p.atmIv('NIFTY') as number, ivCe: p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium: black76Price('CE', F, 25_200, T, r, 0.14) }) as number };
+    expect(v.atm).toBeCloseTo(base.atm, 6);
+    expect(v.ivCe).toBeCloseTo(base.ivCe, 6);
+    // The forward is not a number made of two moments: parity of Friday's premiums; the carry cannot be implied until the session opens.
+    expect(() => v.forward('NIFTY', EXP)).toThrow(/No live spot price for NIFTY \(its latest price is a pre-open one/);
+    // Without the pre-open spot/future being excluded the forward would be the 25,160 print: the opened session uses it (valued now).
+    t = ist(MON, 9, 16);
+    put({ key: key('SPOT'), ts: ist(MON, 9, 16), ltp: 25_052 });
+    put({ key: key('FUT'), ts: ist(MON, 9, 16), ltp: 25_160, ltt: ist(MON, 9, 16), volume: 10 });
+    expect(p.forward('NIFTY', EXP)).toMatchObject({ forward: 25_160, source: 'future' });
   });
 });

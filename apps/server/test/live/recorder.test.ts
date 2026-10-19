@@ -303,6 +303,90 @@ describe('Recorder: minute bars', () => {
   });
 });
 
+describe('Recorder: feed gaps and restarts (volume that traded at an unknown time)', () => {
+  it('the Δvolume of the first tick after a gap of whole minutes is gapVolume: not the minute\'s volume, never classified; Σ(volume + gapVolume) = Δ cumulative volume', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(10, 0, 10), { ltp: 100, volume: 1000, bid: 99.5, ask: 100.5 }); // baseline
+    tick(FUT, t(10, 0, 40), { ltp: 100.5, volume: 1010, bid: 100, ask: 101 }); // buy 10
+    // Silence for 10:01–10:04 (a dropped feed / reconnect), then a tick reporting +90 and a bid/ask at the ask: it would
+    // classify as a buy against the old book if it were booked as the minute's volume.
+    tick(FUT, t(10, 5, 20), { ltp: 101, volume: 1100, bid: 100.5, ask: 101 });
+    tick(FUT, t(10, 5, 30), { ltp: 101, volume: 1105 }); // an ordinary tick of the same minute: +5, classified as usual (at the ask: buy)
+    at(t(10, 8));
+    const recs = writer.of(FUT);
+    expect(recs.map((r) => r.ts)).toEqual([t(10, 0), t(10, 5)]);
+    expect(recs[1]).toMatchObject({ traded: true, volume: 5, buyVolume: 5, sellVolume: 0, unclassified: 0, gapVolume: 90 });
+    expect(recs[0].gapVolume).toBeUndefined();
+    // The totals reconcile with the feed's cumulative volume (1105 − 1000).
+    expect(recs.reduce((a, r) => a + (r.volume ?? 0) + (r.gapVolume ?? 0), 0)).toBe(105);
+    // volume = buy + sell + unclassified still holds (the gap volume is outside it).
+    for (const r of recs) expect(r.volume).toBe((r.buyVolume ?? 0) + (r.sellVolume ?? 0) + (r.unclassified ?? 0));
+  });
+
+  it('a tick after a gap does not make its minute traded by its volume alone; with a known trade time the minute is traded but the gap volume stays apart', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(10, 0, 10), { ltp: 100, volume: 10 });
+    tick(FUT, t(10, 3, 10), { ltp: 103, volume: 14 }); // gap: 4 units in the gap, a quote-only minute (no trade time)
+    at(t(10, 6));
+    expect(writer.of(FUT)[1]).toMatchObject({ ts: t(10, 3), traded: false, volume: 0, gapVolume: 4 });
+    tick(FUT, t(10, 9, 10), { ltp: 104, volume: 20, ltt: t(10, 9, 10) }); // gap again, its trade time is known: traded, volume 0
+    at(t(10, 12));
+    expect(writer.of(FUT)[2]).toMatchObject({ ts: t(10, 9), traded: true, volume: 0, gapVolume: 6, unclassified: 0 });
+  });
+
+  it('ticks less than a whole silent minute apart are not a gap; a silent minute in between is', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(10, 0, 10), { ltp: 100, volume: 100 });
+    tick(FUT, t(10, 1, 50), { ltp: 100, volume: 110 }); // 100 s later, no whole minute without ticks: ordinary
+    tick(FUT, t(10, 2, 40), { ltp: 100, volume: 120 }); // 50 s later, the previous tick is in the previous minute → ordinary
+    tick(FUT, t(10, 5, 5), { ltp: 100, volume: 130 }); // 10:03 and 10:04 silent → gap
+    at(t(10, 8));
+    expect(writer.of(FUT).map((r) => [r.ts, r.volume, r.gapVolume])).toEqual([
+      [t(10, 0), 0, undefined],
+      [t(10, 1), 10, undefined],
+      [t(10, 2), 10, undefined],
+      [t(10, 5), 0, 10],
+    ]);
+  });
+
+  it('the pre-open quiet time before the first minute is not a gap; a silent first minute is', () => {
+    const { writer, tick, at } = setup();
+    tick(FUT, t(9, 10), { ltp: 99, volume: 0 }); // pre-open snapshot
+    tick(FUT, t(9, 16, 30), { ltp: 100, volume: 50 }); // 09:15 had no tick, but time before the open does not count
+    tick(FUT, t(9, 19, 30), { ltp: 100, volume: 90 }); // 09:17–09:18 silent → gap
+    at(t(9, 30));
+    expect(writer.of(FUT).map((r) => [r.ts, r.volume, r.gapVolume])).toEqual([
+      [t(9, 16), 50, undefined],
+      [t(9, 19), 0, 40],
+    ]);
+  });
+
+  it('a volume baseline set inside the session with trades already done marks that minute partial; baselines at zero or before the open do not', () => {
+    const { writer, tick, at } = setup();
+    // Restart at 10:30: the first tick brings 5,000 already traded today; the trades before it in this minute are unknown.
+    tick(FUT, t(10, 30, 20), { ltp: 100, volume: 5000 });
+    tick(FUT, t(10, 30, 40), { ltp: 100.5, volume: 5010 });
+    tick(FUT, t(10, 31, 10), { ltp: 101, volume: 5025 });
+    // Another contract: baseline of 0 inside the session (nothing traded yet) is complete.
+    const k = opt('CE', 25_000);
+    tick(k, t(10, 30, 20), { ltp: 10, volume: 0 });
+    tick(k, t(10, 30, 50), { ltp: 11, volume: 7 });
+    // And one whose baseline came before the open.
+    const k2 = opt('PE', 25_000);
+    tick(k2, t(9, 10), { ltp: 10, volume: 300 });
+    tick(k2, t(9, 15, 20), { ltp: 11, volume: 310 });
+    at(t(10, 40));
+    expect(writer.of(FUT).map((r) => [r.ts, r.volume, r.partial])).toEqual([
+      [t(10, 30), 10, true],
+      [t(10, 31), 15, undefined],
+    ]);
+    expect(writer.of(k)[0]).toMatchObject({ volume: 7 });
+    expect(writer.of(k)[0].partial).toBeUndefined();
+    expect(writer.of(k2)[0]).toMatchObject({ ts: t(9, 15), volume: 10 });
+    expect(writer.of(k2)[0].partial).toBeUndefined();
+  });
+});
+
 describe('Recorder: chain aggregates', () => {
   const strikes = [24_900, 25_000, 25_100];
   const F = 25_050;

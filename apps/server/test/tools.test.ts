@@ -227,6 +227,73 @@ describe('order flow (recorded quote-rule estimate)', () => {
     expect(summariseOrderFlow([]).sentiment).toBe('No trades');
   });
 
+  it('a feed gap: the volume that traded during it is shown as gapVolume, never as the minute\'s volume nor classified; the totals still reconcile', () => {
+    const { p, book, tools } = setup();
+    const key = nearFut(book);
+    const { rec, tick } = recordFlow(p, key, book.date);
+    tick('11:00', 5, { ltp: 25_100, volume: 300_000, bid: 25_099.9, ask: 25_100.1 }); // baseline only
+    tick('11:00', 20, { ltp: 25_100.1, volume: 300_150, bid: 25_100, ask: 25_100.2 }); // buy 150
+    // The feed drops from 11:01 to 11:04. The first tick back reports +500 at the ask of the old book:
+    // booked as the minute's volume it would be 500 more "buyer-initiated" units.
+    tick('11:05', 10, { ltp: 25_100.3, volume: 300_650, bid: 25_100.2, ask: 25_100.3 });
+    tick('11:05', 30, { ltp: 25_100.3, volume: 300_700, bid: 25_100.2, ask: 25_100.4 }); // an ordinary buy 50
+    p.setNow(hm(book.date, '11:07', 5));
+    rec.flushDue();
+    rec.stop();
+
+    const of = tools.orderFlow('NIFTY', { type: 'FUT' }, p.now());
+    expect(of.minutes.map((m) => [m.volume, m.buyVolume, m.sellVolume, m.unclassified, m.gapVolume])).toEqual([
+      [150, 150, 0, 0, null],
+      [50, 50, 0, 0, 500],
+    ]);
+    expect(of.minutes[1].ts).toBe(hm(book.date, '11:05'));
+    expect(of.session).toMatchObject({ volume: 200, buyVolume: 200, gapVolume: 500, buyPct: 100, unclassifiedPct: 0 });
+    // Σ(volume + gapVolume) is the feed's Δ cumulative volume.
+    expect(of.session.volume + of.session.gapVolume).toBe(300_700 - 300_000);
+    expect(of.lastMinute).toMatchObject({ gapVolume: 500, volume: 50, sentiment: 'Buyers dominant' });
+    expect(of.signal).toMatch(/a feed gap ended in this minute: 500 traded during the gap are not classified/);
+    expect(of.gaps?.feedGaps).toMatch(/1 minute \(11:05\) follow a feed gap: 500 traded during the gaps at unknown times.*never classified/);
+    // The dashboard / alert one-minute view carries it too.
+    expect(tools.lastMinuteFlow('NIFTY', p.now())).toMatchObject({ ts: hm(book.date, '11:05'), gapVolume: 500, partialMinutes: 0, buyVolume: 50, delta: 50 });
+  });
+
+  it('a minute whose only volume is gap volume is "Feed gap": nothing is classified, no buy share', () => {
+    const { p, book, tools } = setup();
+    const t0 = hm(book.date, '10:58');
+    p.intraday.addMinutes(nearFut(book), [
+      { ts: t0, open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, buyVolume: 60, sellVolume: 40, unclassified: 0 },
+      { ts: t0 + MIN, open: 1, high: 1, low: 1, close: 1, traded: false, volume: 0, gapVolume: 800, buyVolume: 0, sellVolume: 0, unclassified: 0 },
+    ]);
+    const of = tools.orderFlow('NIFTY', { type: 'FUT' }, p.now());
+    expect(of.lastMinute).toMatchObject({ volume: 0, gapVolume: 800, buyVolume: 0, sellVolume: 0, buyPct: null, delta: 0, sentiment: 'Feed gap' });
+    expect(of.signal).toMatch(/^10:59–11:00: the feed had a gap before this minute — 800 traded during the gap, not classified/);
+    expect(of.minutes[1]).toMatchObject({ volume: 0, gapVolume: 800, buyPct: null, close: null });
+    expect(tools.lastMinuteFlow('NIFTY', p.now())).toMatchObject({ sentiment: 'Feed gap', gapVolume: 800, buyPct: null });
+    expect(summariseOrderFlow([{ volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, gapVolume: 5 }]).sentiment).toBe('Feed gap');
+    expect(summariseOrderFlow([{ volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0 }]).sentiment).toBe('No trades');
+  });
+
+  it('a minute the recording started inside is a lower bound: marked partial in the minutes, the summary, the signal and the gaps', () => {
+    const { p, book, tools } = setup();
+    const t0 = hm(book.date, '10:58');
+    p.intraday.addMinutes(nearFut(book), [
+      { ts: t0, open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, buyVolume: 60, sellVolume: 40, unclassified: 0, partial: true },
+      { ts: t0 + MIN, open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, buyVolume: 70, sellVolume: 30, unclassified: 0 },
+    ]);
+    let of = tools.orderFlow('NIFTY', { type: 'FUT' }, p.now());
+    expect(of.minutes.map((m) => m.partial)).toEqual([true, false]);
+    expect(of.session.partialMinutes).toBe(1);
+    expect(of.lastMinute?.partialMinutes).toBe(0);
+    expect(of.gaps?.partial).toMatch(/started \(or restarted\) inside 10:58: the volume of that minute is a lower bound/);
+    expect(of.signal).not.toMatch(/lower bound/);
+    // When the partial minute is the last one, the signal says so.
+    p.intraday.addMinutes(nearFut(book), [{ ts: t0 + 2 * MIN, open: 1, high: 1, low: 1, close: 1, traded: true, volume: 10, buyVolume: 10, sellVolume: 0, unclassified: 0, partial: true }]);
+    p.setNow(hm(book.date, '11:01', 5));
+    of = tools.orderFlow('NIFTY', { type: 'FUT' }, p.now());
+    expect(of.signal).toMatch(/recording started inside this minute, so its volume is a lower bound/);
+    expect(tools.lastMinuteFlow('NIFTY', p.now())).toMatchObject({ partialMinutes: 1, gapVolume: 0 });
+  });
+
   it('a past session is served from its recorded minutes only; earlier dates and unrecorded contracts are 503', async () => {
     const { p, book, tools } = setup();
     // The sample book's recorded session has NIFTY future minutes with volume but no buy/sell split:

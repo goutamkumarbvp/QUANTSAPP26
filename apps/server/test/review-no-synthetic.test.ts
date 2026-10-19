@@ -41,12 +41,15 @@ describe('as-of (?at=) quotes never present a partial or older recording as the 
     const d = book.recordedDate;
     // RELIANCE was recorded from 11:00 to 11:59 only.
     p.intraday.addMinutes(spotKey('RELIANCE'), minutes(p, d, '11:00', '12:00', 1400));
-    const q = underlyingQuoteAt(p, 'RELIANCE', at(d, '14:00'));
+    // (Asked at 12:01, right after the recording ended: at 14:00 nothing was recorded, see the as-of tests below.)
+    const q = underlyingQuoteAt(p, 'RELIANCE', at(d, '12:01'));
     expect(q.ltp).toBe(1400);
     // The 11:00 minute is not the session's open, and 11:00–11:59 is not the day's range.
     expect([q.open, q.high, q.low]).toEqual([null, null, null]);
-    // The price is the 11:59 minute's close: the quote is not "as of 14:00".
+    // The price is the 11:59 minute's close, stamped with that minute (never with the time asked).
     expect(q.ts).toBe(at(d, '11:59'));
+    // Two hours later the recorder was not running: no quote, not the 11:59 price presented as 14:00's.
+    expect(() => underlyingQuoteAt(p, 'RELIANCE', at(d, '14:00'))).toThrow(/Nothing recorded for RELIANCE at 14:00 on .*last recorded minute 11:59.*not running/);
 
     // BANKNIFTY: recorded from 09:15, but its first trade minute is 10:00 (quote-only minutes before):
     // the 10:00 minute is not the session's open either.
@@ -97,6 +100,86 @@ describe('as-of (?at=) quotes never present a partial or older recording as the 
     expect(row.ce.ivSource).not.toBe('mid');
     expect([row.pe.bid, row.pe.ask]).toEqual([789, 791]);
     expect(row.pe.ivSource).toBe('mid');
+  });
+});
+
+describe('as-of (?at=): a time at which the recorder was not running is not answered with the last recorded values', () => {
+  /** BANKNIFTY recorded 09:15–10:00 only (spot, the 56000 CE/PE of its first expiry, the future, the chain minutes). */
+  function bankNiftyUntil10(p: FakeProvider, book: ReturnType<typeof loadSampleBook>, spotUntil = '10:00') {
+    const d = book.recordedDate;
+    const e = book.expiries.BANKNIFTY[0];
+    p.intraday.addMinutes(spotKey('BANKNIFTY'), minutes(p, d, '09:15', spotUntil, 56000));
+    p.intraday.addMinutes(futKey('BANKNIFTY', e), minutes(p, d, '09:15', '10:00', 56050, { volume: 100, oi: 400_000 }));
+    for (const type of ['CE', 'PE'] as const) p.intraday.addMinutes(optKey('BANKNIFTY', e, type, 56000), minutes(p, d, '09:15', '10:00', 800, { oi: 50_000, volume: 10 }));
+    p.intraday.addChainMinutes(
+      'BANKNIFTY',
+      e,
+      minutes(p, d, '09:15', '10:00', 0).map((r) => ({ ts: r.ts, spot: 56000, ceOi: 50_000, peOi: 50_000, ceVolume: 10, peVolume: 10, pcr: 1, maxPain: 56000, atmStrike: 56000, atmIv: 0.16 })),
+    );
+    return { d, e };
+  }
+
+  it('chain: the spot (and the aggregates) of a time after the recording ended is a 503 naming the last recorded minute; the recorded spot time is in the chain', async () => {
+    const { p, book } = setup();
+    const { d, e } = bankNiftyUntil10(p, book);
+    // At 10:00 the 09:59 minute has just completed; one minute later it is still the minute before.
+    for (const hhmm of ['10:00', '10:01']) {
+      const c = await buildOptionChain(p, 'BANKNIFTY', e, { at: at(d, hhmm) });
+      expect(c.spot).toBe(56000);
+      expect(c.spotTs).toBe(at(d, '09:59')); // the recorded minute the spot comes from
+      expect(c.ts).toBe(at(d, hhmm));
+    }
+    // From 10:02 the recorder was not running: not the 09:59 spot, PCR and ATM IV presented as 10:02's / 14:00's / the close's.
+    for (const hhmm of ['10:02', '14:00', '16:00']) {
+      await expect(buildOptionChain(p, 'BANKNIFTY', e, { at: at(d, hhmm) }), hhmm).rejects.toMatchObject({
+        name: 'NoLiveData',
+        message: expect.stringMatching(new RegExp(`^Nothing recorded for BANKNIFTY at ${hhmm === '16:00' ? '15:30' : hhmm} on ${d} \\(last recorded minute 09:59\\)`)),
+      });
+    }
+    // Control: NIFTY was recorded to the close; after it the answer is the 15:29 minute's (15:30 is the end of the session).
+    const n = await buildOptionChain(p, 'NIFTY', book.expiries.NIFTY[0], { at: at(d, '16:00') });
+    expect(n.spotTs).toBe(at(d, '15:29'));
+  });
+
+  it('chain: without a recorded spot the newest recorded leg decides', async () => {
+    const { p, book } = setup();
+    const d = book.recordedDate;
+    const e = book.expiries.BANKNIFTY[0];
+    for (const type of ['CE', 'PE'] as const) p.intraday.addMinutes(optKey('BANKNIFTY', e, type, 56000), minutes(p, d, '09:15', '10:00', 800, { oi: 50_000, volume: 10 }));
+    const c = await buildOptionChain(p, 'BANKNIFTY', e, { at: at(d, '10:00') });
+    expect(c.spot).toBeNull();
+    expect(c.spotTs).toBeNull();
+    await expect(buildOptionChain(p, 'BANKNIFTY', e, { at: at(d, '14:00') })).rejects.toMatchObject({ message: expect.stringMatching(/Nothing recorded for BANKNIFTY .* options at 14:00 .*last recorded minute 09:59/) });
+  });
+
+  it('underlying quote: a spot not recorded just before `at` is a 503; a future or ATM IV not recorded then is blank', () => {
+    const { p, book } = setup();
+    const { d } = bankNiftyUntil10(p, book, '12:00'); // spot to 12:00, the rest to 10:00
+    const near = underlyingQuoteAt(p, 'BANKNIFTY', at(d, '10:00'));
+    expect([near.future, near.atmIv, near.ts]).toEqual([56050, 16, at(d, '09:59')]);
+    const later = underlyingQuoteAt(p, 'BANKNIFTY', at(d, '12:00'));
+    expect(later.ltp).toBe(56000);
+    expect(later.ts).toBe(at(d, '11:59'));
+    expect(later.future).toBeNull(); // the 09:59 future price is not the future at 12:00
+    expect(later.futureExpiry).toBe(book.expiries.BANKNIFTY[0]);
+    expect(later.atmIv).toBeNull();
+    expect(() => underlyingQuoteAt(p, 'BANKNIFTY', at(d, '14:00'))).toThrow(/Nothing recorded for BANKNIFTY at 14:00 .*last recorded minute 11:59/);
+  });
+
+  it('futures: a spot not recorded just before `at` is a 503; a future recorded earlier keeps its own minute and has no basis', () => {
+    const { p, book } = setup();
+    const { d } = bankNiftyUntil10(p, book, '12:00');
+    const [row] = futuresQuotesAt(p, 'BANKNIFTY', at(d, '10:00'));
+    expect([row.ltp, row.basis, row.ts]).toEqual([56050, 50, at(d, '09:59')]);
+    // At 12:00 the spot is current, the future's last record is 09:59: its price is stamped 09:59 and no basis against 12:00's spot.
+    const [later] = futuresQuotesAt(p, 'BANKNIFTY', at(d, '12:00'));
+    expect([later.ltp, later.ts, later.basis]).toEqual([56050, at(d, '09:59'), null]);
+    expect(() => futuresQuotesAt(p, 'BANKNIFTY', at(d, '14:00'))).toThrow(/Nothing recorded for BANKNIFTY at 14:00 .*last recorded minute 11:59/);
+    // No spot recorded at all: the newest future decides.
+    const q = setup();
+    q.p.intraday.addMinutes(futKey('RELIANCE', q.book.expiries.RELIANCE[0]), minutes(q.p, q.book.recordedDate, '09:15', '10:00', 1405, { volume: 10 }));
+    expect(() => futuresQuotesAt(q.p, 'RELIANCE', at(q.book.recordedDate, '14:00'))).toThrow(/Nothing recorded for RELIANCE futures at 14:00 .*last recorded minute 09:59/);
+    expect(futuresQuotesAt(q.p, 'RELIANCE', at(q.book.recordedDate, '10:00'))[0].ltp).toBe(1405);
   });
 });
 

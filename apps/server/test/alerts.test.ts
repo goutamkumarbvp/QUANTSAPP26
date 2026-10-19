@@ -167,6 +167,29 @@ describe('alerts on live values', () => {
     expect(() => alerts.create('u1', { kind: 'ORDER_FLOW', symbol: 'NIFTY', condition: 'above', value: 101 })).toThrow(/between 0 and 100/);
   });
 
+  it('ORDER_FLOW never evaluates a minute that follows a feed gap or whose volume is a lower bound; the next ordinary minute is evaluated', async () => {
+    const { p, book, alerts, m1 } = setup();
+    const fut = futKey('NIFTY', m1);
+    const a = alerts.create('u1', { kind: 'ORDER_FLOW', symbol: 'NIFTY', condition: 'above', value: 60 });
+    // 11:00: a feed gap ended here; the minute's own trades are 100 % buys, the 400 units of the gap are unknown.
+    p.intraday.addMinutes(fut, [{ ts: hm(book.date, '11:00'), open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, gapVolume: 400, buyVolume: 100, sellVolume: 0, unclassified: 0 }]);
+    p.setNow(hm(book.date, '11:01', 5));
+    await alerts.evaluate();
+    expect(a).toMatchObject({ status: 'active', lastValue: null });
+    expect(a.statusNote).toBe('11:00: a feed gap ended in this minute (400 units traded during the gap cannot be classified): not evaluated');
+    // 11:01: the recording started inside the minute (its volume is a lower bound).
+    p.intraday.addMinutes(fut, [{ ts: hm(book.date, '11:01'), open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, buyVolume: 100, sellVolume: 0, unclassified: 0, partial: true }]);
+    p.setNow(hm(book.date, '11:02', 5));
+    await alerts.evaluate();
+    expect(a).toMatchObject({ status: 'active', lastValue: null });
+    expect(a.statusNote).toMatch(/^11:01: recording of the NIFTY .* future started inside this minute \(its volume is incomplete\): not evaluated$/);
+    // 11:02: an ordinary minute is evaluated again.
+    p.intraday.addMinutes(fut, [{ ts: hm(book.date, '11:02'), open: 1, high: 1, low: 1, close: 1, traded: true, volume: 100, buyVolume: 90, sellVolume: 10, unclassified: 0 }]);
+    p.setNow(hm(book.date, '11:03', 5));
+    await alerts.evaluate();
+    expect(a).toMatchObject({ status: 'triggered', triggeredValue: 90 });
+  });
+
   it('ORB_BREAK: recorded bars missing → skipped (not disabled); fires on a break confirmed after arming', async () => {
     let mode: 'nodata' | 'old' | 'new' = 'nodata';
     const ev = (crossTs: number): OrbEvaluation => ({

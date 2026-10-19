@@ -162,6 +162,11 @@ describe('IntradayFiles', () => {
     s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100, high: 101, low: 99, close: 100.5, traded: true, volume: 10, buyVolume: 6, sellVolume: 4, unclassified: 0, oi: 100 } }]);
     s.writeMinutes([{ key: k, rec: { ts: t(10, 0), open: 100.4, high: 102, low: 100, close: 101, traded: false, volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, oi: 200 } }]);
     expect(new IntradayFiles({ dataDir: dir }).bars(k, D)).toEqual([{ ts: t(10, 0), open: 100, high: 102, low: 99, close: 101, traded: true, volume: 10, buyVolume: 6, sellVolume: 4, unclassified: 0, oi: 200 }]);
+    // A restart inside a minute: the volumes behind a feed gap (gapVolume) add up and the lower-bound flag survives the merge.
+    const g = opt('PE', 25_000);
+    s.writeMinutes([{ key: g, rec: { ts: t(10, 1), open: 5, high: 5, low: 5, close: 5, traded: true, volume: 4, gapVolume: 3, buyVolume: 4, sellVolume: 0, unclassified: 0 } }]);
+    s.writeMinutes([{ key: g, rec: { ts: t(10, 1), open: 5, high: 6, low: 5, close: 6, traded: true, volume: 2, gapVolume: 1, buyVolume: 0, sellVolume: 0, unclassified: 2, partial: true } }]);
+    expect(new IntradayFiles({ dataDir: dir }).bars(g, D)).toEqual([{ ts: t(10, 1), open: 5, high: 6, low: 5, close: 6, traded: true, volume: 6, gapVolume: 4, buyVolume: 4, sellVolume: 0, unclassified: 2, partial: true }]);
     // Records without volume (index spots) stay without it; quote-only halves stay not traded.
     s.writeMinutes([{ key: SPOT, rec: bar(t(10, 0), 25_000, { traded: false }) }, { key: SPOT, rec: bar(t(10, 0), 25_002, { traded: false }) }]);
     expect(s.bars(SPOT, D)).toEqual([{ ts: t(10, 0), open: 25_000, high: 25_002, low: 25_000, close: 25_002, traded: false }]);

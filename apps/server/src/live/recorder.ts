@@ -274,7 +274,8 @@ export class Recorder implements LiveBarSource {
     // from the open: the pre-open's last tick is not a gap), e.g. a dropped feed, a reconnect or a
     // re-subscription. The volume this tick reports traded somewhere in that gap.
     const gap = inst.lastTs !== undefined && Math.max(inst.lastTs, open) < minuteOf(q.ts) - MINUTE_MS;
-    if (inst.lastTs === undefined || q.ts > inst.lastTs) inst.lastTs = q.ts;
+    // (A tick stamped ahead of the clock is state-only: it must not move the gap clock past real time.)
+    if (q.ts <= now + this.maxLeadMs && (inst.lastTs === undefined || q.ts > inst.lastTs)) inst.lastTs = q.ts;
     let dv = 0;
     if (isNum(q.volume) && q.volume >= 0) {
       inst.tracksVolume = true;
