@@ -115,7 +115,7 @@ describe('operations journal', () => {
 function fakeLoginTarget(init: Partial<KotakSessionStatus> = {}) {
   const st: { s: KotakSessionStatus; job?: { running: boolean; nextAt?: number }; creds: boolean } = { s: { loggedIn: false, feedUrlKnown: false, ...init }, creds: true };
   const listeners = new Set<(s: KotakSessionStatus) => void>();
-  const calls = { ensureLogin: 0, ensureRelogin: 0, loginNow: [] as { force?: boolean }[] };
+  const calls = { ensureLogin: 0, ensureRelogin: 0, loginNow: [] as { force?: boolean; fresh?: boolean }[] };
   let loginNowResult: () => Promise<'logged-in' | 'already-logged-in' | 'in-progress'> = async () => 'logged-in';
   const target: LoginTarget = {
     credentials: () => (st.creds ? { ok: true } : { ok: false, error: 'Kotak credentials missing in .env: NEO_MPIN' }),
@@ -158,7 +158,12 @@ describe('login monitor', () => {
     // The attempt fails (network): WAITING with the next attempt time.
     now += 2_000;
     f.st.job = { running: false, nextAt: now + 5_000 };
-    f.emit({ loggedIn: false, error: 'Kotak TOTP login failed: network error (fetch failed)', loginBlockedUntil: now + 5_000 });
+    f.emit({
+      loggedIn: false,
+      error: 'Kotak TOTP login failed: network error (fetch failed)',
+      loginBlockedUntil: now + 5_000,
+      loginFailures: { rejected: 0, transient: 1, lastError: 'Kotak TOTP login failed: network error (fetch failed)' },
+    });
     const s = m.status();
     expect(s.state).toBe('WAITING');
     expect(s.nextAttemptAt).toBe(now + 5_000);
@@ -186,20 +191,20 @@ describe('login monitor', () => {
 
   it('"Re-login now": skips the back-off; presses 20 s apart, 2 min apart after 3 refusals in a row', async () => {
     let now = MON_11;
-    const f = fakeLoginTarget({ loggedIn: false, error: 'x', loginFailures: { rejected: 1, network: 0 } });
+    const f = fakeLoginTarget({ loggedIn: false, error: 'x', loginFailures: { rejected: 1, transient: 0 } });
     const m = new LoginMonitor(f.target, new OpsJournal({ dataDir: null }), { now: () => now, timers: manualTimers() });
     expect(await m.relogin()).toEqual({ ok: true, message: 'Logged in to Kotak Neo' });
-    expect(f.calls.loginNow).toEqual([{ force: true }]);
+    expect(f.calls.loginNow).toEqual([{ force: true, fresh: false }]);
     expect((await m.relogin()).message).toMatch(/try again in \d+ s/);
     expect(f.calls.loginNow.length).toBe(1);
 
     now += 120_000;
-    f.st.s = { loggedIn: false, feedUrlKnown: false, error: 'Invalid MPIN', loginFailures: { rejected: MANUAL_SLOW_AFTER_REJECTIONS, network: 0 } };
+    f.st.s = { loggedIn: false, feedUrlKnown: false, error: 'Invalid MPIN', loginFailures: { rejected: MANUAL_SLOW_AFTER_REJECTIONS, transient: 0 } };
     f.setLoginNow(async () => {
       throw new Error('Kotak MPIN validate failed: Invalid MPIN (HTTP 401)');
     });
     const r = await m.relogin();
-    expect(f.calls.loginNow[1]).toEqual({ force: true });
+    expect(f.calls.loginNow[1]).toEqual({ force: true, fresh: false });
     expect(r.ok).toBe(false);
     expect(r.message).toContain('Check the NEO_* values in .env');
     now += 60_000;
@@ -213,9 +218,58 @@ describe('login monitor', () => {
     expect(m.status()).toMatchObject({ state: 'PAUSED' });
     expect(m.status().detail).toContain('Automatic login paused');
 
+    // Paused: one forced attempt per 15 min.
+    now += 5 * 60_000;
+    expect((await m.relogin()).message).toMatch(/try again in \d+ s/);
+    expect(f.calls.loginNow.length).toBe(3);
+    now += 15 * 60_000;
+    await m.relogin();
+    expect(f.calls.loginNow.length).toBe(4);
+
     f.st.creds = false;
     expect((await m.relogin()).message).toContain('NEO_MPIN');
     expect(m.status().state).toBe('NO_CREDENTIALS');
+  });
+
+  it('counts only finished login attempts; journals failed proactive re-logins and silent token expiry', () => {
+    let now = MON_11;
+    const journal = new OpsJournal({ dataDir: null, now: () => now });
+    const f = fakeLoginTarget({ loggedIn: true, loggedInAt: now - 3_600_000, tokenExpiresAt: now + 600_000 });
+    const m = new LoginMonitor(f.target, journal, { now: () => now, timers: manualTimers() });
+    m.start();
+    // A rejected REST request with no login attempt (no failure counted by the session).
+    f.emit({ loggedIn: true, loggedInAt: now - 3_600_000, tokenExpiresAt: now + 600_000 });
+    expect(m.status().today.failures).toBe(0);
+    // The proactive re-login fails while the old token is still valid.
+    f.emit({ loggedIn: true, loggedInAt: now - 3_600_000, tokenExpiresAt: now + 600_000, loginFailures: { rejected: 0, transient: 1, lastError: 'Kotak TOTP login failed: service unavailable (HTTP 503)' } });
+    const s1 = m.status();
+    expect(s1.state).toBe('LOGGED_IN');
+    expect(s1.today.failures).toBe(1);
+    expect(s1.detail).toContain('the last re-login failed (Kotak TOTP login failed: service unavailable (HTTP 503)): retrying');
+    expect(journal.list()[0].type).toBe('RELOGIN_FAILED');
+    // The same status again (another emit, no new attempt): not counted twice.
+    f.emit({ loggedIn: true, loggedInAt: now - 3_600_000, tokenExpiresAt: now + 600_000, loginFailures: { rejected: 0, transient: 1 } });
+    expect(m.status().today.failures).toBe(1);
+    // Paused while still logged in: shown as PAUSED, and "Re-login now" logs in afresh.
+    f.st.s = { ...f.st.s, loginPaused: 'Kotak refused 5 logins in a row (last: Invalid MPIN); fix …' };
+    expect(m.status().state).toBe('PAUSED');
+    expect(m.status().detail).toContain('stays valid until');
+    // The token runs out without any session event: the next check journals the loss and arms a login.
+    now += 700_000;
+    f.st.s = { loggedIn: false, feedUrlKnown: false, error: 'Kotak trade token expired' };
+    m.check();
+    expect(m.status().today.sessionLosses).toBe(1);
+    expect(journal.list().map((e) => e.type)).toEqual(expect.arrayContaining(['SESSION_LOST', 'LOGIN_ARMED']));
+  });
+
+  it('"Re-login now" while logged in logs in afresh only when the re-login keeps failing', async () => {
+    const f = fakeLoginTarget({ loggedIn: true, loggedInAt: MON_11 - 60_000 });
+    const m = new LoginMonitor(f.target, new OpsJournal({ dataDir: null }), { now: () => MON_11, timers: manualTimers() });
+    expect((await m.relogin()).message).toMatch(/Already logged in/);
+    expect(f.calls.loginNow).toEqual([]);
+    f.st.s = { ...f.st.s, loginFailures: { rejected: 1, transient: 0, lastError: 'Invalid MPIN' } };
+    await m.relogin();
+    expect(f.calls.loginNow).toEqual([{ force: true, fresh: true }]);
   });
 });
 
@@ -498,10 +552,10 @@ describe('weekly audit', () => {
 /* ------------------------------------------------------------------------------------------ */
 
 describe('/api/ops routes', () => {
-  async function app(withOps: boolean) {
+  async function app(withOps: boolean, opsAdmins: string[] = []) {
     const p = new FakeProvider();
     loadSampleBook(p);
-    const svc = createServices(loadConfig({ persist: false, authSecret: 'test-secret' }), { provider: p });
+    const svc = createServices(loadConfig({ persist: false, authSecret: 'test-secret', opsAdmins }), { provider: p });
     const relogin = vi.fn(async () => ({ ok: true, message: 'Logged in to Kotak Neo' }));
     const status = { broker: 'DISCONNECTED', feed: 'DATA UNAVAILABLE', liveTrading: 'NOT READY' } as unknown as OpsStatusResponse;
     const ops = {
@@ -532,6 +586,25 @@ describe('/api/ops routes', () => {
     expect((await a.inject({ method: 'POST', url: '/api/ops/audit/run', headers: auth })).json()).toMatchObject({ ok: true, message: 'Audit started' });
     expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/r1' })).statusCode).toBe(200);
     expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/nope' })).statusCode).toBe(404);
+  });
+
+  it('only an operator may run the actions: the first registered account, or the OPS_ADMIN_EMAILS accounts', async () => {
+    const register = async (a: Awaited<ReturnType<typeof app>>['a'], email: string) => token((await a.inject({ method: 'POST', url: '/api/auth/register', payload: { name: 'X', email, password: 'secret1' } })).body);
+    const press = (a: Awaited<ReturnType<typeof app>>['a'], t: string) => a.inject({ method: 'POST', url: '/api/ops/watchdog/run', headers: { authorization: `Bearer ${t}` } });
+    // Default: the owner (first registered account) only.
+    const one = await app(true);
+    const owner = await register(one.a, 'owner@example.com');
+    const stranger = await register(one.a, 'stranger@example.com');
+    expect((await press(one.a, owner)).statusCode).toBe(200);
+    const r = await press(one.a, stranger);
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toContain('first account registered');
+    // OPS_ADMIN_EMAILS: exactly the listed accounts (case-insensitive), whoever registered first.
+    const two = await app(true, ['ops@example.com']);
+    const first = await register(two.a, 'first@example.com');
+    const ops = await register(two.a, 'OPS@example.com');
+    expect((await press(two.a, first)).statusCode).toBe(403);
+    expect((await press(two.a, ops)).statusCode).toBe(200);
   });
 
   it('limits sign-in attempts per client address (429 with Retry-After)', async () => {

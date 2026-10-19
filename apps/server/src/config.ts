@@ -21,6 +21,11 @@ export interface AppConfig {
   authSecret: string;
   /** Why AUTH_SECRET is not used: unset, or a placeholder / too short (a random secret is used instead). */
   authSecretIssue?: 'unset' | 'weak';
+  /**
+   * OPS_ADMIN_EMAILS: registered accounts allowed to run operations (Re-login now, health check,
+   * audit), lower-case. Empty: only the first account registered on this server (its owner).
+   */
+  opsAdmins: string[];
   /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
   persist: boolean;
@@ -69,6 +74,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     webDist: process.env.WEB_DIST ?? path.resolve(here, '../../web/dist'),
     riskFreeRate: num('RISK_FREE_RATE', 0.065),
     ...authSecretFrom(process.env.AUTH_SECRET),
+    opsAdmins: (process.env.OPS_ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),

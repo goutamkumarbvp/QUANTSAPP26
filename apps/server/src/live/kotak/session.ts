@@ -16,11 +16,15 @@
  * rejected again after its fresh login holds logins for that cooldown, doubling (to 30 min) while
  * nothing is served in between, so logins that succeed on a session every request refuses cannot
  * repeat every few minutes. Failed logins back off (60 s doubling to 30 min; a 429 holds for
- * Retry-After, or 5 min without one). A login that got no answer at all (DNS, refused, timeout)
- * reached no account check, so it is retried soon instead (5 s doubling to 1 min) and does not
- * count towards the credential back-off. After `maxRejectedLogins` (default 5) refusals in a row,
- * automatic logins pause until a forced login (operator "Re-login now") succeeds or the server
- * restarts with corrected credentials: repeated wrong credentials can lock the trading account.
+ * Retry-After, or 5 min without one). Only a REFUSAL counts towards that back-off and the pause: a
+ * 4xx answer (other than 408/429) or an error body, or an MPIN validate that timed out after the TOTP
+ * step was accepted (Kotak may have checked the MPIN). A TRANSIENT failure — no answer at the TOTP
+ * step, DNS / refused connection, 5xx, 408, 429, a non-JSON (maintenance) page — reached no account
+ * check, so it is retried soon (5 s doubling to 1 min; a 429 waits for Retry-After) without counting.
+ * After `maxRejectedLogins` (default 5) refusals in a row automatic logins pause until a forced login
+ * (operator "Re-login now") succeeds or the server restarts with corrected credentials: repeated wrong
+ * credentials can lock the trading account. `force` never skips a 429 hold nor the hold after
+ * sessions were rejected again after a fresh login (authHoldUntil).
  */
 import type { NeoEnv } from '../env';
 import { scrubSecrets } from '../env';
@@ -106,8 +110,8 @@ export interface KotakSessionStatus {
   nextReloginAt?: number;
   /** Automatic logins are held until this time after failures / 429. */
   loginBlockedUntil?: number;
-  /** Failed logins since the last success: refused by Kotak / no answer (network). */
-  loginFailures?: { rejected: number; network: number };
+  /** Failed logins since the last success: refused (counts towards the pause) / transient (no account check reached). */
+  loginFailures?: { rejected: number; transient: number; lastError?: string };
   /** Automatic logins are paused after too many refusals in a row (why, and what to do). */
   loginPaused?: string;
   feedUrlKnown: boolean;
@@ -150,8 +154,10 @@ interface ActiveSession {
 type Json = Record<string, unknown>;
 
 const MINUTE = 60_000;
-/** First retry after a login that got no answer (network); doubles to MINUTE. */
+/** First retry after a transient login failure (no account check reached); doubles to MINUTE. */
 const NET_RETRY_MS = 5_000;
+/** Connection errors that prove the request never reached Kotak. */
+const NEVER_CONNECTED = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
 const DAY = 24 * 60 * MINUTE;
 const IST_OFFSET_MS = 330 * MINUTE;
 const RATE_HEADERS = ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'];
@@ -257,10 +263,10 @@ export class KotakSession {
   private loginInFlight: Promise<void> | null = null;
   private lastTotpCounter: number | undefined;
   private failures = 0;
-  /** Logins in a row that got no answer from Kotak (network): their own, short back-off. */
-  private netFailures = 0;
-  /** The attempt in progress failed before Kotak answered (set by loginStep). */
-  private loginNetworkError = false;
+  /** Transient login failures in a row (no account check reached): their own, short back-off. */
+  private transientFailures = 0;
+  /** The attempt in progress failed transiently (set by loginStep). */
+  private loginTransient = false;
   private blockedUntil = 0;
   /** The last login failure was a 429 (its hold cannot be skipped with `force`). */
   private lastWasRateLimited = false;
@@ -331,7 +337,7 @@ export class KotakSession {
   }
 
   private async doLogin(): Promise<void> {
-    this.loginNetworkError = false;
+    this.loginTransient = false;
     try {
       // A fresh code from a window never used before (a rejected session must not reuse it).
       const { code, counter } = await freshTotp(this.creds.totpSecret, { now: this.now, sleep: this.sleep }, { afterCounter: this.lastTotpCounter });
@@ -379,7 +385,7 @@ export class KotakSession {
         okEndpoints: new Set(),
       };
       this.failures = 0;
-      this.netFailures = 0;
+      this.transientFailures = 0;
       this.blockedUntil = 0;
       this.lastError = undefined;
       this.lastWasRateLimited = false;
@@ -391,9 +397,9 @@ export class KotakSession {
       const err = e instanceof KotakError ? e : new KotakError(`Kotak login failed: ${this.scrub(e instanceof Error ? e.message : String(e))}`, 'login');
       const t = this.now();
       let hold: number;
-      if (this.loginNetworkError) {
-        this.netFailures++;
-        hold = Math.min(MINUTE, NET_RETRY_MS * 2 ** (this.netFailures - 1));
+      if (this.loginTransient) {
+        this.transientFailures++;
+        hold = Math.min(MINUTE, NET_RETRY_MS * 2 ** (this.transientFailures - 1));
       } else {
         this.failures++;
         hold = Math.min(30 * MINUTE, MINUTE * 2 ** (this.failures - 1));
@@ -402,10 +408,14 @@ export class KotakSession {
       if (this.lastWasRateLimited) hold = Math.max(hold, err.retryAfterMs ?? 5 * MINUTE);
       this.blockedUntil = t + hold;
       this.lastError = err.message;
-      const line = `${err.message}; next automatic login not before ${istWhen(this.blockedUntil, t)}`;
-      // While Kotak cannot be reached the retries run every minute: one warning, then one per 10 attempts.
-      if (this.loginNetworkError && this.netFailures > 1 && this.netFailures % 10 !== 0) this.log.debug?.(line);
-      else this.log.warn(line);
+      if (this.failures >= this.maxRejectedLogins) {
+        this.log.warn(`Kotak automatic login paused: ${this.pausedReason()}`);
+      } else {
+        const line = `${err.message}; next automatic login not before ${istWhen(this.blockedUntil, t)}`;
+        // While Kotak cannot be reached the retries run every minute: one warning, then one per 10 attempts.
+        if (this.loginTransient && this.transientFailures > 1 && this.transientFailures % 10 !== 0) this.log.debug?.(line);
+        else this.log.warn(line);
+      }
       throw err;
     } finally {
       this.emit();
@@ -424,13 +434,22 @@ export class KotakSession {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
-      this.loginNetworkError = true;
+      // The TOTP step never reached an account check. The MPIN validate step only runs after Kotak
+      // accepted the TOTP: unless the connection provably never opened, Kotak may have checked the MPIN.
+      this.loginTransient = step === 'tradeApiLogin' || NEVER_CONNECTED.has(String((e as { cause?: { code?: unknown } } | null)?.cause?.code));
       throw new KotakError(`Kotak ${label} failed: network error (${this.scrub(e instanceof Error ? e.message : String(e))})`, 'login');
     }
     this.noteRateHeaders(res.headers);
-    const parsed = parseJson(await res.text());
+    const text = await res.text();
+    const parsed = parseJson(text);
     if (res.status === 429) {
+      this.loginTransient = true;
       throw new KotakError(`Kotak ${label} rate-limited (HTTP 429)`, 'login', 429, undefined, retryAfterMs(res.headers, this.now()));
+    }
+    // Gateway down or under maintenance (5xx, 408, an HTML page instead of JSON): no account check.
+    if (res.status >= 500 || res.status === 408 || (text.trim() !== '' && parsed === undefined)) {
+      this.loginTransient = true;
+      throw new KotakError(`Kotak ${label} failed: service unavailable (HTTP ${res.status}${parsed === undefined && text.trim() ? ', not a JSON answer' : ''})`, 'login', res.status);
     }
     // A 2xx can still carry an error body with no `data` (kotak-rest-auth.md §1.2).
     const data = isObj(parsed) && isObj(parsed.data) ? parsed.data : undefined;
@@ -561,7 +580,8 @@ export class KotakSession {
     // login resets the failure back-off, so without this the cycle would repeat every cooldown).
     this.rejectedStreak++;
     const hold = Math.max(this.authReloginCooldownMs, Math.min(30 * MINUTE, this.authReloginCooldownMs * 2 ** (this.rejectedStreak - 1)));
-    this.blockedUntil = Math.max(this.blockedUntil, this.now() + hold);
+    // authHoldUntil: a forced login ("Re-login now") must not skip it either (login storm).
+    this.authHoldUntil = Math.max(this.authHoldUntil, this.now() + hold);
     this.emit();
   }
 
@@ -594,7 +614,7 @@ export class KotakSession {
       if (cause.httpStatus === 403 && cause.stCode !== 1003) throw new KotakError(cause.message, 'api', 403, cause.stCode);
       this.session = null;
       this.lastError = `${cause.message} (again after a fresh login)`;
-      this.blockedUntil = Math.max(this.blockedUntil, this.lastAuthRelogin + this.authReloginCooldownMs);
+      this.authHoldUntil = Math.max(this.authHoldUntil, this.lastAuthRelogin + this.authReloginCooldownMs);
       this.emit();
       throw cause;
     }
@@ -688,7 +708,9 @@ export class KotakSession {
       ...(s ? { baseUrl: s.baseUrl, baseUrlSource: s.baseUrlSource, dataCenter: s.dataCenter, loggedInAt: s.loggedInAt, tokenExpiresAt: s.expiresAt } : {}),
       ...(s ? { nextReloginAt: this.nextReloginAt() ?? undefined } : {}),
       ...(Math.max(this.blockedUntil, this.authHoldUntil) > this.now() ? { loginBlockedUntil: Math.max(this.blockedUntil, this.authHoldUntil) } : {}),
-      ...(this.failures || this.netFailures ? { loginFailures: { rejected: this.failures, network: this.netFailures } } : {}),
+      ...(this.failures || this.transientFailures
+        ? { loginFailures: { rejected: this.failures, transient: this.transientFailures, ...(this.lastError ? { lastError: this.lastError } : {}) } }
+        : {}),
       ...(this.failures >= this.maxRejectedLogins ? { loginPaused: this.pausedReason() } : {}),
       feedUrlKnown: !!s?.feedUrl,
       ...(this.rateHeaders ? { rateLimitHeaders: { ...this.rateHeaders } } : {}),

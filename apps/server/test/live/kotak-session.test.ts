@@ -510,7 +510,7 @@ describe('KotakSession login back-off by cause (login monitor)', () => {
       await expect(session.login()).rejects.toThrow(/network error \(fetch failed\)/);
       const until = session.status().loginBlockedUntil!;
       holds.push(until - env.clock);
-      expect(session.status().loginFailures).toEqual({ rejected: 0, network: i + 1 });
+      expect(session.status().loginFailures).toMatchObject({ rejected: 0, transient: i + 1 });
       env.clock = until;
     }
     expect(holds).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
@@ -525,7 +525,7 @@ describe('KotakSession login back-off by cause (login monitor)', () => {
     const { env, session } = setup(() => ({ body: [] }), { login: () => ({ status: 401, body: LOGIN_ERROR }) });
     await expect(session.login()).rejects.toThrow(/Invalid credentials/);
     expect(session.status().loginBlockedUntil).toBe(env.clock + 60_000);
-    expect(session.status().loginFailures).toEqual({ rejected: 1, network: 0 });
+    expect(session.status().loginFailures).toMatchObject({ rejected: 1, transient: 0 });
   });
 
   it('writes one warning for a run of network failures, then one per 10 attempts', async () => {
@@ -562,5 +562,60 @@ describe('KotakSession pause after repeated refusals', () => {
     await session.login({ force: true });
     expect(session.status()).toMatchObject({ loggedIn: true });
     expect(session.status().loginPaused).toBeUndefined();
+  });
+});
+
+describe('KotakSession login failure classes (review fixes)', () => {
+  const fiveFailures = async (session: KotakSession, env: { clock: number }) => {
+    for (let i = 0; i < 5; i++) {
+      await session.login().catch(() => undefined);
+      env.clock = Math.max(env.clock, session.status().loginBlockedUntil ?? env.clock);
+    }
+  };
+
+  it('a Kotak outage (5xx, HTML maintenance page, 429) is transient: it never pauses automatic logins', async () => {
+    for (const reply of [{ status: 503, text: 'Service Unavailable' }, { status: 200, text: '<html>Scheduled maintenance</html>' }, { status: 429, body: {}, headers: { 'retry-after': '1' } }] as Reply[]) {
+      const { env, session } = setup(() => ({ body: [] }), { login: () => reply });
+      await fiveFailures(session, env);
+      expect(session.status().loginPaused, JSON.stringify(reply)).toBeUndefined();
+      expect(session.status().loginFailures).toMatchObject({ rejected: 0, transient: 5 });
+      await expect(session.login()).rejects.toThrow(/service unavailable|rate-limited/); // still trying, not "paused"
+    }
+  });
+
+  it('a timed-out MPIN validate counts as a refusal (Kotak may have checked the MPIN); a DNS failure there does not', async () => {
+    const timeout = () => {
+      throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    };
+    const a = setup(() => ({ body: [] }), { validate: timeout });
+    await a.session.login().catch(() => undefined);
+    expect(a.session.status().loginFailures).toMatchObject({ rejected: 1, transient: 0 });
+    const dns = () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } });
+    };
+    const b = setup(() => ({ body: [] }), { validate: dns });
+    await b.session.login().catch(() => undefined);
+    expect(b.session.status().loginFailures).toMatchObject({ rejected: 0, transient: 1 });
+  });
+
+  it('a forced login is refused during the hold after a request was rejected again on a fresh session', async () => {
+    const { env, ff, session } = setup(() => ({ status: 401, body: INVALID_SESSION }), { deps: { authReloginCooldownMs: 5 * 60_000 } });
+    await expect(session.request('a', { kind: 'market' })).rejects.toBeDefined(); // login, refused, re-login, refused again
+    const held = session.status().loginBlockedUntil!;
+    expect(held).toBeGreaterThan(env.clock);
+    const before = ff.calls.length;
+    await expect(session.login({ force: true })).rejects.toThrow(/on hold/);
+    expect(ff.calls.length).toBe(before);
+  });
+
+  it('logs "automatic login paused" (not a next-attempt time) when the pause engages', async () => {
+    const lines: string[] = [];
+    const { env, session } = setup(() => ({ body: [] }), {
+      login: () => ({ status: 401, body: LOGIN_ERROR }),
+      deps: { logger: { info: () => undefined, warn: (m) => lines.push(m) } },
+    });
+    await fiveFailures(session, env);
+    expect(lines.at(-1)).toMatch(/^Kotak automatic login paused: Kotak refused 5 logins in a row/);
+    expect(lines.slice(0, 4).every((l) => /next automatic login not before/.test(l))).toBe(true);
   });
 });

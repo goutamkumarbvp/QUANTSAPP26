@@ -22,6 +22,7 @@ Copy `.env.example` to `.env` and fill it in. The file is excluded from git and 
 | Variable | Required | Notes |
 |---|---|---|
 | `NEO_CONSUMER_KEY`, `NEO_MOBILE_NUMBER`, `NEO_UCC`, `NEO_MPIN`, `NEO_TOTP_SECRET` | for live data | All five. Without them the app runs in DATA UNAVAILABLE mode, serving official EOD files and recorded history only |
+| `OPS_ADMIN_EMAILS` | recommended | Comma-separated e-mails of the operator accounts (dashboard operations buttons). Empty: only the first account registered on the server |
 | `AUTH_SECRET` | yes, in production | A random value of at least 16 characters, e.g. `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. A placeholder or short value is ignored with a warning |
 | `HOST` / `PORT` | — | Default `0.0.0.0:8787`. Use `127.0.0.1` behind a reverse proxy |
 | `DATA_DIR` | — | Default `apps/server/data`. Holds `db.json`, recorded sessions (`market/`), EOD files (`eod/`), the instrument master (`refdata/`) and operations data (`ops/`) |

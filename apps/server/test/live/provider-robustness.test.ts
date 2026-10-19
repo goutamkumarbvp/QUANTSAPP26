@@ -299,3 +299,21 @@ describe('LiveProvider combined Kotak REST load (worst case)', () => {
     }
   }, 60_000);
 });
+
+describe('LiveProvider forced login ("Re-login now", review fix)', () => {
+  it('a failed forced login is retried as a normal login: while paused, no further login reaches Kotak', async () => {
+    const timers = new ManualTimers(ist('20:00'));
+    // Wrong credentials: every TOTP login is refused.
+    const k = kotak((c) => (c.url === `${KOTAK_LOGIN_URL}tradeApiLogin` ? { status: 401, body: { stat: 'Not_Ok', emsg: 'Invalid credentials or TOTP.' } } : undefined));
+    const { p } = provider({ kotakFetch: k.kf.fn, wsFactory: fakeSockets().factory, now: timers.now, sleep: timers.sleep, timers });
+    await p.start();
+    await timers.advance(3 * 3_600_000); // 60 s, 2, 4, 8 min … → 5 refusals, then the pause
+    expect(p.session!.status().loginPaused).toMatch(/refused 5 logins/);
+    expect(k.logins()).toBe(5);
+    await expect(p.loginNow({ force: true })).rejects.toThrow(/Invalid credentials/);
+    expect(k.logins()).toBe(6); // the one forced attempt
+    await timers.advance(24 * 3_600_000);
+    expect(k.logins()).toBe(6); // its retries are normal logins: the pause holds
+    expect(p.session!.status().loginPaused).toBeDefined();
+  });
+});

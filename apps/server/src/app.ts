@@ -154,11 +154,28 @@ const RATE_LIMITS: Readonly<Record<string, number>> = {
   '/api/algos/:id/backtest-range': 20,
 };
 
-/** Operations actions (re-login, health check, audit): a registered account, not a guest. */
-function requireOperator(req: FastifyRequest): StoredUser {
+/**
+ * Operations actions (re-login, health check, audit): an operator account — one listed in
+ * OPS_ADMIN_EMAILS, or, when that is empty, the first account registered on this server (its owner).
+ * "Re-login now" can make a real Kotak login: a self-registered stranger must not be able to.
+ */
+function requireOperator(req: FastifyRequest, svc: Services): StoredUser {
   const u = requireUser(req);
   if (u.guest) throw Object.assign(new Error('Sign in with a registered account to run operations'), { statusCode: 403 });
+  const admins = svc.config.opsAdmins;
+  const allowed = admins.length ? admins.includes(u.email.trim().toLowerCase()) : ownerOf(svc)?.id === u.id;
+  if (!allowed) {
+    const why = admins.length ? 'operations are limited to the accounts in OPS_ADMIN_EMAILS' : 'operations are limited to the first account registered on this server (set OPS_ADMIN_EMAILS in .env to choose the operators)';
+    throw Object.assign(new Error(`Not an operator account: ${why}`), { statusCode: 403 });
+  }
   return u;
+}
+
+/** The first registered (non-guest) account of this server. */
+function ownerOf(svc: Services): StoredUser | undefined {
+  let owner: StoredUser | undefined;
+  for (const u of Object.values(svc.db.data.users)) if (!u.guest && u.passwordHash && (!owner || u.createdAt < owner.createdAt)) owner = u;
+  return owner;
 }
 
 export async function buildApp(
@@ -271,19 +288,19 @@ export async function buildApp(
   };
   app.get('/api/ops', async () => ops().status());
   app.post('/api/ops/login/relogin', async (req) => {
-    requireOperator(req);
+    requireOperator(req, svc);
     const r = await ops().login.relogin();
     return { ok: r.ok, message: r.message, status: ops().status() };
   });
   app.post('/api/ops/watchdog/run', async (req) => {
-    requireOperator(req);
+    requireOperator(req, svc);
     const checks = await ops().watchdog.run();
     const fixed = checks.filter((c) => c.result === 'fixed').length;
     const bad = checks.filter((c) => c.result === 'warn' || c.result === 'fail').length;
     return { ok: true, message: `Health check done: ${checks.length} checks, ${fixed} fixed, ${bad} need attention`, status: ops().status() };
   });
   app.post('/api/ops/audit/run', async (req) => {
-    requireOperator(req);
+    requireOperator(req, svc);
     const r = ops().audit.runNow();
     r.done?.catch((e) => app.log.warn(`weekly audit failed: ${e instanceof Error ? e.message : String(e)}`));
     return { ok: r.started, message: r.message, status: ops().status() };

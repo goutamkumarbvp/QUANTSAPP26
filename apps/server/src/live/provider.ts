@@ -471,10 +471,11 @@ export class LiveProvider implements MarketDataProvider {
     await this.refdataAttempt;
   }
 
-  private async login(force = false): Promise<void> {
+  private async login(force = false, fresh = false): Promise<void> {
     // An attempt armed for later (the end of a login hold, a back-off) may find the session already
-    // restored by a REST caller: logging in again would only replace a working session.
-    if (!this.session!.status().loggedIn) await this.session!.login({ force });
+    // restored by a REST caller: logging in again would only replace a working session (unless the
+    // operator asks for a fresh one because its re-logins keep failing).
+    if (fresh || !this.session!.status().loggedIn) await this.session!.login({ force });
     this.startOrUpdateFeed();
     this.scheduleRelogin();
     // Its own job, not awaited: while the login job runs, another login request (a feed refusal) is
@@ -502,8 +503,11 @@ export class LiveProvider implements MarketDataProvider {
     }, Math.max(0, at - this.now()));
   }
 
-  /** One attempt now (resolves when it has finished; never rejects). */
-  private async execJob(name: string, fn: () => Promise<void>, spec: JobSpec): Promise<void> {
+  /**
+   * One attempt now (resolves when it has finished; never rejects). A failure is retried with
+   * `retry` when given (e.g. a forced login is retried as a normal one), else with `fn`.
+   */
+  private async execJob(name: string, fn: () => Promise<void>, spec: JobSpec, retry: () => Promise<void> = fn): Promise<void> {
     const j = this.job(name);
     if (this.stopped) return;
     if (j.running) return; // the attempt in flight covers this call (never two logins at once)
@@ -529,7 +533,7 @@ export class LiveProvider implements MarketDataProvider {
       if (hold !== undefined) at = Math.max(at, hold + SECOND);
       // A failed Kotak login is already logged by the session (with its next login time): one line, not two.
       if (!(e instanceof KotakError && e.kind === 'login')) this.log.warn(`live: ${name} failed (${j.lastError}); next attempt ${istWhen(at, this.now())}`);
-      this.runJob(name, fn, spec, at);
+      this.runJob(name, retry, spec, at);
     } finally {
       j.running = false;
     }
@@ -691,13 +695,18 @@ export class LiveProvider implements MarketDataProvider {
    * the hold after repeated session rejections (the session enforces both). Resolves once the
    * attempt has finished; rejects with its error. A login already running is not doubled.
    */
-  async loginNow(opts: { force?: boolean } = {}): Promise<'logged-in' | 'already-logged-in' | 'in-progress'> {
+  async loginNow(opts: { force?: boolean; fresh?: boolean } = {}): Promise<'logged-in' | 'already-logged-in' | 'in-progress'> {
     const s = this.session;
     if (!s) throw new KotakError(this.kotakError ?? 'Kotak credentials missing', 'login');
-    if (s.status().loggedIn) return 'already-logged-in';
+    if (s.status().loggedIn && !opts.fresh) return 'already-logged-in';
     if (this.jobs.get('login')?.running || this.jobs.get('relogin')?.running) return 'in-progress';
-    await this.execJob('login', () => this.login(opts.force), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil });
-    if (!s.status().loggedIn) throw new KotakError(this.jobs.get('login')?.lastError ?? s.status().error ?? 'Kotak login failed', 'login');
+    const before = s.status().loggedInAt;
+    // Only this attempt is forced: its retries are normal logins (they respect the back-off and the pause).
+    await this.execJob('login', () => this.login(opts.force, opts.fresh), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil }, () => this.login());
+    const after = s.status();
+    if (!after.loggedIn || (opts.fresh && after.loggedInAt === before)) {
+      throw new KotakError(this.jobs.get('login')?.lastError ?? after.loginFailures?.lastError ?? after.error ?? 'Kotak login failed', 'login');
+    }
     return 'logged-in';
   }
 

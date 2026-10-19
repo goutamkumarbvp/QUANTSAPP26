@@ -31,7 +31,8 @@ export interface LoginTarget {
   ensureLogin(): boolean;
   /** Re-arm the proactive re-login when missing; true when it re-armed it. */
   ensureRelogin(): boolean;
-  loginNow(opts: { force?: boolean }): Promise<'logged-in' | 'already-logged-in' | 'in-progress'>;
+  /** `fresh`: log in again even while the current session is still valid (its re-login keeps failing). */
+  loginNow(opts: { force?: boolean; fresh?: boolean }): Promise<'logged-in' | 'already-logged-in' | 'in-progress'>;
   onLoginChange(fn: (s: KotakSessionStatus) => void): () => void;
 }
 
@@ -53,6 +54,11 @@ export interface ReloginResult {
 /** Refusals in a row after which "Re-login now" presses must be 2 min apart. */
 export const MANUAL_SLOW_AFTER_REJECTIONS = 3;
 const SLOW_MANUAL_COOLDOWN_MS = 2 * 60_000;
+/** While automatic logins are paused, one forced attempt per 15 min at most (account lock-out). */
+const PAUSED_MANUAL_COOLDOWN_MS = 15 * 60_000;
+
+/** Finished failed login attempts recorded by the session (refused + transient). */
+const failedAttempts = (st: KotakSessionStatus): number => (st.loginFailures?.rejected ?? 0) + (st.loginFailures?.transient ?? 0);
 
 export class LoginMonitor {
   readonly intervalMs: number;
@@ -66,6 +72,8 @@ export class LoginMonitor {
   private lastCheckAt: number | null = null;
   private wasLoggedIn = false;
   private lastLoggedInAt: number | undefined;
+  /** failedAttempts() at the last status seen: a failure is counted only when an attempt finished. */
+  private seenFailures = 0;
   private consecutiveFailures = 0;
   private lastFailure: { at: number; reason: string } | undefined;
   private day = '';
@@ -90,6 +98,7 @@ export class LoginMonitor {
       const st = this.target.status();
       this.wasLoggedIn = st.loggedIn;
       this.lastLoggedInAt = st.loggedInAt;
+      this.seenFailures = failedAttempts(st);
       this.unsubscribe = this.target.onLoginChange((s) => this.onChange(s));
     }
     this.timer = this.timers.setInterval(() => this.check(), this.intervalMs);
@@ -112,8 +121,15 @@ export class LoginMonitor {
     if (!this.target.credentials().ok) return;
     const st = this.target.status();
     if (st.loggedIn) {
+      this.wasLoggedIn = true;
       if (this.target.ensureRelogin()) this.event('info', 'RELOGIN_REARMED', 'Proactive re-login was not armed: armed it again');
       return;
+    }
+    // The token expired without any session event (expiry is computed, not announced): a loss too.
+    if (this.wasLoggedIn) {
+      this.wasLoggedIn = false;
+      this.today.sessionLosses++;
+      this.event('warn', 'SESSION_LOST', `Kotak session lost: ${st.error ?? 'trade token expired'}; logging in again`);
     }
     if (this.target.ensureLogin()) {
       const at = st.loginBlockedUntil;
@@ -126,10 +142,17 @@ export class LoginMonitor {
     const cred = this.target.credentials();
     if (!cred.ok) return { ok: false, message: `${cred.error}. Add them to .env and restart the server.` };
     const st = this.target.status();
-    if (st.loggedIn) return { ok: true, message: `Already logged in to Kotak Neo${st.loggedInAt ? ` since ${istWhen(st.loggedInAt, this.now())}` : ''}` };
+    // Logged in and its re-logins are fine: nothing to do. Logged in but the re-login keeps failing
+    // (or automatic logins are paused): log in afresh before the current token runs out.
+    const fresh = st.loggedIn && (!!st.loginPaused || failedAttempts(st) > 0);
+    if (st.loggedIn && !fresh) return { ok: true, message: `Already logged in to Kotak Neo${st.loggedInAt ? ` since ${istWhen(st.loggedInAt, this.now())}` : ''}` };
     const t = this.now();
     const rejected = st.loginFailures?.rejected ?? 0;
-    const cooldown = rejected >= MANUAL_SLOW_AFTER_REJECTIONS ? Math.max(this.manualCooldownMs, SLOW_MANUAL_COOLDOWN_MS) : this.manualCooldownMs;
+    const cooldown = st.loginPaused
+      ? Math.max(this.manualCooldownMs, PAUSED_MANUAL_COOLDOWN_MS)
+      : rejected >= MANUAL_SLOW_AFTER_REJECTIONS
+        ? Math.max(this.manualCooldownMs, SLOW_MANUAL_COOLDOWN_MS)
+        : this.manualCooldownMs;
     if (t - this.lastManualAt < cooldown) {
       const why = rejected >= MANUAL_SLOW_AFTER_REJECTIONS ? ` (Kotak refused the last ${rejected} logins: repeated wrong logins can lock the account)` : '';
       return { ok: false, message: `A re-login was requested ${Math.round((t - this.lastManualAt) / 1000)} s ago; try again in ${Math.ceil((this.lastManualAt + cooldown - t) / 1000)} s${why}` };
@@ -137,7 +160,7 @@ export class LoginMonitor {
     this.lastManualAt = t;
     this.event('info', 'MANUAL_RELOGIN', `Re-login requested from the dashboard${rejected ? ` (${rejected} refused login(s) in a row so far)` : ''}`);
     try {
-      const r = await this.target.loginNow({ force: true });
+      const r = await this.target.loginNow({ force: true, fresh });
       if (r === 'in-progress') return { ok: true, message: 'A login is already in progress' };
       if (r === 'already-logged-in') return { ok: true, message: 'Already logged in to Kotak Neo' };
       return { ok: true, message: 'Logged in to Kotak Neo' };
@@ -165,8 +188,12 @@ export class LoginMonitor {
     const st = this.target.status();
     const t = this.now();
     if (st.loggedIn) {
+      const until = st.tokenExpiresAt ? ` (the current session stays valid until ${istWhen(st.tokenExpiresAt, t)})` : '';
+      // A paused re-login is an outage waiting for the token to run out: shown, not hidden behind LOGGED_IN.
+      if (st.loginPaused) return { state: 'PAUSED', detail: `Automatic login paused: ${st.loginPaused}${until}`, ...base, ...(st.loggedInAt ? { loggedInAt: st.loggedInAt } : {}), ...(st.tokenExpiresAt ? { tokenExpiresAt: st.tokenExpiresAt } : {}) };
       const parts = [`Logged in${st.loggedInAt ? ` since ${istWhen(st.loggedInAt, t)}` : ''}`];
-      if (st.nextReloginAt) parts.push(`next scheduled re-login ${istWhen(st.nextReloginAt, t)}`);
+      if (failedAttempts(st) > 0) parts.push(`the last re-login failed (${st.loginFailures?.lastError ?? 'unknown'}): retrying${until}`);
+      else if (st.nextReloginAt) parts.push(st.nextReloginAt > t ? `next scheduled re-login ${istWhen(st.nextReloginAt, t)}` : 're-login due now');
       return {
         state: 'LOGGED_IN',
         detail: parts.join('; '),
@@ -195,6 +222,19 @@ export class LoginMonitor {
 
   private onChange(st: KotakSessionStatus): void {
     this.rollDay();
+    const failures = failedAttempts(st);
+    // A login attempt finished and failed (the session counted it): also when the old session is still
+    // valid (a failed proactive re-login). Emits without an attempt (a rejected request) are not failures.
+    if (failures > this.seenFailures) {
+      const reason = st.loginFailures?.lastError ?? st.error ?? 'login failed';
+      this.today.failures++;
+      this.consecutiveFailures++;
+      this.lastFailure = { at: this.now(), reason };
+      const next = st.loginBlockedUntil;
+      const what = st.loginPaused ? '; automatic login PAUSED' : next ? `; next automatic attempt ${istWhen(next, this.now())}` : '';
+      this.event('warn', st.loggedIn ? 'RELOGIN_FAILED' : 'LOGIN_FAILED', `${reason}${st.loggedIn ? ' (the current session is still valid)' : ''}${what}`);
+    }
+    this.seenFailures = failures;
     if (st.loggedIn) {
       if (st.loggedInAt !== this.lastLoggedInAt) {
         this.today.logins++;
@@ -202,19 +242,14 @@ export class LoginMonitor {
         this.event('info', 'LOGIN_OK', `Logged in to Kotak Neo${st.tokenExpiresAt ? `; token expires ${istWhen(st.tokenExpiresAt, this.now())}` : ''}`);
       }
       this.lastLoggedInAt = st.loggedInAt;
+      this.wasLoggedIn = true;
     } else if (this.wasLoggedIn) {
+      this.wasLoggedIn = false;
       this.today.sessionLosses++;
       this.event('warn', 'SESSION_LOST', `Kotak session lost: ${st.error ?? 'logged out'}; logging in again`);
       // Re-login at once (within the session's own hold), not at the next check.
       this.check();
-    } else if (st.error) {
-      this.today.failures++;
-      this.consecutiveFailures++;
-      this.lastFailure = { at: this.now(), reason: st.error };
-      const next = st.loginBlockedUntil;
-      this.event('warn', 'LOGIN_FAILED', `${st.error}${next ? `; next automatic attempt ${istWhen(next, this.now())}` : ''}`);
     }
-    this.wasLoggedIn = st.loggedIn;
   }
 
   private event(level: OpsEvent['level'], type: string, message: string): void {
