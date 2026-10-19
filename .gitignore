@@ -13,3 +13,5 @@ playwright-report/
 
 # Audit evidence (command outputs) is versioned
 !docs/q26-audit/evidence/**/*.log
+# Agent worktrees (temporary)
+.claude/worktrees/
