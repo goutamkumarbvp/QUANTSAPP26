@@ -1,0 +1,137 @@
+
+> q26-options@1.0.0 test
+> npm run test -w @q26/core && npm run test -w @q26/server && npm run test -w @q26/web
+
+
+> @q26/core@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /tmp/claude-0/-home-user-QUANTSAPP26/80c41c5a-cad1-533f-98d3-972cbc52ade6/scratchpad/baseline-audit/wt/packages/core
+
+ ✓ test/algo.test.ts (22 tests) 39ms
+ ✓ test/payoff-margin.test.ts (26 tests) 163ms
+ ✓ test/core.test.ts (24 tests) 478ms
+   ✓ optimizer > finds bullish strategies for a bullish target 319ms
+ ✓ test/orb.test.ts (10 tests) 16ms
+
+ Test Files  4 passed (4)
+      Tests  82 passed (82)
+   Start at  15:50:04
+   Duration  1.43s (transform 491ms, setup 0ms, collect 1.29s, tests 697ms, environment 1ms, prepare 411ms)
+
+
+> @q26/server@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /tmp/claude-0/-home-user-QUANTSAPP26/80c41c5a-cad1-533f-98d3-972cbc52ade6/scratchpad/baseline-audit/wt/apps/server
+
+ ✓ test/algo-live.test.ts (21 tests) 7023ms
+   ✓ live paper run (Strategy 2 · ₹20) > stop: squares off at the live asks through the broker 319ms
+   ✓ backtests replay recorded sessions only > replays a full recorded session minute by minute: entry 09:20, one +50 % adjustment, exit 15:25 491ms
+   ✓ backtests replay recorded sessions only > a recording that stops before the exit on expiry day: closed at the settlement price when published, else incomplete 558ms
+   ✓ backtests replay recorded sessions only > backtest range: replays the recorded sessions, lists the unrecorded ones as skipped, stats over complete days 642ms
+   ✓ backtests replay recorded sessions only > chooses the expiry per session from the recorded chain ("next" = the second recorded expiry) 555ms
+   ✓ backtests replay recorded sessions only > 503 without recordings; unrecorded dates, unknown lot sizes and late recordings are not replayed 463ms
+   ✓ backtests replay recorded sessions only > minutes without recorded data are not replayed (reported as a pause); the official file decides the nearest expiry 617ms
+   ✓ algo routes > serves the catalogue, 503 + NO_LIVE_DATA for an unrecorded backtest day, and runs for a signed-in user 570ms
+ ✓ test/analytics.test.ts (27 tests) 8118ms
+   ✓ volatility > a year of official history: daily ATM IV, IV rank/percentile, HV 20D and the realised-vol cone 1149ms
+   ✓ volatility > skew: IV per listed strike from live premiums, and the previous official close for comparison 437ms
+   ✓ straddle, strategy chart and recap > straddle from recorded premiums: rolling ATM at the recorded forward, fixed strikes and strangles 325ms
+   ✓ straddle, strategy chart and recap > straddle falls back to Kotak 1-minute history for active contracts; NoLiveData when nothing is recorded or served 380ms
+   ✓ optimizer and the market-wide option snapshot > optimizer ranks strategies on live premiums only and skips strikes without one 2203ms
+ ✓ test/live/sfeed-client.test.ts (55 tests) 232ms
+ ✓ test/tools.test.ts (22 tests) 3913ms
+   ✓ with the real Analytics (sample book) > every scanner, unusual and synopsis answer from live rows or 503 with the reason (no placeholder rows) 344ms
+ ✓ test/verify-adversarial.test.ts (20 tests) 4789ms
+   ✓ valuationTs / liveSessionDates / premiumTs over holidays and long weekends > is monotone non-decreasing in time and idempotent (a valuation time is its own valuation time) 495ms
+   ✓ end to end over a holiday and a long weekend > Monday holiday: Friday 15:29 premiums give the same ATM IV / carry / theta on Saturday, Monday (holiday) and Tuesday 09:05 (expiry morning); no NaN anywhere 424ms
+   ✓ end to end over a holiday and a long weekend > Friday holiday (long weekend): Thursday 15:29 premiums are valued at Thursday 15:30 on Friday, Saturday, Sunday and Monday pre-open 334ms
+   ✓ day orders around the close > placed after the close on Friday it lives through the weekend to Monday 15:30 (not cancelled at 09:15 Monday, cancelled after Monday 15:30); a holiday Monday moves the end to Tuesday 411ms
+   ✓ routes: valuation time and the recorder-not-running 503 > GET /api/chain on a Sunday carries Friday's close as its valuation time and the same IV as Friday 15:29 368ms
+ ✓ test/live/pricing.test.ts (28 tests) 122ms
+ ✓ test/live/recorder.test.ts (25 tests) 67ms
+ ✓ test/live/kotak-session.test.ts (32 tests) 138ms
+ ✓ test/routes.test.ts (15 tests) 4004ms
+   ✓ dashboard > fills every card on its own; a card without data is blank with its reason and never fails the response 605ms
+   ✓ market routes never answer 500 > every route answers 200, or 503 with code NO_LIVE_DATA and the reason (sample book) 1146ms
+   ✓ accounts and paper trading over HTTP > user routes need a token; register, login, wrong password, guest, settings 386ms
+ ✓ test/live/live-market.test.ts (27 tests) 147ms
+ ✓ test/routes-smoke.test.ts (16 tests) 19683ms
+   ✓ every route in every data state > full: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 2023ms
+   ✓ every route in every data state > partial: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 1423ms
+   ✓ every route in every data state > closed: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 2003ms
+   ✓ every route in every data state > stale: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500; no live field filled 644ms
+   ✓ every route in every data state > empty: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500; no live field filled 787ms
+   ✓ ?at= (as of a past time) > is answered from recorded minutes on the as-of routes and refused elsewhere; a future ?at= is live 409ms
+   ✓ validation, auth and ownership > bad input is a 400/404 with the reason; user routes need a token; one user cannot reach another user's items 480ms
+   ✓ websocket fan-out > every socket ends on the latest price (a quote cached before a tick is never sent for it) 5736ms
+   ✓ websocket fan-out > a burst of ticks is one batch a second per socket; closing sockets and the app releases every listener 4595ms
+ ✓ test/live/kotak-scripmaster.test.ts (16 tests) 222ms
+ ✓ test/paper-trading.test.ts (24 tests) 3367ms
+ ✓ test/live/sfeed-protocol.test.ts (29 tests) 457ms
+   ✓ SFeed malformed input never throws > survives random bytes (seeded fuzz) 336ms
+ ✓ test/live/kotak-rest.test.ts (19 tests) 67ms
+ ✓ test/foundation.test.ts (29 tests) 3308ms
+ ✓ test/live/store-intraday.test.ts (16 tests) 170ms
+ ✓ test/orb.test.ts (16 tests) 2508ms
+   ✓ opening range from recorded minutes > the market-wide scan covers the underlyings with recorded bars only 304ms
+   ✓ opening range from recorded minutes > history covers the recorded (or Kotak) sessions only and says which are missing 308ms
+ ✓ test/alerts.test.ts (11 tests) 1621ms
+ ✓ test/live/nse-bhavcopy.test.ts (25 tests) 74ms
+ ✓ test/live/provider.test.ts (10 tests) 840ms
+ ✓ test/live/eod.test.ts (8 tests) 226ms
+ ✓ test/review-no-synthetic.test.ts (10 tests) 1910ms
+   ✓ as-of (?at=) quotes never present a partial or older recording as the session / the requested time > underlying: open/high/low only when the recording covers the open; ts is the time of the recorded price 304ms
+ ✓ test/live/store-history.test.ts (9 tests) 105ms
+ ✓ test/live/nse-http.test.ts (28 tests) 89ms
+ ✓ test/live/provider-robustness.test.ts (8 tests) 3190ms
+   ✓ LiveProvider feed refusals > re-dials with the old sid while the re-login is in flight do not use up the hourly re-login cap 1057ms
+   ✓ LiveProvider combined Kotak REST load (worst case) > sweep + its spot/future quotes + index spots + feed re-logins stay inside 10/s, 300/min and 5,000/h 1599ms
+ ✓ test/support/fake-provider.test.ts (11 tests) 1119ms
+ ✓ test/live/recorder-gaps-adversarial.test.ts (7 tests) 32ms
+ ✓ test/live/nse-fiidii-holidays.test.ts (11 tests) 29ms
+ ✓ test/live/universe.test.ts (7 tests) 94ms
+ ✓ test/valuation-time.test.ts (7 tests) 2746ms
+   ✓ valuation time outside the session > reviewers' table: ATM IV, carry and theta at Fri 16:00, Sun 12:00 and Mon 09:05 equal the Fri 15:29 values; they change only once the session opens with new premiums 393ms
+   ✓ valuation time outside the session > surface days to expiry, the optimizer and the margin estimate are valued at the same time as the IVs 1674ms
+ ✓ test/live/kotak-ratelimit.test.ts (7 tests) 42ms
+ ✓ test/live/nse-participants.test.ts (9 tests) 27ms
+ ✓ test/live/kotak-env-totp.test.ts (9 tests) 13ms
+ ✓ test/live/calendar.test.ts (8 tests) 17ms
+ ✓ test/live/nse-indices.test.ts (6 tests) 28ms
+ ✓ test/live/config-env.test.ts (3 tests) 10ms
+ ✓ test/live/clock.test.ts (4 tests) 9ms
+ ✓ test/market-routes.test.ts (10 tests) 7216ms
+   ✓ market routes > health: feed status and the provider report, no credentials 401ms
+   ✓ websocket > hello with the clock and feed status, then a snapshot batch of the index quotes 1180ms
+   ✓ websocket > fans live ticks out at most once a second, only for subscribed symbols, never an older session 4168ms
+
+ Test Files  39 passed (39)
+      Tests  645 passed (645)
+   Start at  15:50:06
+   Duration  36.93s (transform 3.12s, setup 0ms, collect 13.11s, tests 77.77s, environment 12ms, prepare 4.70s)
+
+
+> @q26/web@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /tmp/claude-0/-home-user-QUANTSAPP26/80c41c5a-cad1-533f-98d3-972cbc52ade6/scratchpad/baseline-audit/wt/apps/web
+
+ ✓ test/ui.test.tsx (18 tests) 30ms
+ ✓ test/lib.test.ts (15 tests) 24ms
+ ✓ test/trading-pages.test.tsx (28 tests) 995ms
+   ✓ Strategy Wizard > draws the strategies whose legs have a live premium and explains the others 459ms
+ ✓ test/home.test.tsx (4 tests) 117ms
+ ✓ test/analysis-pages.test.tsx (60 tests) 1345ms
+ ✓ test/order-ticket.test.tsx (8 tests) 51ms
+ ✓ test/layout.test.tsx (7 tests) 99ms
+
+ Test Files  7 passed (7)
+      Tests  140 passed (140)
+   Start at  15:50:44
+   Duration  5.49s (transform 3.20s, setup 0ms, collect 9.24s, tests 2.66s, environment 2ms, prepare 1.08s)
+

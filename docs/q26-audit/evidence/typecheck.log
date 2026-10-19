@@ -1,0 +1,16 @@
+
+> q26-options@1.0.0 typecheck
+> npm run typecheck -w @q26/core && npm run typecheck -w @q26/server && npm run typecheck -w @q26/web
+
+
+> @q26/core@1.0.0 typecheck
+> tsc -p tsconfig.json
+
+
+> @q26/server@1.0.0 typecheck
+> tsc -p tsconfig.json
+
+
+> @q26/web@1.0.0 typecheck
+> tsc -p tsconfig.json
+

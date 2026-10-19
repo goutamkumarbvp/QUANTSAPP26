@@ -1,0 +1,77 @@
+
+> q26-options@1.0.0 build
+> npm run build -w @q26/web && npm run build -w @q26/server
+
+
+> @q26/web@1.0.0 build
+> tsc -p tsconfig.json && vite build
+
+vite v5.4.21 building for production...
+transforming...
+✓ 710 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                          1.07 kB │ gzip:   0.58 kB
+dist/assets/index-DTlW01Wg.css          29.24 kB │ gzip:   5.80 kB
+dist/assets/api-D07jAnoU.js              0.07 kB │ gzip:   0.09 kB
+dist/assets/NotFound-DBV4aH1l.js         0.37 kB │ gzip:   0.25 kB
+dist/assets/hooks-Bzdc7kei.js            0.88 kB │ gzip:   0.46 kB
+dist/assets/Tools-zFscaKMN.js            1.03 kB │ gzip:   0.53 kB
+dist/assets/DataTable-_eQyXNJP.js        1.74 kB │ gzip:   0.86 kB
+dist/assets/bs-CyVVoMif.js               2.43 kB │ gzip:   1.14 kB
+dist/assets/Surface-Bnei36V5.js          2.79 kB │ gzip:   1.51 kB
+dist/assets/Cone-DOC1ciFo.js             3.02 kB │ gzip:   1.48 kB
+dist/assets/Unusual-Cf9OFqnq.js          3.23 kB │ gzip:   1.41 kB
+dist/assets/FuturesOI-BgGmiOxc.js        3.24 kB │ gzip:   1.41 kB
+dist/assets/trend-B6s613R_.js            3.36 kB │ gzip:   1.36 kB
+dist/assets/MaxPain-DzEq92VF.js          3.55 kB │ gzip:   1.67 kB
+dist/assets/Chart-C_bQskTz.js            3.61 kB │ gzip:   1.81 kB
+dist/assets/Scanners-bv-O8WTq.js         3.81 kB │ gzip:   1.67 kB
+dist/assets/OiTrend-CfkEEDxU.js          3.89 kB │ gzip:   1.76 kB
+dist/assets/Pcr-B75mO_p_.js              4.18 kB │ gzip:   1.86 kB
+dist/assets/pickers-BBJM6YzV.js          4.33 kB │ gzip:   1.80 kB
+dist/assets/Participants-C3KFKgBd.js     4.37 kB │ gzip:   1.86 kB
+dist/assets/IvTable-DAcvZVEF.js          4.37 kB │ gzip:   1.73 kB
+dist/assets/StrategyChart-CyoXbQUp.js    4.51 kB │ gzip:   2.10 kB
+dist/assets/payoff-CtmoyZ-L.js           4.64 kB │ gzip:   2.15 kB
+dist/assets/Skew-qN85A4dH.js             4.77 kB │ gzip:   2.17 kB
+dist/assets/Breadth-2tNPDzCG.js          4.85 kB │ gzip:   1.89 kB
+dist/assets/FiiDii-CdpBWzXV.js           4.93 kB │ gzip:   1.90 kB
+dist/assets/Synopsis-C08Qc05f.js         4.98 kB │ gzip:   2.21 kB
+dist/assets/Straddle-b1b4pM4V.js         5.38 kB │ gzip:   2.40 kB
+dist/assets/IvChart-BL7nT8Fe.js          5.83 kB │ gzip:   2.30 kB
+dist/assets/Templates-D7pHcxrd.js        6.44 kB │ gzip:   2.94 kB
+dist/assets/Settings-DG2FMi3r.js         6.44 kB │ gzip:   2.67 kB
+dist/assets/MultiStrike-B2m0i3xy.js      6.46 kB │ gzip:   2.83 kB
+dist/assets/Watchlist-BNl0KNhD.js        6.66 kB │ gzip:   2.46 kB
+dist/assets/StrikeOI-P0GTjsG0.js         6.69 kB │ gzip:   2.73 kB
+dist/assets/Optimizer-CYOF7l8S.js        7.11 kB │ gzip:   2.90 kB
+dist/assets/Strategies-BRG-ymtD.js       7.15 kB │ gzip:   2.71 kB
+dist/assets/OrderTicket-DVUuiGF5.js      7.30 kB │ gzip:   2.93 kB
+dist/assets/Alerts-jmxTbivV.js           8.88 kB │ gzip:   3.39 kB
+dist/assets/Calculators-C4dT7Eei.js     10.34 kB │ gzip:   3.20 kB
+dist/assets/OrderBook-toHNjMLK.js       10.36 kB │ gzip:   3.62 kB
+dist/assets/Recap-B53BUMLE.js           12.06 kB │ gzip:   4.48 kB
+dist/assets/Learn-LQfm0SWI.js           12.11 kB │ gzip:   5.17 kB
+dist/assets/Home-uqlHlwf3.js            12.26 kB │ gzip:   4.08 kB
+dist/assets/Orb-iuh8QkXB.js             12.78 kB │ gzip:   4.66 kB
+dist/assets/Positions-nJb52pBc.js       13.44 kB │ gzip:   4.25 kB
+dist/assets/OrderFlow-BVwJ7E2f.js       13.62 kB │ gzip:   4.27 kB
+dist/assets/Builder-CXsY9Smi.js         14.18 kB │ gzip:   5.14 kB
+dist/assets/Payoff-mtdJXhJ6.js          14.29 kB │ gzip:   5.90 kB
+dist/assets/strategies-COOrD_8Q.js      14.35 kB │ gzip:   3.37 kB
+dist/assets/OptionChain-8aM7Vr8h.js     14.92 kB │ gzip:   5.24 kB
+dist/assets/Algo-CYXxpRZH.js            23.56 kB │ gzip:   7.77 kB
+dist/assets/index-B1ZMoUvV.js           56.33 kB │ gzip:  19.75 kB
+dist/assets/react-iIzTfa1H.js          210.60 kB │ gzip:  66.92 kB
+dist/assets/echarts-DaZaZXpj.js        651.34 kB │ gzip: 215.44 kB
+✓ built in 11.23s
+
+> @q26/server@1.0.0 build
+> node build.mjs
+
+
+  dist/server.mjs      638.2kb
+  dist/server.mjs.map    1.5mb
+
+⚡ Done in 120ms

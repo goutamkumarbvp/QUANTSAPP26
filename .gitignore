@@ -10,3 +10,6 @@ apps/server/data/
 test-results/
 playwright-report/
 *.tsbuildinfo
+
+# Audit evidence (command outputs) is versioned
+!docs/q26-audit/evidence/**/*.log
