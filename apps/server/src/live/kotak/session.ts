@@ -16,13 +16,18 @@
  * rejected again after its fresh login holds logins for that cooldown, doubling (to 30 min) while
  * nothing is served in between, so logins that succeed on a session every request refuses cannot
  * repeat every few minutes. Failed logins back off (60 s doubling to 30 min; a 429 holds for
- * Retry-After, or 5 min without one).
+ * Retry-After, or 5 min without one). A login that got no answer at all (DNS, refused, timeout)
+ * reached no account check, so it is retried soon instead (5 s doubling to 1 min) and does not
+ * count towards the credential back-off. After `maxRejectedLogins` (default 5) refusals in a row,
+ * automatic logins pause until a forced login (operator "Re-login now") succeeds or the server
+ * restarts with corrected credentials: repeated wrong credentials can lock the trading account.
  */
 import type { NeoEnv } from '../env';
 import { scrubSecrets } from '../env';
 import { NoLiveData } from '../types';
 import { RateLimiter, retryAfterMs, type Lane } from './ratelimit';
 import { freshTotp } from './totp';
+import { istWhen } from '../../log';
 
 export const KOTAK_LOGIN_URL = 'https://mis.kotaksecurities.com/login/1.0/';
 /** SDK fallback when validate returns no baseUrl (NeoUtility.get_domain(), kotak-rest-auth.md §2). */
@@ -32,6 +37,7 @@ export const NEO_FIN_KEY = 'neotradeapi';
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface KotakLogger {
+  debug?(msg: string): void;
   info(msg: string): void;
   warn(msg: string): void;
 }
@@ -70,6 +76,8 @@ export interface KotakSessionDeps {
   pathCooldownMs?: number;
   /** A 429 whose pause is at most this long is retried once inline (ms). */
   maxInlineRetryWaitMs?: number;
+  /** Refused logins in a row after which automatic logins pause (default MAX_REJECTED_LOGINS). */
+  maxRejectedLogins?: number;
 }
 
 export interface KotakRequestOptions {
@@ -98,6 +106,10 @@ export interface KotakSessionStatus {
   nextReloginAt?: number;
   /** Automatic logins are held until this time after failures / 429. */
   loginBlockedUntil?: number;
+  /** Failed logins since the last success: refused by Kotak / no answer (network). */
+  loginFailures?: { rejected: number; network: number };
+  /** Automatic logins are paused after too many refusals in a row (why, and what to do). */
+  loginPaused?: string;
   feedUrlKnown: boolean;
   /** Last X-RateLimit-* / Retry-After headers seen (for checking the real quotas). */
   rateLimitHeaders?: Record<string, string>;
@@ -138,6 +150,8 @@ interface ActiveSession {
 type Json = Record<string, unknown>;
 
 const MINUTE = 60_000;
+/** First retry after a login that got no answer (network); doubles to MINUTE. */
+const NET_RETRY_MS = 5_000;
 const DAY = 24 * 60 * MINUTE;
 const IST_OFFSET_MS = 330 * MINUTE;
 const RATE_HEADERS = ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'];
@@ -222,6 +236,9 @@ function isErrorBody(body: unknown): boolean {
   return false;
 }
 
+/** Refused logins in a row after which automatic logins pause (repeated wrong credentials can lock the account). */
+export const MAX_REJECTED_LOGINS = 5;
+
 export class KotakSession {
   private readonly fetchFn: FetchLike;
   private readonly now: () => number;
@@ -233,12 +250,17 @@ export class KotakSession {
   private readonly authReloginCooldownMs: number;
   private readonly pathCooldownMs: number;
   private readonly maxInlineRetryWaitMs: number;
+  private readonly maxRejectedLogins: number;
 
   private session: ActiveSession | null = null;
   private generation = 0;
   private loginInFlight: Promise<void> | null = null;
   private lastTotpCounter: number | undefined;
   private failures = 0;
+  /** Logins in a row that got no answer from Kotak (network): their own, short back-off. */
+  private netFailures = 0;
+  /** The attempt in progress failed before Kotak answered (set by loginStep). */
+  private loginNetworkError = false;
   private blockedUntil = 0;
   /** The last login failure was a 429 (its hold cannot be skipped with `force`). */
   private lastWasRateLimited = false;
@@ -269,6 +291,7 @@ export class KotakSession {
     this.authReloginCooldownMs = deps.authReloginCooldownMs ?? 5 * MINUTE;
     this.pathCooldownMs = deps.pathCooldownMs ?? 10 * MINUTE;
     this.maxInlineRetryWaitMs = deps.maxInlineRetryWaitMs ?? 5_000;
+    this.maxRejectedLogins = deps.maxRejectedLogins ?? MAX_REJECTED_LOGINS;
   }
 
   /* ---------------------------------------------------------------------------------------- */
@@ -286,11 +309,14 @@ export class KotakSession {
     if (this.loginInFlight) return this.loginInFlight;
     const t = this.now();
     if (t < this.authHoldUntil) {
-      return Promise.reject(new KotakError(`Kotak login on hold until ${new Date(this.authHoldUntil).toISOString()} after: ${this.lastError ?? 'repeated session rejections'}`, 'login'));
+      return Promise.reject(new KotakError(`Kotak login on hold until ${istWhen(this.authHoldUntil, this.now())} after: ${this.lastError ?? 'repeated session rejections'}`, 'login'));
+    }
+    if (this.failures >= this.maxRejectedLogins && !opts.force) {
+      return Promise.reject(new KotakError(`Kotak automatic login paused: ${this.pausedReason()}`, 'login'));
     }
     if (t < this.blockedUntil && (!opts.force || this.lastWasRateLimited)) {
       return Promise.reject(
-        new KotakError(`Kotak login on hold until ${new Date(this.blockedUntil).toISOString()} after: ${this.lastError ?? 'previous failure'}`, 'login'),
+        new KotakError(`Kotak login on hold until ${istWhen(this.blockedUntil, this.now())} after: ${this.lastError ?? 'previous failure'}`, 'login'),
       );
     }
     // A long 429 pause would otherwise park the login (and every caller waiting on it) for hours.
@@ -305,6 +331,7 @@ export class KotakSession {
   }
 
   private async doLogin(): Promise<void> {
+    this.loginNetworkError = false;
     try {
       // A fresh code from a window never used before (a rejected session must not reuse it).
       const { code, counter } = await freshTotp(this.creds.totpSecret, { now: this.now, sleep: this.sleep }, { afterCounter: this.lastTotpCounter });
@@ -352,23 +379,33 @@ export class KotakSession {
         okEndpoints: new Set(),
       };
       this.failures = 0;
+      this.netFailures = 0;
       this.blockedUntil = 0;
       this.lastError = undefined;
       this.lastWasRateLimited = false;
       const s = this.session;
       this.log.info(
-        `Kotak Neo logged in (data centre ${s.dataCenter ?? '?'}, baseUrl ${s.baseUrl}${s.expiresAt ? `, token expires ${new Date(s.expiresAt).toISOString()}` : ''})`,
+        `Kotak Neo logged in (data centre ${s.dataCenter ?? '?'}, baseUrl ${s.baseUrl}${s.expiresAt ? `, token expires ${istWhen(s.expiresAt, this.now())}` : ''})`,
       );
     } catch (e) {
       const err = e instanceof KotakError ? e : new KotakError(`Kotak login failed: ${this.scrub(e instanceof Error ? e.message : String(e))}`, 'login');
-      this.failures++;
       const t = this.now();
-      let hold = Math.min(30 * MINUTE, MINUTE * 2 ** (this.failures - 1));
+      let hold: number;
+      if (this.loginNetworkError) {
+        this.netFailures++;
+        hold = Math.min(MINUTE, NET_RETRY_MS * 2 ** (this.netFailures - 1));
+      } else {
+        this.failures++;
+        hold = Math.min(30 * MINUTE, MINUTE * 2 ** (this.failures - 1));
+      }
       this.lastWasRateLimited = err.httpStatus === 429;
       if (this.lastWasRateLimited) hold = Math.max(hold, err.retryAfterMs ?? 5 * MINUTE);
       this.blockedUntil = t + hold;
       this.lastError = err.message;
-      this.log.warn(`${err.message}; next automatic login not before ${new Date(this.blockedUntil).toISOString()}`);
+      const line = `${err.message}; next automatic login not before ${istWhen(this.blockedUntil, t)}`;
+      // While Kotak cannot be reached the retries run every minute: one warning, then one per 10 attempts.
+      if (this.loginNetworkError && this.netFailures > 1 && this.netFailures % 10 !== 0) this.log.debug?.(line);
+      else this.log.warn(line);
       throw err;
     } finally {
       this.emit();
@@ -387,6 +424,7 @@ export class KotakSession {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
+      this.loginNetworkError = true;
       throw new KotakError(`Kotak ${label} failed: network error (${this.scrub(e instanceof Error ? e.message : String(e))})`, 'login');
     }
     this.noteRateHeaders(res.headers);
@@ -423,7 +461,7 @@ export class KotakSession {
     if (t - this.lastAuthRelogin < this.authReloginCooldownMs) {
       this.authHoldUntil = Math.max(this.authHoldUntil, this.lastAuthRelogin + this.authReloginCooldownMs);
       this.lastError += ' (again within the re-login cooldown)';
-      this.log.warn(`Kotak session invalidated again: ${this.lastError}; logins held until ${new Date(this.authHoldUntil).toISOString()}`);
+      this.log.warn(`Kotak session invalidated again: ${this.lastError}; logins held until ${istWhen(this.authHoldUntil, this.now())}`);
     } else {
       this.lastAuthRelogin = t;
     }
@@ -490,7 +528,7 @@ export class KotakSession {
     const key = this.endpointOf(path, opts);
     const hold = this.endpointHolds.get(key);
     if (!hold) return;
-    if (this.now() < hold.until) throw new KotakError(`${hold.reason}; not retried before ${new Date(hold.until).toISOString()}`, 'api', 403);
+    if (this.now() < hold.until) throw new KotakError(`${hold.reason}; not retried before ${istWhen(hold.until, this.now())}`, 'api', 403);
     this.endpointHolds.delete(key);
   }
 
@@ -512,7 +550,7 @@ export class KotakSession {
     const until = this.now() + this.pathCooldownMs;
     const reason = `Kotak ${label}: not permitted for this account (HTTP 403: ${msg})`;
     this.endpointHolds.set(key, { until, reason, generation: s.generation });
-    this.log.warn(`${reason}; endpoint ${key} on hold until ${new Date(until).toISOString()}`);
+    this.log.warn(`${reason}; endpoint ${key} on hold until ${istWhen(until, this.now())}`);
     return new KotakError(reason, 'api', 403);
   }
 
@@ -650,6 +688,8 @@ export class KotakSession {
       ...(s ? { baseUrl: s.baseUrl, baseUrlSource: s.baseUrlSource, dataCenter: s.dataCenter, loggedInAt: s.loggedInAt, tokenExpiresAt: s.expiresAt } : {}),
       ...(s ? { nextReloginAt: this.nextReloginAt() ?? undefined } : {}),
       ...(Math.max(this.blockedUntil, this.authHoldUntil) > this.now() ? { loginBlockedUntil: Math.max(this.blockedUntil, this.authHoldUntil) } : {}),
+      ...(this.failures || this.netFailures ? { loginFailures: { rejected: this.failures, network: this.netFailures } } : {}),
+      ...(this.failures >= this.maxRejectedLogins ? { loginPaused: this.pausedReason() } : {}),
       feedUrlKnown: !!s?.feedUrl,
       ...(this.rateHeaders ? { rateLimitHeaders: { ...this.rateHeaders } } : {}),
       ...this.heldEndpoints(),
@@ -660,6 +700,10 @@ export class KotakSession {
     const t = this.now();
     const held = [...this.endpointHolds].filter(([, h]) => h.until > t);
     return held.length ? { endpointsOnHold: Object.fromEntries(held.map(([k, h]) => [k, h.until])) } : {};
+  }
+
+  private pausedReason(): string {
+    return `Kotak refused ${this.failures} logins in a row (last: ${this.lastError ?? 'unknown'}); fix the NEO_* values in .env and restart, or press Re-login now`;
   }
 
   /** Credentials for the market-data websocket, or null when not logged in. Contains secrets. */

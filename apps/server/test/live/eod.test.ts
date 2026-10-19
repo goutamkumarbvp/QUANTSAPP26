@@ -253,6 +253,26 @@ describe('EodJobs schedule, holidays and backfill', () => {
     expect(urls.some((u) => u.startsWith('https://archives.nseindia.com'))).toBe(false);
   });
 
+  it('stops the backfill after the first date when NSE/BSE cannot be reached at all, with one warning', async () => {
+    const down = () => new TypeError('fetch failed');
+    const routes: Routes = {};
+    for (const d of [PREV, '2026-09-11', '2026-09-10']) {
+      for (const u of [indCloseAllUrl(d), nseFoBhavcopyUrl(d), nseCmBhavcopyUrl(d), bseFoBhavcopyUrl(d), ...participantUrls(d)]) routes[u] = down;
+    }
+    const h = harness(routes, { backfillDays: 3 }, ist(D, '09:00'));
+    await h.eod.backfill();
+    const asked = new Set(h.calls.map((c) => c.url));
+    expect(asked.has(indCloseAllUrl(PREV))).toBe(true);
+    expect(asked.has(indCloseAllUrl('2026-09-11'))).toBe(false); // not tried: the network is down
+    expect(h.eod.status().backfill.stoppedOffline).toMatch(/unexpected request|fetch failed/);
+    expect(asked.has(FIIDII_URL)).toBe(false); // FII/DII is skipped too
+    const warns = h.logs.filter((l) => /unreachable/.test(l));
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(/end-of-day backfill stopped — next attempt .* IST/);
+    // Per-file failures of a down network are not logged one by one.
+    expect(h.logs.filter((l) => /failed/.test(l) && !/unreachable/.test(l))).toEqual([]);
+  });
+
   it('a store that cannot be read (disk error) is logged and the schedule stays armed, never an unhandled rejection', async () => {
     fs.mkdirSync(path.join(dir, 'eod'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'eod', 'index'), 'not a directory'); // readdir → ENOTDIR

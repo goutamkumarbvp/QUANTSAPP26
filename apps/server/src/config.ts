@@ -19,6 +19,8 @@ export interface AppConfig {
   /** Risk-free rate for IV/Greeks and margin estimates (config input, not market data). */
   riskFreeRate: number;
   authSecret: string;
+  /** Why AUTH_SECRET is not used: unset, or a placeholder / too short (a random secret is used instead). */
+  authSecretIssue?: 'unset' | 'weak';
   /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
   persist: boolean;
@@ -44,6 +46,21 @@ export function neoFromEnv(env: Record<string, string | undefined> = process.env
   }
 }
 
+/** Placeholders that must never sign tokens (.env.example ships `change-me`). */
+const PLACEHOLDER_SECRETS = new Set(['change-me', 'changeme', 'secret', 'password', 'test', 'e2e']);
+export const MIN_AUTH_SECRET_LENGTH = 16;
+
+/**
+ * The token-signing secret: AUTH_SECRET when it is a real secret; otherwise a random one for this
+ * run (sign-ins then end at restart) and the reason, so a copied placeholder cannot make tokens forgeable.
+ */
+export function authSecretFrom(raw: string | undefined): { authSecret: string; authSecretIssue?: 'unset' | 'weak' } {
+  const v = (raw ?? '').trim();
+  if (!v) return { authSecret: randomBytes(32).toString('hex'), authSecretIssue: 'unset' };
+  if (v.length < MIN_AUTH_SECRET_LENGTH || PLACEHOLDER_SECRETS.has(v.toLowerCase())) return { authSecret: randomBytes(32).toString('hex'), authSecretIssue: 'weak' };
+  return { authSecret: v };
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const base: AppConfig = {
     port: num('PORT', 8787),
@@ -51,7 +68,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     dataDir: process.env.DATA_DIR ?? path.resolve(here, '../data'),
     webDist: process.env.WEB_DIST ?? path.resolve(here, '../../web/dist'),
     riskFreeRate: num('RISK_FREE_RATE', 0.065),
-    authSecret: process.env.AUTH_SECRET || randomBytes(32).toString('hex'),
+    ...authSecretFrom(process.env.AUTH_SECRET),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),

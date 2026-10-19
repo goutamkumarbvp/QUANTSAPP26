@@ -637,6 +637,23 @@ export class KotakLiveMarket implements LiveMarket {
     this.feed.connect();
   }
 
+  /**
+   * Drop cached chains built longer than `maxAgeMs` ago (default: their TTL, i.e. only ones that
+   * would be rebuilt anyway; 0 drops all). They are rebuilt on the next request. Returns how many.
+   */
+  pruneChains(maxAgeMs?: number): number {
+    const now = this.now();
+    let n = 0;
+    for (const [id, c] of this.chains) {
+      const age = maxAgeMs ?? (c.source === 'stream' ? this.streamChainTtlMs : this.restChainTtlMs);
+      if (now - c.builtAt >= age) {
+        this.chains.delete(id);
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** A websocket client exists (connecting, connected or reconnecting). */
   hasFeed(): boolean {
     return this.feed !== null;

@@ -22,7 +22,8 @@ import { isIsoDate } from './calendar';
 import { fetchBseFoBhavcopy, fetchNseCmBhavcopy, fetchNseFoBhavcopy, NSE_UDIFF_START, type FoBhavcopy } from './nse/bhavcopy';
 import { fetchFiiDii, toFiiDiiDay } from './nse/fiidii';
 import { fetchHolidays } from './nse/holidays';
-import type { NseHttp, NotPublished } from './nse/http';
+import { NseError, type NseHttp, type NotPublished } from './nse/http';
+import { istWhen } from '../log';
 import { fetchIndexCloses, niftyCloseOf, toDailyBar, type IndexCloseFile } from './nse/indices';
 import { fetchParticipants, toParticipantDay } from './nse/participants';
 import type { EodKind, HistoryFiles } from './store/history';
@@ -31,7 +32,8 @@ export type EodSource = 'index' | 'nseFo' | 'nseCm' | 'bseFo' | 'participants' |
 /** Load order: the index closes first (participants and FII/DII join the NIFTY close). */
 export const EOD_SOURCES: readonly EodSource[] = ['index', 'nseFo', 'nseCm', 'bseFo', 'participants', 'fiidii'];
 /** FII/DII has no history endpoint: it is not backfilled per date. */
-const BACKFILL_SOURCES: readonly EodSource[] = ['index', 'nseFo', 'nseCm', 'bseFo', 'participants'];
+/** Sources stored for every past session (FII/DII is served for the latest session only). */
+export const BACKFILL_SOURCES: readonly EodSource[] = ['index', 'nseFo', 'nseCm', 'bseFo', 'participants'];
 const KINDS: readonly EodKind[] = ['fo', 'cm', 'index', 'participants', 'fiidii'];
 
 /**
@@ -46,6 +48,8 @@ export interface EodResult {
   date: string;
   outcome: EodOutcome;
   reason?: string;
+  /** Failed because the host could not be reached at all (no internet, DNS or firewall). */
+  network?: boolean;
 }
 
 export interface EodSourceStatus {
@@ -63,7 +67,7 @@ export interface EodStatus {
   kinds: Record<EodKind, string | null>;
   holidays: { source: 'nse+env' | 'env'; count: number; fetchedAt: number | null; error?: string };
   next: { at: number; date: string } | null;
-  backfill: { running: boolean; days: number; lastRunAt: number | null; datesMissing: number | null };
+  backfill: { running: boolean; days: number; lastRunAt: number | null; datesMissing: number | null; stoppedOffline?: string };
 }
 
 export interface EodTimers {
@@ -72,6 +76,8 @@ export interface EodTimers {
 }
 
 export interface EodLogger {
+  /** Per-file detail the summary lines already cover (e.g. each file of a date when the network is down). */
+  debug?(msg: string): void;
   info(msg: string): void;
   warn(msg: string): void;
 }
@@ -98,8 +104,19 @@ export interface EodJobsOptions {
 }
 
 const HOUR = 3_600_000;
+const MINUTE_MS = 60_000;
 const MAX_TIMER_MS = 6 * HOUR;
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** The reason when every result failed because its host could not be reached (the network is down), else undefined. */
+/** The reason when every file that was requested failed to connect (NSE/BSE unreachable), else undefined. */
+export function offlineReason(results: readonly EodResult[]): string | undefined {
+  // 'waiting' sources (participants wait for the NIFTY close) made no request: they do not count.
+  const tried = results.filter((r) => r.outcome !== 'waiting');
+  if (!tried.length || !tried.every((r) => r.outcome === 'failed' && r.network)) return undefined;
+  // "host/path/file: cannot resolve host (ENOTFOUND): …" → the part after the file label.
+  return (tried[0].reason ?? 'network error').replace(/^[^\s:]+: /, '');
+}
 
 const realTimers: EodTimers = {
   setTimeout: (fn, ms) => {
@@ -139,6 +156,8 @@ export class EodJobs {
   private nseHolidays: Set<string> | null = null;
   private hol: EodStatus['holidays'];
   private holFetchedOk = 0;
+  /** The holiday-master failure last written at warn level. */
+  private holWarned: string | undefined;
   private lastBackfillDay: string | null = null;
   private readonly bf: EodStatus['backfill'];
 
@@ -167,7 +186,8 @@ export class EodJobs {
     void this.enqueue(async () => {
       await this.refreshHolidays();
       await this.backfillNow();
-      this.lastBackfillDay = this.opts.calendar.session(this.now()).date;
+      // Stopped because NSE/BSE could not be reached: the next scheduled attempt runs it again.
+      if (!this.bf.stoppedOffline) this.lastBackfillDay = this.opts.calendar.session(this.now()).date;
     })
       .catch((e) => this.log.warn(`EOD: start-up backfill failed: ${errMsg(e)}`))
       .finally(() => this.schedule());
@@ -236,10 +256,27 @@ export class EodJobs {
   private async runDaily(date: string): Promise<void> {
     this.attempts.set(date, this.now());
     if (this.now() - this.holFetchedOk > 20 * HOUR) await this.refreshHolidays();
-    if (this.opts.calendar.isTradingDay(date)) await this.loadDate(date);
+    if (this.opts.calendar.isTradingDay(date)) {
+      const offline = offlineReason(await this.loadDate(date));
+      if (offline) {
+        // One line for the whole date (each file's failure is at debug); the backfill would fail the same way.
+        this.log.warn(`EOD: ${date} files not fetched — NSE/BSE unreachable (${offline}); next attempt ${this.nextAttemptText()}`);
+        return;
+      }
+    }
     if (this.lastBackfillDay !== date) {
-      this.lastBackfillDay = date;
       await this.backfillNow();
+      if (!this.bf.stoppedOffline) this.lastBackfillDay = date;
+    }
+  }
+
+  private nextAttemptText(): string {
+    try {
+      const at = this.nextAttempt(this.now()).at;
+      // Today's files are due now (queued right behind this): their own line gives the time after that.
+      return at - this.now() < MINUTE_MS ? "right away (today's files)" : istWhen(at, this.now());
+    } catch {
+      return 'later';
     }
   }
 
@@ -273,7 +310,10 @@ export class EodJobs {
       fetchedAt: this.holFetchedOk || null,
       ...(reason ? { error: this.nseHolidays ? `${reason} (keeping the list fetched earlier)` : `${reason} (HOLIDAYS env list only)` } : {}),
     };
-    if (reason) this.log.warn(`EOD: holidays: ${this.hol.error}`);
+    // The same failure again (the daily run retries it) goes to debug: one warning per cause.
+    if (reason && reason !== this.holWarned) this.log.warn(`EOD: holidays: ${this.hol.error}`);
+    else if (reason) this.log.debug?.(`EOD: holidays: ${this.hol.error}`);
+    this.holWarned = reason;
   }
 
   /* ---------------------------------- loading ---------------------------------- */
@@ -284,6 +324,11 @@ export class EodJobs {
     const out: EodResult[] = [];
     for (const s of EOD_SOURCES) if (sources.includes(s)) out.push(await this.loadSource(s, date));
     return out;
+  }
+
+  /** loadDate() after the backfill / daily job in progress (never two loads of the store at once). */
+  loadDateQueued(date: string, sources: readonly EodSource[] = EOD_SOURCES): Promise<EodResult[]> {
+    return this.enqueue(() => this.loadDate(date, sources));
   }
 
   /** Load the dates missing from the store over the last `days` sessions (newest first). */
@@ -297,6 +342,7 @@ export class EodJobs {
     this.bf.lastRunAt = this.now();
     const results: EodResult[] = [];
     let missing = 0;
+    delete this.bf.stoppedOffline;
     try {
       const today = cal.session(this.now()).date;
       const dates: string[] = [];
@@ -306,10 +352,18 @@ export class EodJobs {
         const need = BACKFILL_SOURCES.filter((s) => !this.isLoaded(s, date) && !this.unavailable.has(`${date}|${s}`));
         if (!need.length) continue;
         missing++;
-        results.push(...(await this.loadDate(date, need)));
+        const got = await this.loadDate(date, need);
+        results.push(...got);
+        const offline = offlineReason(got);
+        if (offline) {
+          // Every file of the date failed to connect: the other dates would too. Stop and say so once.
+          this.bf.stoppedOffline = offline;
+          this.log.warn(`EOD: NSE/BSE unreachable (${offline}); end-of-day backfill stopped — next attempt ${this.nextAttemptText()}`);
+          break;
+        }
       }
       // FII/DII serves the latest session only: one call stores it.
-      if (!this.halted && dates.length && !this.isLoaded('fiidii', dates[0])) results.push(await this.loadSource('fiidii', dates[0]));
+      if (!this.halted && !this.bf.stoppedOffline && dates.length && !this.isLoaded('fiidii', dates[0])) results.push(await this.loadSource('fiidii', dates[0]));
     } finally {
       this.bf.running = false;
       this.bf.datesMissing = missing;
@@ -324,7 +378,7 @@ export class EodJobs {
     try {
       r = this.isLoaded(source, date) ? { source, date, outcome: 'already-loaded' } : await this.load(source, date);
     } catch (e) {
-      r = { source, date, outcome: 'failed', reason: errMsg(e) };
+      r = { source, date, outcome: 'failed', reason: errMsg(e), ...(e instanceof NseError && e.kind === 'network' ? { network: true } : {}) };
     }
     st.last = { date, outcome: r.outcome, ...(r.reason ? { reason: r.reason } : {}) };
     if (r.outcome === 'loaded') {
@@ -338,7 +392,9 @@ export class EodJobs {
     if (r.outcome === 'failed') {
       st.lastError = r.reason;
       st.lastErrorAt = this.now();
-      this.log.warn(`EOD: ${source} ${date} failed: ${r.reason}`);
+      // Network-down failures are summed up once per date by the caller.
+      if (r.network) this.log.debug?.(`EOD: ${source} ${date} failed: ${r.reason}`);
+      else this.log.warn(`EOD: ${source} ${date} failed: ${r.reason}`);
     }
     return r;
   }
@@ -358,6 +414,17 @@ export class EodJobs {
       case 'fiidii':
         return this.loadFiiDii(date);
     }
+  }
+
+  /** The exchange answered that `source` is not published for `date` (not retried by the backfill). */
+  wasUnavailable(source: EodSource, date: string): boolean {
+    return this.unavailable.has(`${date}|${source}`);
+  }
+
+  /** Forget that `source` was loaded (or unavailable) for `date`, so the next load fetches it again. */
+  forget(source: EodSource, date: string): void {
+    this.loaded.get(source)?.delete(date);
+    this.unavailable.delete(`${date}|${source}`);
   }
 
   isLoaded(source: EodSource, date: string): boolean {
@@ -458,7 +525,7 @@ export class EodJobs {
 
   private async loadFiiDii(date: string): Promise<EodResult> {
     const r = await fetchFiiDii(this.opts.http);
-    if (!r.data) return { source: 'fiidii', date, outcome: 'failed', reason: r.reason };
+    if (!r.data) return { source: 'fiidii', date, outcome: 'failed', reason: r.reason, ...(r.network ? { network: true } : {}) };
     const flows = r.data;
     // The endpoint has no history: store the session it serves, whatever date was asked for.
     const stored = this.opts.history.fiiDii(flows.date, flows.date)[0];

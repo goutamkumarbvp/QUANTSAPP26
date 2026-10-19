@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
@@ -11,6 +11,7 @@ import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
 import { SCANNERS, type ToolViewOptions } from './services/market-tools';
 import type { Services } from './services';
+import type { Operations } from './ops';
 import { buildDashboard } from './services/dashboard';
 import {
   buildOptionChain,
@@ -138,10 +139,60 @@ function requireUser(req: FastifyRequest): StoredUser {
   return req.user;
 }
 
-export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb?: boolean } = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 1_000_000 });
+const RATE_WINDOW_MS = 60_000;
+/** POST routes limited per client address per minute. */
+const RATE_LIMITS: Readonly<Record<string, number>> = {
+  '/api/auth/login': 30,
+  '/api/auth/register': 20,
+  '/api/auth/guest': 60,
+  '/api/ops/login/relogin': 10,
+  '/api/ops/watchdog/run': 20,
+  '/api/ops/audit/run': 10,
+  // CPU-heavy calculations anyone can call (R-09)
+  '/api/optimizer': 60,
+  '/api/recap': 60,
+  '/api/algos/:id/backtest-range': 20,
+};
+
+/** Operations actions (re-login, health check, audit): a registered account, not a guest. */
+function requireOperator(req: FastifyRequest): StoredUser {
+  const u = requireUser(req);
+  if (u.guest) throw Object.assign(new Error('Sign in with a registered account to run operations'), { statusCode: 403 });
+  return u;
+}
+
+export async function buildApp(
+  svc: Services,
+  opts: { logger?: FastifyServerOptions['logger']; serveWeb?: boolean; ops?: Operations } = {},
+): Promise<FastifyInstance> {
+  // Fastify's own two lines per request would flood the terminal (the web app polls every few seconds):
+  // requests are written at debug only (LOG_LEVEL=debug), errors by the error handler below.
+  const app = Fastify({ logger: opts.logger ?? false, logController: new LogController({ disableRequestLogging: true }), bodyLimit: 1_000_000 });
   await app.register(cors, { origin: true });
   await app.register(websocket);
+
+  app.addHook('onResponse', async (req, reply) => {
+    if (app.log.level === 'debug' || app.log.level === 'trace') app.log.debug(`${req.method} ${req.url} → ${reply.statusCode} (${Math.round(reply.elapsedTime)} ms)`);
+  });
+
+  // Sign-in and operations actions: a fixed window per client address and route (password guessing,
+  // guest-account flooding, button hammering). Generous enough for people and the test suites.
+  const windows = new Map<string, { n: number; start: number }>();
+  app.addHook('onRequest', async (req, reply) => {
+    const url = req.routeOptions.url;
+    const max = req.method === 'POST' && url ? RATE_LIMITS[url] : undefined;
+    if (!max) return;
+    const t = Date.now();
+    if (windows.size > 10_000) for (const [k, w] of windows) if (t - w.start >= RATE_WINDOW_MS) windows.delete(k);
+    const key = `${req.ip}|${url}`;
+    let w = windows.get(key);
+    if (!w || t - w.start >= RATE_WINDOW_MS) windows.set(key, (w = { n: 0, start: t }));
+    if (++w.n > max) {
+      const wait = Math.ceil((w.start + RATE_WINDOW_MS - t) / 1000);
+      reply.header('retry-after', String(wait));
+      throw Object.assign(new Error(`Too many requests: try again in ${wait} s`), { statusCode: 429 });
+    }
+  });
 
   app.decorateRequest('user', null);
   app.addHook('onRequest', async (req) => {
@@ -209,6 +260,38 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     const feed = feedStatus(md);
     const report = (md as { healthReport?: () => unknown }).healthReport;
     return { ok: true, clock: clockInfo(md, feed), feed, ...(typeof report === 'function' ? { provider: report.call(md) } : {}) };
+  });
+
+  /* ============================== operations (Model F) ============================== */
+
+  const ops = (): Operations => {
+    // 404, not 503: a 503 always means "no live data" (NO_LIVE_DATA) in this API.
+    if (!opts.ops) throw Object.assign(new Error('Operations (login monitor, watchdog, weekly audit) are not running on this server'), { statusCode: 404 });
+    return opts.ops;
+  };
+  app.get('/api/ops', async () => ops().status());
+  app.post('/api/ops/login/relogin', async (req) => {
+    requireOperator(req);
+    const r = await ops().login.relogin();
+    return { ok: r.ok, message: r.message, status: ops().status() };
+  });
+  app.post('/api/ops/watchdog/run', async (req) => {
+    requireOperator(req);
+    const checks = await ops().watchdog.run();
+    const fixed = checks.filter((c) => c.result === 'fixed').length;
+    const bad = checks.filter((c) => c.result === 'warn' || c.result === 'fail').length;
+    return { ok: true, message: `Health check done: ${checks.length} checks, ${fixed} fixed, ${bad} need attention`, status: ops().status() };
+  });
+  app.post('/api/ops/audit/run', async (req) => {
+    requireOperator(req);
+    const r = ops().audit.runNow();
+    r.done?.catch((e) => app.log.warn(`weekly audit failed: ${e instanceof Error ? e.message : String(e)}`));
+    return { ok: r.started, message: r.message, status: ops().status() };
+  });
+  app.get<{ Params: { id: string } }>('/api/ops/audit/reports/:id', async (req) => {
+    const r = ops().audit.report(req.params.id);
+    if (!r) throw Object.assign(new Error('No such audit report'), { statusCode: 404 });
+    return r;
   });
 
   app.get('/api/meta', async (): Promise<MetaResponse> => {

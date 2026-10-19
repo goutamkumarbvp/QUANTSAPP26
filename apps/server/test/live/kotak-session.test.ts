@@ -495,3 +495,72 @@ describe('session helpers', () => {
     expect(nextIstTime(Date.UTC(2026, 9, 11, 20, 0), 510)).toBe(Date.UTC(2026, 9, 12, 3, 0)); // 01:30 IST
   });
 });
+
+describe('KotakSession login back-off by cause (login monitor)', () => {
+  it('retries soon after a login that got no answer (5 s doubling to 1 min), without the credential back-off', async () => {
+    let down = true;
+    const { env, ff, session } = setup(() => ({ body: [] }), {
+      login: () => {
+        if (down) throw new TypeError('fetch failed');
+        return { body: loginOk() };
+      },
+    });
+    const holds: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      await expect(session.login()).rejects.toThrow(/network error \(fetch failed\)/);
+      const until = session.status().loginBlockedUntil!;
+      holds.push(until - env.clock);
+      expect(session.status().loginFailures).toEqual({ rejected: 0, network: i + 1 });
+      env.clock = until;
+    }
+    expect(holds).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
+    down = false;
+    await session.login();
+    expect(session.status()).toMatchObject({ loggedIn: true });
+    expect(session.status().loginFailures).toBeUndefined();
+    expect(ff.calls.filter(isLogin).length).toBe(7);
+  });
+
+  it('keeps the 60 s doubling back-off for logins Kotak refused, and counts them apart', async () => {
+    const { env, session } = setup(() => ({ body: [] }), { login: () => ({ status: 401, body: LOGIN_ERROR }) });
+    await expect(session.login()).rejects.toThrow(/Invalid credentials/);
+    expect(session.status().loginBlockedUntil).toBe(env.clock + 60_000);
+    expect(session.status().loginFailures).toEqual({ rejected: 1, network: 0 });
+  });
+
+  it('writes one warning for a run of network failures, then one per 10 attempts', async () => {
+    const lines: string[] = [];
+    const { env, session } = setup(() => ({ body: [] }), {
+      login: () => {
+        throw new TypeError('fetch failed');
+      },
+      deps: { logger: { debug: (m) => lines.push(`debug ${m}`), info: () => undefined, warn: (m) => lines.push(`warn ${m}`) } },
+    });
+    for (let i = 0; i < 12; i++) {
+      await session.login().catch(() => undefined);
+      env.clock = session.status().loginBlockedUntil!;
+    }
+    expect(lines.filter((l) => l.startsWith('warn')).length).toBe(2); // attempts 1 and 10
+    expect(lines.filter((l) => l.startsWith('debug')).length).toBe(10);
+  });
+});
+
+describe('KotakSession pause after repeated refusals', () => {
+  it('pauses automatic logins after 5 refusals in a row; a forced login still tries and its success resumes them', async () => {
+    let ok = false;
+    const { env, ff, session } = setup(() => ({ body: [] }), { login: () => (ok ? { body: loginOk() } : { status: 401, body: LOGIN_ERROR }) });
+    for (let i = 0; i < 5; i++) {
+      await expect(session.login()).rejects.toThrow(/Invalid credentials/);
+      env.clock = session.status().loginBlockedUntil!;
+    }
+    expect(session.status().loginPaused).toMatch(/refused 5 logins in a row/);
+    const calls = ff.calls.length;
+    env.clock += 3_600_000;
+    await expect(session.login()).rejects.toThrow(/automatic login paused/);
+    expect(ff.calls.length).toBe(calls); // no request while paused
+    ok = true;
+    await session.login({ force: true });
+    expect(session.status()).toMatchObject({ loggedIn: true });
+    expect(session.status().loginPaused).toBeUndefined();
+  });
+});

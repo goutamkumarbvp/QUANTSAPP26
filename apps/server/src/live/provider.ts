@@ -37,6 +37,7 @@ import { NoLiveData } from './types';
 import type { Candle, CandleInterval, FeedHealth, HistoryStore, InstrumentKey, IntradayStore, MarketDataProvider, TradingCalendar } from './types';
 import { EXTRA_INDEX_SPOTS, LiveUniverse, type UserContract } from './universe';
 import type { MarketClockInfo } from '@q26/core';
+import { istWhen } from '../log';
 
 /* ------------------------------------------------------------------------------------------ */
 /* Options                                                                                      */
@@ -222,7 +223,9 @@ export function officialDailyCandles(history: HistoryStore, calendar: TradingCal
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
-const LOGIN_BACKOFF = { baseMs: MINUTE, maxMs: 30 * MINUTE };
+// The session's own login hold (60 s doubling to 30 min after a rejection, 5 s doubling to 1 min
+// when Kotak did not answer) is the real back-off (notBefore); the job adds little on top of it.
+const LOGIN_BACKOFF = { baseMs: 5 * SECOND, maxMs: MINUTE };
 const REFDATA_BACKOFF = { baseMs: MINUTE, maxMs: 30 * MINUTE };
 /** Daily instrument-master refresh (after the 08:30 proactive re-login, before pre-open). */
 const REFDATA_DAILY_MIN = 8 * 60 + 45;
@@ -468,10 +471,10 @@ export class LiveProvider implements MarketDataProvider {
     await this.refdataAttempt;
   }
 
-  private async login(): Promise<void> {
+  private async login(force = false): Promise<void> {
     // An attempt armed for later (the end of a login hold, a back-off) may find the session already
     // restored by a REST caller: logging in again would only replace a working session.
-    if (!this.session!.status().loggedIn) await this.session!.login();
+    if (!this.session!.status().loggedIn) await this.session!.login({ force });
     this.startOrUpdateFeed();
     this.scheduleRelogin();
     // Its own job, not awaited: while the login job runs, another login request (a feed refusal) is
@@ -524,7 +527,8 @@ export class LiveProvider implements MarketDataProvider {
       if (e instanceof KotakError && e.retryAfterMs) at = Math.max(at, this.now() + e.retryAfterMs);
       const hold = spec.notBefore?.();
       if (hold !== undefined) at = Math.max(at, hold + SECOND);
-      this.log.warn(`live: ${name} failed (${j.lastError}); next attempt ${new Date(at).toISOString()}`);
+      // A failed Kotak login is already logged by the session (with its next login time): one line, not two.
+      if (!(e instanceof KotakError && e.kind === 'login')) this.log.warn(`live: ${name} failed (${j.lastError}); next attempt ${istWhen(at, this.now())}`);
       this.runJob(name, fn, spec, at);
     } finally {
       j.running = false;
@@ -570,7 +574,7 @@ export class LiveProvider implements MarketDataProvider {
     if (err.kind === 'fallback') {
       // A different body layout: logging in again would not help. Stop the stream for a while.
       this.feedFatalUntil = this.now() + FEED_FALLBACK_HOLD_MS;
-      const reason = `SFeed switched to native_fallback, which this client does not decode; stream stopped until ${new Date(this.feedFatalUntil).toISOString()}`;
+      const reason = `SFeed switched to native_fallback, which this client does not decode; stream stopped until ${istWhen(this.feedFatalUntil, this.now())}`;
       this.log.warn(`live: ${reason}`);
       void this.live.closeFeed(reason);
       this.feedGeneration = -1;
@@ -581,13 +585,16 @@ export class LiveProvider implements MarketDataProvider {
     // while a re-login is pending the client keeps re-dialling with the old sid, and the login hands
     // it the new one (onChange → startOrUpdateFeed).
     const c = this.session.feedCredentials();
-    if (!c) return this.ensureLogin();
+    if (!c) {
+      this.ensureLogin();
+      return;
+    }
     if (c.generation !== this.feedGeneration) return this.startOrUpdateFeed();
     // Most likely an expired sid: one re-login, capped per hour (the session adds its own cooldown).
     const t = this.now();
     this.feedRelogins = this.feedRelogins.filter((x) => t - x < HOUR);
     if (this.feedRelogins.length >= MAX_FEED_RELOGINS_PER_HOUR) {
-      this.feedHeld = `SFeed refused the session ${this.feedRelogins.length} times within an hour; no further re-login for it until ${new Date(this.feedRelogins[0] + HOUR).toISOString()}`;
+      this.feedHeld = `SFeed refused the session ${this.feedRelogins.length} times within an hour; no further re-login for it until ${istWhen(this.feedRelogins[0] + HOUR, this.now())}`;
       this.log.warn(`live: ${this.feedHeld}`);
       return;
     }
@@ -657,12 +664,90 @@ export class LiveProvider implements MarketDataProvider {
   /**
    * A login at the end of any login hold when the session is lost and no login is pending. The
    * proactive re-login only counts while it runs: its timer (next 08:30 IST) is nearly always set.
+   * Returns whether it armed a login (the login monitor calls it every few seconds).
    */
-  private ensureLogin(): void {
+  ensureLogin(): boolean {
     const s = this.session;
-    if (this.stopped || !s || s.status().loggedIn || this.jobPending('login') || this.jobs.get('relogin')?.running) return;
+    if (this.stopped || !s || s.status().loggedIn || this.jobPending('login') || this.jobs.get('relogin')?.running) return false;
     const hold = s.status().loginBlockedUntil;
     this.runJob('login', () => this.login(), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil }, Math.max(this.now(), (hold ?? 0) + SECOND));
+    return true;
+  }
+
+  /* ---------------------------------- operations (login monitor, watchdog, audit) ---------------------------------- */
+
+  /** Kotak credentials are configured (a session exists); otherwise the reason (variable names only). */
+  credentials(): { ok: true } | { ok: false; error: string } {
+    return this.session ? { ok: true } : { ok: false, error: this.kotakError ?? 'Kotak credentials missing' };
+  }
+
+  /** A login attempt is running or armed. */
+  loginPending(): boolean {
+    return this.jobPending('login') || !!this.jobs.get('relogin')?.running;
+  }
+
+  /**
+   * Log in now (operator "Re-login now"). `force` skips the failure back-off, never a 429 hold nor
+   * the hold after repeated session rejections (the session enforces both). Resolves once the
+   * attempt has finished; rejects with its error. A login already running is not doubled.
+   */
+  async loginNow(opts: { force?: boolean } = {}): Promise<'logged-in' | 'already-logged-in' | 'in-progress'> {
+    const s = this.session;
+    if (!s) throw new KotakError(this.kotakError ?? 'Kotak credentials missing', 'login');
+    if (s.status().loggedIn) return 'already-logged-in';
+    if (this.jobs.get('login')?.running || this.jobs.get('relogin')?.running) return 'in-progress';
+    await this.execJob('login', () => this.login(opts.force), { ...LOGIN_BACKOFF, notBefore: () => this.session?.status().loginBlockedUntil });
+    if (!s.status().loggedIn) throw new KotakError(this.jobs.get('login')?.lastError ?? s.status().error ?? 'Kotak login failed', 'login');
+    return 'logged-in';
+  }
+
+  /** Re-arm the proactive re-login when it is missing (it is normally always armed while logged in). */
+  ensureRelogin(): boolean {
+    if (this.stopped || !this.session?.status().loggedIn || this.jobPending('relogin')) return false;
+    this.scheduleRelogin();
+    return this.jobPending('relogin');
+  }
+
+  /** Called with the session status after every login attempt, logout and invalidation. */
+  onLoginChange(fn: (s: KotakSessionStatus) => void): () => void {
+    return this.session ? this.session.onChange(fn) : () => undefined;
+  }
+
+  /**
+   * Drop the market-data websocket and dial a new one with the current session (the watchdog's fix
+   * for a feed that stopped delivering). False when there is no session or the feed is held.
+   */
+  async restartFeed(reason: string): Promise<boolean> {
+    const c = this.session?.feedCredentials();
+    if (this.stopped || !c || this.now() < this.feedFatalUntil) return false;
+    await this.live.closeFeed();
+    this.feedGeneration = -1;
+    this.startOrUpdateFeed();
+    this.log.warn(`live: SFeed restarted (${reason})`);
+    return this.live.hasFeed();
+  }
+
+  /** Drop cached REST answers (re-fetched on demand): expired ones, or all of them. Returns entries dropped. */
+  clearCaches(opts: { all?: boolean } = {}): number {
+    let n = 0;
+    const t = this.now();
+    for (const [id, hit] of this.histCache) {
+      if (opts.all || t - hit.at > 6 * HOUR) {
+        this.histCache.delete(id);
+        n++;
+      }
+    }
+    return n + this.live.pruneChains(opts.all ? 0 : undefined);
+  }
+
+  /** Load the instrument master again now (the daily job at 08:45 IST normally does it). */
+  refreshInstrumentMaster(): Promise<void> {
+    return this.execJob('refdata', () => this.refreshRefdata(), REFDATA_BACKOFF);
+  }
+
+  /** Background jobs (login, relogin, refdata …): attempts, last error, last success, next attempt. */
+  jobStatuses(): Record<string, JobStatus> {
+    return this.healthReport().jobs;
   }
 
   /** Recorder session: started from pre-open (or at once after a restart mid-session), ended after 15:30. */

@@ -15,6 +15,7 @@
     "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w @q26/server\" \"npm run dev -w @q26/web\"",
     "build": "npm run build -w @q26/web && npm run build -w @q26/server",
     "start": "npm run start -w @q26/server",
+    "start:supervised": "node scripts/supervise.mjs",
     "test": "npm run test -w @q26/core && npm run test -w @q26/server && npm run test -w @q26/web",
     "test:e2e": "npm run test:e2e -w @q26/web",
     "typecheck": "npm run typecheck -w @q26/core && npm run typecheck -w @q26/server && npm run typecheck -w @q26/web"

@@ -1173,3 +1173,130 @@ export type ServerMessage =
 
 /** Client → server. `subscribe` lists underlying symbols (validated against the instrument master, at most 40). */
 export type ClientMessage = { type: 'auth'; token: string } | { type: 'subscribe'; symbols: string[] };
+
+/* ------------------------- operations (Model F) -------------------------- */
+
+/** One entry of the operations journal (login monitor, watchdog, weekly audit). Never carries secrets. */
+export interface OpsEvent {
+  ts: number;
+  source: 'login' | 'watchdog' | 'audit' | 'server';
+  level: 'info' | 'warn' | 'error';
+  /** Machine-readable kind, e.g. LOGIN_OK, LOGIN_FAILED, SESSION_LOST, FEED_RESTARTED. */
+  type: string;
+  message: string;
+}
+
+/**
+ * LOGGED_IN: a Kotak session is live. LOGGING_IN: an attempt is running or due now. WAITING: the
+ * last attempt failed and the next one is armed (nextAttemptAt). DISCONNECTED: no session and
+ * nothing armed (the monitor arms one within seconds). PAUSED: Kotak refused several logins in a
+ * row; automatic logins wait for "Re-login now" or a restart with fixed credentials (protects the
+ * account from a lock-out). NO_CREDENTIALS: NEO_* variables missing.
+ */
+export type LoginMonitorState = 'LOGGED_IN' | 'LOGGING_IN' | 'WAITING' | 'PAUSED' | 'DISCONNECTED' | 'NO_CREDENTIALS' | 'STOPPED';
+
+export interface LoginMonitorStatus {
+  state: LoginMonitorState;
+  /** One plain-language line for the dashboard. */
+  detail: string;
+  checkEveryMs: number;
+  lastCheckAt: number | null;
+  loggedInAt?: number;
+  tokenExpiresAt?: number;
+  nextReloginAt?: number;
+  /** Next automatic login attempt while not logged in. */
+  nextAttemptAt?: number;
+  lastFailure?: { at: number; reason: string };
+  /** Failed attempts since the last successful login. */
+  consecutiveFailures: number;
+  /** Counts for the current IST day. */
+  today: { logins: number; failures: number; sessionLosses: number };
+  /** Most recent first. */
+  events: OpsEvent[];
+}
+
+export type WatchdogCheckResult = 'ok' | 'warn' | 'fail' | 'fixed' | 'skipped';
+
+export interface WatchdogCheck {
+  id: string;
+  title: string;
+  result: WatchdogCheckResult;
+  detail: string;
+  /** What the watchdog did about it (when result is 'fixed', or an attempted fix). */
+  action?: string;
+}
+
+export interface WatchdogStatus {
+  state: 'HEALTHY' | 'DEGRADED' | 'CRITICAL' | 'STARTING';
+  intervalMs: number;
+  lastRunAt: number | null;
+  runs: number;
+  /** Started by scripts/supervise.mjs (restarts the server after a crash or hang). */
+  supervised: boolean;
+  process: { pid: number; uptimeSec: number; rssMb: number; heapUsedMb: number; heapLimitMb: number; eventLoopP99Ms: number | null };
+  checks: WatchdogCheck[];
+  /** Recent warnings, failures and fixes, most recent first. */
+  incidents: OpsEvent[];
+}
+
+export type AuditItemStatus = 'PASS' | 'WARN' | 'FAIL' | 'FIXED' | 'SKIPPED';
+
+export interface AuditItem {
+  id: string;
+  area: string;
+  title: string;
+  status: AuditItemStatus;
+  detail: string;
+  /** The automatic fix applied (FIXED) or attempted. */
+  fix?: string;
+}
+
+export interface AuditReport {
+  id: string;
+  trigger: 'schedule' | 'manual' | 'catch-up';
+  /** Saturday-to-Saturday window the audit covers (epoch ms). */
+  window: { from: number; to: number };
+  startedAt: number;
+  finishedAt: number;
+  summary: Record<AuditItemStatus, number>;
+  verdict: 'HEALTHY' | 'ATTENTION' | 'FAILING';
+  items: AuditItem[];
+}
+
+export interface AuditReportSummary {
+  id: string;
+  trigger: AuditReport['trigger'];
+  finishedAt: number;
+  verdict: AuditReport['verdict'];
+  summary: AuditReport['summary'];
+}
+
+export interface WeeklyAuditStatus {
+  running: boolean;
+  /** e.g. "Every Saturday 10:00 IST". */
+  schedule: string;
+  nextRunAt: number | null;
+  last: AuditReport | null;
+  history: AuditReportSummary[];
+}
+
+/** Market-data state as the dashboard must show it (never a green light without a fresh tick). */
+export type FeedState = 'LIVE' | 'FEED STALE' | 'DATA UNAVAILABLE' | 'MARKET CLOSED';
+
+export interface OpsStatusResponse {
+  login: LoginMonitorStatus;
+  watchdog: WatchdogStatus;
+  audit: WeeklyAuditStatus;
+  broker: 'CONNECTED' | 'DISCONNECTED';
+  feed: FeedState;
+  /** Paper trading only: no code path sends an order to a broker. */
+  safety: { mode: 'paper'; autoExecutionToBroker: false; liveOrderAuthority: false; brokerSubmission: false };
+  /** Live order placement is not part of this program: always NOT READY for live trading. */
+  liveTrading: 'NOT READY';
+}
+
+export interface OpsActionResponse {
+  ok: boolean;
+  message: string;
+  status: OpsStatusResponse;
+}

@@ -265,6 +265,22 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
     }
   }
 
+  /**
+   * Forget what is cached about one date of one kind (after its files were moved away, e.g. to
+   * quarantine): it then reads as not loaded and the EOD jobs fetch it again.
+   */
+  forgetDate(kind: EodKind, date: string): void {
+    if (!KINDS.includes(kind)) throw new Error(`unknown EOD kind '${kind}'`);
+    this.dates.delete(kind);
+    const target = kind === 'fo' ? this.foDir(date) : this.dayFile(kind, date);
+    for (const p of [...this.cache.keys()]) if (p === target || p.startsWith(`${target}${path.sep}`)) this.cache.delete(p);
+  }
+
+  /** Root of the EOD files (DATA_DIR/eod). */
+  dir(): string {
+    return this.root;
+  }
+
   /* ---------------------------------- reads ----------------------------------- */
 
   loadedDates(kind: EodKind): string[] {

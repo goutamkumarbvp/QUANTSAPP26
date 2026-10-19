@@ -68,6 +68,7 @@ export async function fetchFiiDii(http: NseHttp, opts: { nseOnlyFallback?: boole
   const attempts: { url: string; scope: FiiDiiFlows['scope'] }[] = [{ url: FIIDII_URL, scope: 'combined' }];
   if (opts.nseOnlyFallback !== false) attempts.push({ url: FIIDII_NSE_URL, scope: 'nse' });
   const reasons: string[] = [];
+  let network = false;
   for (const a of attempts) {
     try {
       const res = await http.getJson({ url: a.url, warmupUrl: FIIDII_WARMUP_URL });
@@ -79,11 +80,12 @@ export async function fetchFiiDii(http: NseHttp, opts: { nseOnlyFallback?: boole
     } catch (e) {
       if (!(e instanceof NseError)) throw e;
       reasons.push(e.message);
+      network = e.kind === 'network';
       // A changed payload may still be served by the other path; a block or network failure would not be.
       if (e.kind !== 'format') break;
     }
   }
-  return { data: null, reason: `FII/DII unavailable: ${reasons.join('; ')}` };
+  return { data: null, reason: `FII/DII unavailable: ${reasons.join('; ')}`, ...(network ? { network: true } : {}) };
 }
 
 /**

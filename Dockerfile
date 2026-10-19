@@ -18,6 +18,13 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/server/package.json ./apps/server/
 COPY --from=build /app/apps/web/dist ./apps/web/dist
+COPY --from=build /app/scripts/supervise.mjs ./scripts/
+# Not root: the data volume is owned by the image's unprivileged `node` user.
+RUN mkdir -p /app/apps/server/data && chown -R node:node /app/apps/server/data
+USER node
 EXPOSE 8787
 VOLUME ["/app/apps/server/data"]
-CMD ["node", "apps/server/dist/server.mjs"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+# The supervisor restarts the server after a crash, a hang or a watchdog restart request.
+CMD ["node", "scripts/supervise.mjs"]

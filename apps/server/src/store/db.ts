@@ -47,6 +47,8 @@ const empty = (): DbShape => ({
 
 export class Db {
   data: DbShape;
+  /** Set when db.json could not be read at start: the file it was moved to (the app started empty). */
+  readonly recoveredFrom: string | undefined;
   private timer: NodeJS.Timeout | null = null;
   private readonly file: string | null;
 
@@ -60,6 +62,7 @@ export class Db {
         const backup = `${this.file}.corrupt-${Date.now()}`;
         fs.renameSync(this.file, backup);
         this.data = empty();
+        this.recoveredFrom = backup;
       }
     }
   }

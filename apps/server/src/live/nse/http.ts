@@ -19,6 +19,8 @@ import { NoLiveData } from '../types';
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface NseLogger {
+  /** Per-attempt detail (retries, host fallback): the caller reports the final outcome. */
+  debug?(msg: string): void;
   info(msg: string): void;
   warn(msg: string): void;
 }
@@ -78,7 +80,8 @@ export type FileResult = FileOk | NotPublished;
 export type Published<T> = { status: 'ok'; url: string; data: T } | NotPublished;
 
 /** Result of a best-effort source (unofficial JSON): the data, or null with the reason. */
-export type Fetched<T> = { data: T; reason?: undefined } | { data: null; reason: string };
+/** `network`: no answer from the host at all (DNS, refused, timeout). */
+export type Fetched<T> = { data: T; reason?: undefined } | { data: null; reason: string; network?: boolean };
 
 /* ------------------------------------------------------------------------------------------ */
 /* Client                                                                                       */
@@ -185,7 +188,7 @@ export class NseHttp {
       } catch (e) {
         const last = i === urls.length - 1;
         if (last || !(e instanceof NseError) || !fallbackWorthy(e)) throw e;
-        this.log.warn(`${e.message}; trying ${new URL(urls[i + 1]).host}`);
+        this.log.debug?.(`${e.message}; trying ${new URL(urls[i + 1]).host}`);
       }
     }
   }
@@ -218,7 +221,7 @@ export class NseHttp {
         }
         if (!rewarmed) {
           rewarmed = true;
-          this.log.info(`${label}: HTTP ${res.status}, re-warming cookies once`);
+          this.log.debug?.(`${label}: HTTP ${res.status}, re-warming cookies once`);
           this.jar.clear(req.url);
           await this.warmUp(req.warmupUrl);
           continue;
@@ -242,7 +245,7 @@ export class NseHttp {
     const res = await this.sendWithRetry(pageUrl, this.headers(pageUrl, 'html'));
     if (res.status >= 200 && res.status < 400) {
       this.jar.markWarm(pageUrl, this.now());
-      this.log.info(`cookie warm-up ${new URL(pageUrl).pathname}: HTTP ${res.status}, ${this.jar.count(pageUrl)} cookies`);
+      this.log.debug?.(`cookie warm-up ${new URL(pageUrl).pathname}: HTTP ${res.status}, ${this.jar.count(pageUrl)} cookies`);
       return;
     }
     const blocked = res.status === 401 || res.status === 403 || res.status === 429;
@@ -257,7 +260,7 @@ export class NseHttp {
       if (res.status === 404) return { status: 'not-published', url, httpStatus: 404 };
       if ((res.status === 401 || res.status === 403) && !warmed) {
         warmed = true;
-        this.log.info(`${label}: HTTP ${res.status}, warming cookies and retrying once`);
+        this.log.debug?.(`${label}: HTTP ${res.status}, warming cookies and retrying once`);
         this.jar.clear(url);
         await this.warmUp(req.warmupUrl ?? siteHome(url));
         continue;
@@ -295,7 +298,8 @@ export class NseHttp {
       // Honour Retry-After (DESIGN.md §1.5): when it asks for more than maxBackoffMs, stop instead of retrying early.
       if (ra !== undefined && ra > this.maxBackoffMs) return res!;
       if (ra !== undefined) wait = Math.max(wait, ra);
-      this.log.warn(`${fileLabel(url)}: ${err ? err.message : `HTTP ${res!.status}`}; retry ${attempt + 1}/${this.retries} in ${Math.round(wait / 1000)} s`);
+      // err.message already starts with the file label.
+      this.log.debug?.(`${err ? err.message : `${fileLabel(url)}: HTTP ${res!.status}`}; retry ${attempt + 1}/${this.retries} in ${Math.round(wait / 1000)} s`);
       await this.sleep(wait);
     }
   }

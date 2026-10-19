@@ -66,6 +66,7 @@ Production (single process serving API, WebSocket and the built web app):
 ```bash
 npm run build
 npm start                # http://localhost:8787
+npm run start:supervised # the same, restarted after a crash, a hang or a watchdog restart request (24×7)
 ```
 
 Docker (the image does not contain `.env`; pass it at run time):
@@ -99,12 +100,15 @@ logged in, and serves only official EOD files and already-recorded history):
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | API listen address |
 | `RISK_FREE_RATE` | `0.065` | Used for IV, Greeks and margin estimates |
 | `HOLIDAYS` | — | Comma-separated `YYYY-MM-DD` exchange holidays, merged with NSE's holiday master |
-| `AUTH_SECRET` | random per boot | HMAC secret for app session tokens — **set it in production** so sessions survive restarts |
+| `AUTH_SECRET` | random per boot | HMAC secret for app session tokens — **set a long random value (≥ 16 characters) in production** so sessions survive restarts; a placeholder such as `change-me` or a shorter value is ignored with a warning |
 | `DATA_DIR` | `apps/server/data` | User data (`db.json`), recorded sessions and EOD files |
 | `PERSIST` | `true` | `false` keeps user data in memory only |
 | `EOD_BACKFILL_DAYS` | `30` | Sessions checked for missing NSE/BSE files at start and daily (`0` = none) |
 | `SFEED_TOKEN_BUDGET` | `2700` | Cap on streamed SFeed subscriptions (max 2,700 of Kotak's 3,000) |
 | `WEB_DIST` | `apps/web/dist` | Built web app served by the API |
+| `LOG_LEVEL` | `info` | Terminal detail: `trace`, `debug` (adds one line per HTTP request and per retry), `info`, `warn`, `error` |
+| `LOG_FORMAT` | readable | `json` writes pino JSON lines (for log collectors) instead of `HH:MM:SS LEVEL message` in IST |
+| `NO_COLOR` | — | Set to turn off colours in the terminal |
 
 ### Network allowlist
 
@@ -114,6 +118,21 @@ The server needs outbound HTTPS (and WSS for the feed) to:
 - `nsearchives.nseindia.com`, `archives.nseindia.com` — NSE bhavcopy, index closes, participant files
 - `www.nseindia.com` — FII/DII and holiday master (unofficial JSON; blank when blocked)
 - `www.bseindia.com` — SENSEX / BANKEX F&O bhavcopy
+
+## Operations: login monitor, 24×7 watchdog, weekly audit
+
+Three engines run inside the server; the **Operations** panel on the Home dashboard shows them, with one button
+each (the buttons need a registered account, not a guest). Everything they see and do is written to
+`DATA_DIR/ops/journal/<date>.jsonl` (credential values redacted) and printed in the terminal.
+
+| Engine | What it does | Button |
+|---|---|---|
+| **Login monitor** (`apps/server/src/ops/login-monitor.ts`) | Checks the Kotak session every 5 s and logs in again as soon as it is lost or a login failed. No answer from Kotak (network): retried after 5 s, doubling to 1 min. Refused by Kotak (wrong TOTP/MPIN): 60 s doubling to 30 min, and after 5 refusals in a row automatic logins **pause** — repeated wrong credentials can lock the trading account. | **Re-login now** (skips the back-off for one attempt; 20 s between presses, 2 min after 3 refusals) |
+| **Watchdog** (`apps/server/src/ops/watchdog.ts`) + **supervisor** (`scripts/supervise.mjs`) | Every 30 s: memory (drops cached answers, restart if still critical), responsiveness (event-loop delay), unhandled errors, broker login, market feed (FEED STALE during market hours → new socket), instrument master (re-download), background jobs, EOD files, disk/DATA_DIR (old journals removed when space is low). Under `npm run start:supervised` the supervisor restarts the server after a crash, a hang (`/api/health` silent 3× in a row) or a watchdog restart request. Code defects are recorded, not patched at run time. | **Run health check** |
+| **Weekly audit** (`apps/server/src/ops/weekly-audit.ts`) | Saturdays 10:00 IST (a missed Saturday runs a few minutes after the next start), covering Saturday to Saturday: paper-only safety boundary, credential leaks in stored files (redacted in the ops files), configuration, EOD files of every session (missing ones downloaded again, corrupt ones quarantined and downloaded again), recorded sessions, instrument master, paper-trading ledger (email index rebuilt), login and watchdog history, restarts, runtime, housekeeping. Reports: `DATA_DIR/ops/audits/<id>.json` and `.md`. Never edits user orders, configuration or code; unrecorded market minutes stay blank. | **Run audit now** |
+
+API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/relogin`, `POST /api/ops/watchdog/run`,
+`POST /api/ops/audit/run`, `GET /api/ops/audit/reports/:id`.
 
 ## Health
 
