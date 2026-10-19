@@ -41,6 +41,11 @@ const WS_BATCH_MS = 1000;
 const WS_HEARTBEAT_MS = 5000;
 const WS_MAX_SYMBOLS = 40;
 const SYMBOL_RE = /^[A-Z0-9&_-]{1,32}$/;
+/**
+ * Routes that answer `?at=` (as of a past time) from the recorder's minutes. Every other route serves
+ * live data only, so a past `?at=` there is refused (NoLiveData) instead of being answered live.
+ */
+const AS_OF_ROUTES = new Set(['/api/quotes', '/api/indices', '/api/expiries/:symbol', '/api/chain/:symbol', '/api/futures/:symbol', '/api/candles/:symbol', '/api/oi/strikes/:symbol']);
 
 /* ------------------------------ validation ------------------------------ */
 
@@ -167,6 +172,13 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     if (!Number.isFinite(t)) throw httpError(400, 'at must be a timestamp in epoch milliseconds');
     return t < now() ? t : undefined;
   };
+  // A route without an as-of answer never serves live data for a past `?at=` (it would be shown as of that time).
+  app.addHook('preHandler', async (req) => {
+    const url = req.routeOptions.url;
+    if (req.method !== 'GET' || !url?.startsWith('/api/') || AS_OF_ROUTES.has(url)) return;
+    const t = at(req);
+    if (t !== undefined) throw new NoLiveData(`${url} is served from live data only: no as-of (?at=) answer for ${new Date(t).toISOString()}`);
+  });
   const an = svc.analytics;
   /** Live views (order book, order flow) stream their contract in the provider's 'user' tier (ad-hoc watches, rule h). */
   const userTier: ToolViewOptions = { touch: (key, level) => svc.userWatches.touch([key], level) };
@@ -185,7 +197,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
         why.push(err.message);
       }
     }
-    if (!out.length && why.length) throw new NoLiveData(why.slice(0, 3).join('; '));
+    if (!out.length && why.length) throw new NoLiveData([...new Set(why)].slice(0, 3).join('; '));
     return out;
   };
 
@@ -302,7 +314,9 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   app.get<{ Params: { symbol: string } }>('/api/oi/strikes/:symbol', async (req) => {
     const q = qs(req);
-    return an.strikeOi(req.params.symbol, q.expiry, at(req), q.from ? num(q.from, NaN) : undefined);
+    const from = q.from ? Number(q.from) : undefined;
+    if (from !== undefined && !Number.isFinite(from)) throw httpError(400, 'from must be a timestamp in epoch milliseconds');
+    return an.strikeOi(req.params.symbol, q.expiry, at(req), from);
   });
 
   app.get<{ Params: { symbol: string } }>('/api/oi/multi-strike/:symbol', async (req) => {
@@ -521,7 +535,8 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   // One provider tick listener fanned out to the sockets: a tick of an underlying's spot or future
   // marks the symbol changed; each socket gets at most one batch a second with the changed symbols it
   // subscribed to. Quotes are rebuilt from md.live.quote() (underlyingQuote), so an update of an
-  // older session is never sent as live. Quotes and the feed status are shared for up to a second.
+  // older session is never sent as live. Quotes (until the symbol's next tick) and the feed status
+  // are shared for up to a second.
   interface WsClient {
     symbols: Set<string>;
     dirty: Set<string>;
@@ -549,6 +564,9 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   };
   const offTick = md.live.onTick((q) => {
     if (q.key.kind !== 'SPOT' && q.key.kind !== 'FUT') return;
+    // A quote cached before this tick is outdated: a socket whose batch runs next must not send it
+    // (its dirty mark would be spent on the older price and the new one never sent).
+    quoteCache.delete(q.key.symbol);
     for (const c of clients) if (c.symbols.has(q.key.symbol)) c.dirty.add(q.key.symbol);
   });
   app.addHook('onClose', async () => {

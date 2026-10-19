@@ -182,6 +182,21 @@ function minutesUpTo(md: MarketDataProvider, key: InstrumentKey, at: number): Mi
   return md.intraday.bars(key, date).filter((r) => r.ts + MINUTE <= at);
 }
 
+/**
+ * A recording counts as covering a session's open when its first minute of the day starts at most
+ * this many minutes after 09:15. Session values rebuilt from recorded minutes (open, day high/low,
+ * session volume) are only shown for such recordings: a recording that started at 11:00 has no
+ * session open, and the sum of its minute volumes is not the session's volume.
+ */
+export const RECORDING_OPEN_SLACK_MIN = 2;
+
+/** The recorder holds `key` (its traded minutes when `traded`) on `date` from the session's open (RECORDING_OPEN_SLACK_MIN). */
+function recordedFromOpen(md: MarketDataProvider, key: InstrumentKey, date: string, traded = false): boolean {
+  const recs = md.intraday.bars(key, date).filter((r) => !traded || r.traded);
+  if (!recs.length) return false;
+  return Math.min(...recs.map((r) => r.ts)) <= md.calendar.ts(date, RECORDING_OPEN_SLACK_MIN);
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* Live prices and books                                                                        */
 /* ------------------------------------------------------------------------------------------ */
@@ -394,8 +409,10 @@ export function underlyingQuote(md: MarketDataProvider, symbol: string): Quote {
 
 /**
  * As-of quote of an underlying at a past `at`, from recorded minutes only: ltp = the last recorded
- * minute close; open/high/low over that day's traded minutes up to `at`; prevClose = official close
- * of the previous session; future = the nearest recorded future; atmIv = the recorded chain minute.
+ * minute close, `ts` = that minute (it can be older than `at` when nothing was recorded since);
+ * open/high/low over that day's traded minutes up to `at`, only when the recording covers the
+ * session's open (else null); prevClose = official close of the previous session; future = the
+ * nearest recorded future; atmIv = the recorded chain minute.
  */
 export function underlyingQuoteAt(md: MarketDataProvider, symbol: string, at: number): Quote {
   const u = md.ref.underlying(symbol);
@@ -403,7 +420,7 @@ export function underlyingQuoteAt(md: MarketDataProvider, symbol: string, at: nu
   requireRecorded(md, date);
   const rec = md.intraday.at(spotKey(u.symbol), at);
   if (!rec) throw new NoLiveData(`No recorded ${u.symbol} price at ${formatTimeIST(at)} on ${date}`);
-  const traded = minutesUpTo(md, spotKey(u.symbol), at).filter((r) => r.traded);
+  const traded = recordedFromOpen(md, spotKey(u.symbol), date, true) ? minutesUpTo(md, spotKey(u.symbol), at).filter((r) => r.traded) : [];
   const prevDate = md.calendar.prev(onOrBefore(md, date));
   const prevClose = eodClose(md, u.symbol, prevDate);
   const keys = md.intraday.recordedKeys(date).filter((k) => k.symbol === u.symbol && k.expiry && expiryTs(k.expiry) > at);
@@ -425,7 +442,7 @@ export function underlyingQuoteAt(md: MarketDataProvider, symbol: string, at: nu
     futureExpiry: fut?.expiry ?? null,
     futureChange: future !== null && fPrev !== null ? r2(future - fPrev) : null,
     atmIv: pct(cm?.atmIv ?? null),
-    ts: at,
+    ts: rec.ts,
   };
 }
 
@@ -480,7 +497,7 @@ interface ChainCtx {
 
 /**
  * One leg: ltp = live-session trade (as-of: the recorded minute close); bid/ask only from a live book
- * (as-of: the book recorded with the minute); IV/Greeks from md.pricing on the mid of a sane live
+ * (as-of: the book recorded with the minute just completed at `at`); IV/Greeks from md.pricing on the mid of a sane live
  * book, else the ltp (ivSource says which), null without a premium or a forward; prevOi/prevClose from
  * the quote, else the previous session's official row (its close only when it traded).
  */
@@ -488,7 +505,10 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
   if (!q) return blankLeg();
   const { md } = c;
   const ltp = c.asOf ? (isPos(q.ltp) ? q.ltp : null) : livePrice(md, q, c.dates ?? undefined);
-  const book = c.asOf ? (isPos(q.bid) && isPos(q.ask) && q.ask >= q.bid ? { bid: q.bid, ask: q.ask, bidQty: null, askQty: null, ts: q.ts } : null) : liveBook(md, q, c.evalTs);
+  // As-of: the book recorded with the leg's minute, only when that minute is the one just completed
+  // at `at` (q.ts is the minute's start); an older minute's book is not the book at `at`.
+  const asOfBookFresh = c.asOf && c.evalTs - q.ts < 2 * MINUTE;
+  const book = c.asOf ? (asOfBookFresh && isPos(q.bid) && isPos(q.ask) && q.ask >= q.bid ? { bid: q.bid, ask: q.ask, bidQty: null, askQty: null, ts: q.ts } : null) : liveBook(md, q, c.evalTs);
   const mid = saneMid(book);
   const premium = mid ?? ltp;
   const ivSource: OptionQuote['ivSource'] = mid !== null ? 'mid' : ltp !== null ? 'ltp' : null;
@@ -787,7 +807,11 @@ export function futuresQuotes(md: MarketDataProvider, symbol: string): FuturesQu
   return rows;
 }
 
-/** As-of futures at a past `at` from recorded minutes (previous-session values from the official files). */
+/**
+ * As-of futures at a past `at` from recorded minutes (previous-session values from the official
+ * files). Volume = the recorded minute volumes up to `at`, only when the future was recorded from the
+ * session's open (a later recording's sum is not the session volume: null).
+ */
 export function futuresQuotesAt(md: MarketDataProvider, symbol: string, at: number): FuturesQuote[] {
   const u = md.ref.underlying(symbol);
   const date = md.calendar.session(at).date;
@@ -803,7 +827,7 @@ export function futuresQuotesAt(md: MarketDataProvider, symbol: string, at: numb
     const recs = minutesUpTo(md, key, at);
     const last = recs.at(-1);
     const eod = eodFuture(md, u.symbol, key.expiry as string, prevDate);
-    const vols = recs.filter((x) => isNum(x.volume));
+    const vols = recordedFromOpen(md, key, date) ? recs.filter((x) => isNum(x.volume)) : [];
     return futureRow(u.symbol, key.expiry as string, {
       ltp: last ? last.close : null,
       prevClose: tradedClose(eod),

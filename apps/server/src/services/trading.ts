@@ -382,8 +382,13 @@ export class PaperBroker {
         return;
       }
       if (after.available < 0 && (before.available === null || after.available < before.available)) {
-        const need = before.available !== null ? before.available - after.available : -after.available;
-        this.finish(uid, order, 'REJECTED', `Insufficient funds: requires ₹${Math.round(need).toLocaleString('en-IN')}, available ₹${Math.round(Math.max(0, before.available ?? 0)).toLocaleString('en-IN')}`, ts);
+        const inr = (v: number) => `₹${Math.round(v).toLocaleString('en-IN')}`;
+        // Unknown current funds (a position without a live price) are said so, never shown as ₹0.
+        const message =
+          before.available !== null
+            ? `Insufficient funds: requires ${inr(before.available - after.available)}, available ${inr(Math.max(0, before.available))}`
+            : `Insufficient funds: the order would leave the funds ${inr(-after.available)} short (current available funds unknown: ${before.gaps?.available ?? before.gaps?.margin ?? 'live prices are missing'})`;
+        this.finish(uid, order, 'REJECTED', message, ts);
         return;
       }
     }

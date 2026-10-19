@@ -321,11 +321,12 @@ export interface FuturesBuildUpRow {
 export type BuildUpCounts = Record<BuildUp, number>;
 
 export interface BreadthResponse extends DataGaps {
-  /** Live build-up of the stock futures that have one (`classified` of `total`). */
-  overall: BuildUpCounts;
+  /** Live build-up of the stock futures that have one (`classified` of `total`); null when none has. */
+  overall: BuildUpCounts | null;
   classified: number;
   total: number;
-  sectors: { sector: string; counts: BuildUpCounts; symbols: FuturesBuildUpRow[] }[];
+  /** `counts` is null for a sector none of whose futures has a live build-up yet (its symbols are still listed). */
+  sectors: { sector: string; counts: BuildUpCounts | null; symbols: FuturesBuildUpRow[] }[];
   /**
    * Past sessions from the official files (spot close change vs total futures OI change of the same
    * contracts), then today's live counts ('live').

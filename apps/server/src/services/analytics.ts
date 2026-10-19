@@ -937,7 +937,7 @@ export class Analytics {
   /**
    * Recorded chain minutes of one session (md.intraday.chainSeries): totals, PCR, max pain and ATM IV
    * of the streamed strikes; OI change vs the previous close over recorded strikes that have an
-   * official previous-close OI.
+   * official previous-close OI, each at its OI as of the point (last recorded value of the session).
    */
   oiTrend(symbol: string, expiryIn: string | undefined, date: string | undefined, interval: number, _ts?: number): OiTrendResponse {
     const md = this.md;
@@ -959,7 +959,10 @@ export class Analytics {
         const prev = eod.get(`${k.kind}|${k.strike}`);
         if (!prev || !isNum(prev.oi)) continue;
         const sums = k.kind === 'CE' ? ceSum : peSum;
-        inWindows(byTs(md.intraday.bars(k, day)), mk.starts, mk.times).forEach((rec, i) => {
+        // The strike's OI as of each point (its last recorded OI of the session, the chainAt rule, as
+        // the recorded chain totals): a strike that did not tick inside one window still counts, so
+        // the sum never silently drops strikes from one point to the next.
+        inWindows(byTs(md.intraday.bars(k, day)), mk.times.map(() => mk.open), mk.times, (rec) => isNum(rec.oi)).forEach((rec, i) => {
           if (rec && isNum(rec.oi)) sums[i] = (sums[i] ?? 0) + (rec.oi - prev.oi);
         });
       }
@@ -1168,10 +1171,13 @@ export class Analytics {
     if (classified) history.push({ date: session, counts: overall, classified, source: 'live' });
     if (!live.length && !history.length) throw new NoLiveData('No live stock futures and no official F&O history loaded');
     return {
-      overall,
+      // Counts only over classified futures: with none classified there is no count (never a row of 0s).
+      overall: classified ? overall : null,
       classified,
       total: stocks.length,
-      sectors: [...sectors.entries()].map(([sector, v]) => ({ sector, ...v })).sort((a, b) => b.symbols.length - a.symbols.length),
+      sectors: [...sectors.entries()]
+        .map(([sector, v]) => ({ sector, counts: v.symbols.some((x) => x.buildUp) ? v.counts : null, symbols: v.symbols }))
+        .sort((a, b) => b.symbols.length - a.symbols.length),
       history,
       ...gaps.out(),
     };

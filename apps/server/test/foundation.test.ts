@@ -176,7 +176,7 @@ describe('live prices and books', () => {
     const q = underlyingQuoteAt(p, 'NIFTY', t);
     const rec = p.intraday.at(spotKey('NIFTY'), t)!;
     expect(q.ltp).toBe(rec.close);
-    expect(q.ts).toBe(t);
+    expect(q.ts).toBe(rec.ts); // the recorded minute's time, not the requested time
     expect(q.future).toBe(p.intraday.at(futKey('NIFTY', book.expiries.NIFTY[1]), t)!.close);
     expect(q.atmIv).not.toBeNull();
     expect(() => underlyingQuoteAt(p, 'NIFTY', at('2026-10-08', '12:00'))).toThrow(/recording started/);
