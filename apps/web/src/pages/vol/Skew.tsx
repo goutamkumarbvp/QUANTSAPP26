@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
 import { formatExpiry, type SkewResponse } from '@q26/core';
-import { Chart, axis, baseOption, useChartColors } from '../../components/Chart';
+import { Chart, axis, baseOption, LINE_GAPS, useChartColors } from '../../components/Chart';
 import { SymbolSelect } from '../../components/pickers';
-import { Card, cx, Loadable, PageHeader, Segmented, Toggle } from '../../components/ui';
-import { qs } from '../../lib/api';
+import { Card, Coverage, cx, Gaps, Loadable, NoData, PageHeader, Segmented, Toggle, Val } from '../../components/ui';
+import { errorText, qs } from '../../lib/api';
+import { formatDate, formatFixed, formatIndian } from '../../lib/format';
 import { useExpiries, useLive } from '../../lib/hooks';
 import { useApp } from '../../lib/store';
 
@@ -23,39 +24,48 @@ export default function Skew() {
   const option = useMemo(() => {
     const d = q.data;
     if (!d) return {};
-    const series = d.curves.flatMap((cv, i) => {
-      const color = c.series[Math.floor(compare ? i / 2 : i) % c.series.length];
-      const dashed = cv.label.includes('prev');
-      const pt = (p: (typeof cv.points)[number], v: number) => [x === 'strike' ? p.strike : p.moneyness, v];
-      if (!split) return [{ name: cv.label, type: 'line', symbol: 'none', smooth: true, lineStyle: { width: 2, type: dashed ? 'dashed' : 'solid' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.iv)) }];
+    const series = d.curves.flatMap((cv) => {
+      // One colour per expiry: the live curve and its previous-close curve share it (the latter dashed).
+      const color = c.series[Math.max(0, list.indexOf(cv.expiry)) % c.series.length];
+      const dashed = cv.source === 'eod';
+      const tag = dashed ? cv.label : `${cv.label} · live`;
+      const pt = (p: (typeof cv.points)[number], v: number | null) => [x === 'strike' ? p.strike : p.moneyness, v];
+      // A strike without a solved IV stays a gap in the curve (no smoothing, no interpolation).
+      if (!split) return [{ name: tag, type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 2, type: dashed ? 'dashed' : 'solid' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.iv)) }];
       return [
-        { name: `${cv.label} CE`, type: 'line', symbol: 'none', smooth: true, lineStyle: { width: 1.5, type: dashed ? 'dashed' : 'solid' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.ceIv)) },
-        { name: `${cv.label} PE`, type: 'line', symbol: 'none', smooth: true, lineStyle: { width: 1.5, type: 'dotted' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.peIv)) },
+        { name: `${tag} CE`, type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1.5, type: dashed ? 'dashed' : 'solid' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.ceIv)) },
+        { name: `${tag} PE`, type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1.5, type: 'dotted' }, itemStyle: { color }, data: cv.points.map((p) => pt(p, p.peIv)) },
       ];
     });
-    (series[0] as Record<string, unknown>).markLine = { symbol: 'none', silent: true, label: { formatter: 'Spot', color: c.accent }, lineStyle: { color: c.accent }, data: [{ xAxis: x === 'strike' ? d.spot : 0 }] };
+    const spotX = x === 'strike' ? d.spot : 0;
+    if (series.length && spotX !== null) (series[0] as Record<string, unknown>).markLine = { symbol: 'none', silent: true, label: { formatter: 'Spot', color: c.accent }, lineStyle: { color: c.accent }, data: [{ xAxis: spotX }] };
     return {
       ...baseOption(c),
-      tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number) => `${v.toFixed(2)}%` },
+      tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number | null) => (typeof v === 'number' ? `${v.toFixed(2)}%` : '—') },
       xAxis: { type: 'value', scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => (x === 'strike' ? String(v) : `${v}%`) } },
       yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => `${v.toFixed(0)}%` } },
       dataZoom: [{ type: 'inside' }],
       series,
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q.data, x, split, compare, c]);
   return (
     <div className="space-y-3">
-      <PageHeader title="Volatility Skew" subtitle="Implied volatility across strikes (OTM options) — compare expiries and against the previous close">
+      <PageHeader title="Volatility Skew" subtitle="Implied volatility across strikes (OTM options) — solved from live premiums; compare expiries and the previous close">
         <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setPicked([]); }} />
       </PageHeader>
       <Card title="Expiries (up to 5)">
-        <div className="flex flex-wrap gap-1">
-          {all.map((e) => (
-            <button key={e} onClick={() => setPicked((p) => { const base = p.length ? p : list; return base.includes(e) ? base.filter((y) => y !== e) : [...base, e].slice(-5); })} className={cx('chip cursor-pointer px-2 py-1 text-xs', list.includes(e) ? 'bg-accent text-white' : 'bg-panel2 text-muted')}>
-              {formatExpiry(e)}
-            </button>
-          ))}
-        </div>
+        {all.length ? (
+          <div className="flex flex-wrap gap-1">
+            {all.map((e) => (
+              <button key={e} onClick={() => setPicked((p) => { const base = p.length ? p : list; return base.includes(e) ? base.filter((y) => y !== e) : [...base, e].slice(-5); })} className={cx('chip cursor-pointer px-2 py-1 text-xs', list.includes(e) ? 'bg-accent text-white' : 'bg-panel2 text-muted')}>
+                {formatExpiry(e)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-muted">{exp.error ? errorText(exp.error) : exp.isLoading ? 'Loading the listed expiries…' : `No option expiry is listed for ${symbol}`}</div>
+        )}
       </Card>
       <Card
         title={`${symbol} IV smile`}
@@ -67,14 +77,29 @@ export default function Skew() {
           </>
         }
       >
-        <Loadable q={q}>{() => <Chart option={option} height={420} />}</Loadable>
+        {list.length === 0 ? (
+          <NoData compact title="No expiry to chart" reason={exp.error ? errorText(exp.error) : exp.isLoading ? 'Loading the listed expiries…' : `No option expiry is listed for ${symbol}`} />
+        ) : (
+          <Loadable q={q}>
+            {(d) => (
+              <>
+                <Chart option={option} height={420} blank={d.curves.some((cv) => cv.points.length) ? undefined : 'No strike has a solvable premium'} />
+                <div className="mt-2 space-y-1">
+                  <Coverage text="IV is solved from live option premiums on the listed strikes (OTM side: calls at/above the forward, puts below). A strike without a live premium is a gap in the curve — nothing is interpolated. “Prev close” curves use the previous session’s official traded closes." />
+                  <Gaps gaps={d.gaps} />
+                </div>
+              </>
+            )}
+          </Loadable>
+        )}
       </Card>
       {q.data && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
           {q.data.curves.map((cv) => (
-            <div key={cv.label} className="card card-pad">
-              <div className="text-2xs text-muted">{cv.label}</div>
-              <div className="text-base font-semibold">ATM IV {cv.atmIv.toFixed(2)}%</div>
+            <div key={`${cv.expiry}${cv.source}`} className="card card-pad" title={cv.source === 'eod' ? `Solved from the official closes of ${formatDate(cv.date, true)}` : 'Solved from live premiums'}>
+              <div className="text-2xs text-muted">{cv.label}{cv.source === 'live' ? ' · live' : ` · close of ${formatDate(cv.date)}`}</div>
+              <div className="text-base font-semibold">ATM IV <Val value={cv.atmIv} format={(v) => `${formatFixed(v, 2)}%`} reason="ATM IV could not be solved from the available premiums" /></div>
+              <div className="text-2xs text-muted">Forward <Val value={cv.forward} format={(v) => formatIndian(v)} reason="No forward" /></div>
             </div>
           ))}
         </div>

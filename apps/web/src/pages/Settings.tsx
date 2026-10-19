@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AuthResponse, UserProfile, UserSettings } from '@q26/core';
+import { FeedDetails } from '../components/FeedStatus';
 import { SymbolSelect } from '../components/pickers';
 import { Card, ErrorBox, Field, PageHeader, Pill, Segmented, Toggle } from '../components/ui';
 import { api, ensureSession, setToken } from '../lib/api';
+import { useFeed } from '../lib/feed';
 import { useApp, useTicks } from '../lib/store';
 
 interface InstallEvent extends Event {
@@ -70,6 +72,8 @@ export default function Settings() {
   const setTheme = useApp((s) => s.setTheme);
   const setSymbol = useApp((s) => s.setSymbol);
   const clock = useTicks((s) => s.clock);
+  const connected = useTicks((s) => s.connected);
+  const feed = useFeed();
   const [installEvt, setInstallEvt] = useState<InstallEvent | null>(null);
   const [error, setError] = useState<unknown>(null);
   useEffect(() => {
@@ -111,14 +115,30 @@ export default function Settings() {
         <p className="text-sm text-muted">Q26 Options is a progressive web app — install it on Android, iOS (Share → Add to Home Screen) or desktop for a full-screen, app-like experience.</p>
         {installEvt && <button className="btn-primary mt-2" onClick={() => installEvt.prompt()}>Install</button>}
       </Card>
-      <Card title="About the data">
+      <Card title="Data sources">
         <div className="space-y-2 text-sm text-muted">
           <p>
-            Market data is produced by a deterministic simulator modelled on NSE/BSE F&O conventions (lot sizes, strike steps, Tuesday/Thursday expiries, SPAN-style margins). Every price, IV and OI value is reproducible, which powers historical replay. It is <b className="text-ink">not live exchange data</b> and nothing here is investment advice.
+            The app runs <b className="text-ink">only on live data</b>. Where a live or official value is not available it is left blank (<span className="text-ink">—</span>) and the reason is shown; nothing is filled in with a default, a zero or a modelled number.
           </p>
-          {clock && <p>Market clock: <b className="text-ink">{clock.mode === 'demo' ? `simulated session (${clock.speed}× speed)` : 'real IST clock'}</b> · {clock.date} {clock.time}</p>}
-          <p>Paper trades use simulated fills at the bid/ask. No real orders are ever sent to an exchange or broker.</p>
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li>
+              <b className="text-ink">Live market data</b> — prices, bid/ask, volume and open interest come from the Kotak Neo market-data feed and REST API, through the server's own broker login (credentials never reach the browser).
+            </li>
+            <li>
+              <b className="text-ink">Official end-of-day files</b> — daily history (closes, futures and option settlement prices, index closes, participant-wise OI and volume, FII/DII flows) comes from the data NSE and BSE publish, loaded each evening once it is out.
+            </li>
+            <li>
+              <b className="text-ink">Derived values</b> — computed by the app from those inputs and labelled as such: IV and Greeks solved from live premiums, PCR, max pain, build-up, opening-range trend, strategy payoff and probability of profit, and the SPAN-style margin <i>estimate</i>. Order-flow buy/sell is <i>estimated from live ticks (quote rule)</i>: a trade at or above the ask counts as a buy, at or below the bid as a sell, anything else stays unclassified.
+            </li>
+            <li>
+              <b className="text-ink">Intraday history</b> (OI trend, order flow, opening range, straddle and strategy charts, Trade Recap, algo backtests) is built from the minutes this server has recorded since it started recording, plus Kotak 1-minute history for contracts still trading. Before that, the screen says so.
+            </li>
+          </ul>
+          <p>Paper trading only: orders are never sent to an exchange or broker. Market orders fill at the live bid/ask and are rejected when there is none. Nothing here is investment advice.</p>
         </div>
+      </Card>
+      <Card title="Live feed status">
+        <FeedDetails clock={clock} view={feed} appConnected={connected} />
       </Card>
     </div>
   );

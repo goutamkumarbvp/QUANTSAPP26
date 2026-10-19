@@ -4,17 +4,22 @@ import {
   analyzeStrategy,
   buildFromTemplate,
   defaultUnit,
-  formatINR,
+  legLabel,
   payoffCurve,
   STRATEGY_TEMPLATES,
   type InstrumentType,
+  type Leg,
   type MarketView,
   type OptionChain,
+  type StrategyAnalysis,
   type StrategyTemplate,
+  type PayoffCurve,
+  type ValuationContext,
 } from '@q26/core';
 import { Chart, useChartColors, pnlVisualMap } from '../components/Chart';
 import { ExpirySelect, SymbolSelect } from '../components/pickers';
-import { Card, ErrorBox, Field, PageHeader, Pill, Segmented, Spinner } from '../components/ui';
+import { AsOf, Card, Dash, ErrorState, Field, NoData, PageHeader, Pill, Segmented, Spinner, Val } from '../components/ui';
+import { formatINR, isNum } from '../lib/format';
 import { useChain, useExpiries, useMeta } from '../lib/hooks';
 import { useApp, useBuilder } from '../lib/store';
 
@@ -46,15 +51,29 @@ function MiniPayoff({ prices, values }: { prices: number[]; values: number[] }) 
   return <Chart option={option} height={90} />;
 }
 
+/**
+ * The live premium a template leg is entered at: the contract's last traded price (a future's own expiry).
+ * A contract without one gets NaN, which marks the leg as unpriced (the card then says so) — never a made-up price.
+ */
 function quoteFrom(chains: Record<string, OptionChain>) {
-  return (type: InstrumentType, strike: number, expiry: string) => {
-    const ch = chains[expiry];
-    if (!ch) return { price: 0 };
-    if (type === 'FUT') return { price: ch.future };
-    const row = ch.rows.find((r) => r.strike === strike);
+  return (type: InstrumentType, strike: number, expiry: string): { price: number; iv?: number } => {
+    if (type === 'FUT') {
+      const ch = Object.values(chains).find((c) => c.futureExpiry === expiry && isNum(c.future));
+      return { price: ch?.future ?? NaN };
+    }
+    const row = chains[expiry]?.rows.find((r) => r.strike === strike);
     const q = row ? (type === 'CE' ? row.ce : row.pe) : undefined;
-    return { price: q?.ltp ?? 0, iv: q ? q.iv / 100 : undefined };
+    return { price: q && isNum(q.ltp) ? q.ltp : NaN, iv: q && isNum(q.iv) ? q.iv / 100 : undefined };
   };
+}
+
+interface Card_ {
+  t: StrategyTemplate;
+  legs: Leg[];
+  a: StrategyAnalysis | null;
+  curve: PayoffCurve | null;
+  /** Why there is no payoff for this strategy. */
+  why: string | null;
 }
 
 export default function Templates() {
@@ -71,38 +90,43 @@ export default function Templates() {
   const options = exp.data?.options ?? [];
   const e0 = expiry && options.includes(expiry) ? expiry : options[0];
   const e1 = e0 ? options[options.indexOf(e0) + 1] : undefined;
-  const c0 = useChain(symbol, e0, { refetch: 10000 });
-  const c1 = useChain(symbol, e1, { refetch: 10000 });
-  const r = meta.data?.riskFreeRate ?? 0.065;
+  const c0 = useChain(symbol, e0, { refetch: 10000, enabled: !!e0 });
+  const c1 = useChain(symbol, e1, { refetch: 10000, enabled: !!e1 });
+  const r = meta.data?.riskFreeRate;
+  const ch0 = c0.data && c0.data.symbol === symbol && c0.data.expiry === e0 ? c0.data : undefined;
 
-  const cards = useMemo(() => {
-    const ch0 = c0.data && c0.data.symbol === symbol ? c0.data : undefined;
-    if (!ch0) return [];
+  const cards = useMemo<Card_[]>(() => {
+    if (!ch0 || r === undefined || !isNum(ch0.spot)) return [];
+    const spot = ch0.spot;
     const chains: Record<string, OptionChain> = { [ch0.expiry]: ch0 };
-    if (c1.data && c1.data.symbol === symbol) chains[c1.data.expiry] = c1.data;
-    const expiries = [ch0.expiry, ...(chains[e1 ?? ''] ? [e1!] : [])];
-    const unit = defaultUnit(ch0.spot, ch0.strikeStep) * width;
-    const ctx = { r, carry: () => ch0.carry, defaultIv: ch0.atmIv / 100 };
-    return STRATEGY_TEMPLATES.filter((t) => view === 'all' || t.view === view).map((t) => {
+    if (c1.data && c1.data.symbol === symbol && c1.data.expiry === e1) chains[c1.data.expiry] = c1.data;
+    const expiries = [ch0.expiry, ...(e1 && chains[e1] ? [e1] : [])];
+    const unit = defaultUnit(spot, ch0.strikeStep) * width;
+    const ctx: ValuationContext = { r, carry: (e) => chains[e]?.carry ?? null };
+    const sigma = isNum(ch0.atmIv) ? ch0.atmIv / 100 : undefined;
+    return STRATEGY_TEMPLATES.filter((t) => view === 'all' || t.view === view).map((t): Card_ => {
       const needsNext = t.legs.some((l) => l.expiry === 1);
-      if (needsNext && expiries.length < 2) return { t, legs: [], a: null, curve: null };
+      if (needsNext && expiries.length < 2) return { t, legs: [], a: null, curve: null, why: 'Needs two listed expiries.' };
       const legs = buildFromTemplate(t, {
-        spot: ch0.spot,
+        spot,
         strikes: (e) => (chains[e] ?? ch0).rows.map((x) => x.strike),
         expiries,
         lotSize: ch0.lotSize,
         lots,
         unit,
         quote: quoteFrom(chains),
-        futureExpiry: ch0.futureExpiry,
+        futureExpiry: ch0.futureExpiry ?? undefined,
       });
-      const a = analyzeStrategy(legs, ch0.spot, ch0.ts, ctx, { sigma: ch0.atmIv / 100 });
-      const curve = payoffCurve(legs, ctx, { lo: ch0.spot * 0.94, hi: ch0.spot * 1.06, points: 81, targetTs: ch0.ts });
-      return { t, legs, a, curve };
+      const unpriced = legs.filter((l) => !Number.isFinite(l.price));
+      if (unpriced.length) return { t, legs, a: null, curve: null, why: `No live premium for ${unpriced.map(legLabel).join(', ')}: a leg is entered at its last traded price, none is made up.` };
+      const a = analyzeStrategy(legs, spot, ch0.valuationTs, ctx, { sigma });
+      if (a.missingAtExpiry.length) return { t, legs, a: null, curve: null, why: `Needs a live IV: ${a.missingAtExpiry.map((g) => `${g.label} (${g.reason})`).join('; ')}` };
+      const curve = payoffCurve(legs, ctx, { lo: spot * 0.94, hi: spot * 1.06, points: 81, targetTs: ch0.valuationTs });
+      return { t, legs, a, curve, why: null };
     });
-  }, [c0.data, c1.data, view, lots, width, r, symbol, e1]);
+  }, [ch0, c1.data, view, lots, width, r, symbol, e1]);
 
-  const use = (t: StrategyTemplate, legs: ReturnType<typeof buildFromTemplate>) => {
+  const use = (legs: Leg[]) => {
     builder.setLegs(symbol, legs);
     navigate('/builder');
   };
@@ -122,9 +146,22 @@ export default function Templates() {
           <Segmented size="xs" value={width} onChange={setWidth} options={[{ value: 0.5, label: 'Narrow' }, { value: 1, label: 'Normal' }, { value: 2, label: 'Wide' }]} />
         </Field>
       </div>
-      {c0.error ? <ErrorBox error={c0.error} /> : !cards.length ? <Spinner /> : null}
+      {c0.error && !ch0 ? (
+        <ErrorState error={c0.error} />
+      ) : ch0 && !isNum(ch0.spot) ? (
+        <NoData title="No strategies to show" reason={ch0.gaps?.spot ?? `No live ${symbol} price: the strikes are chosen around the spot`} />
+      ) : r === undefined && ch0 ? (
+        <NoData compact title="Waiting" reason="The risk-free rate has not arrived from the server yet" />
+      ) : !cards.length ? (
+        exp.error ? <ErrorState error={exp.error} /> : !e0 && exp.data ? <NoData title="No strategies to show" reason={`No listed option expiry for ${symbol}`} /> : <Spinner />
+      ) : null}
+      {ch0 && cards.length > 0 && (
+        <div className="text-2xs text-muted">
+          Legs are entered at their live last traded price and valued with IVs solved from live premiums, <AsOf ts={ch0.valuationTs} label="valued at" />. A strategy whose legs have no live premium or IV is not drawn.
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {cards.map(({ t, legs, a, curve }) => (
+        {cards.map(({ t, legs, a, curve, why }) => (
           <Card
             key={t.id}
             title={t.name}
@@ -137,19 +174,19 @@ export default function Templates() {
                 <div className="mt-2 grid grid-cols-3 gap-1 text-center text-2xs">
                   <div><div className="text-muted">Max profit</div><div className="font-semibold text-up">{a.maxProfit === null ? 'Unlimited' : formatINR(a.maxProfit)}</div></div>
                   <div><div className="text-muted">Max loss</div><div className="font-semibold text-down">{a.maxLoss === null ? 'Unlimited' : formatINR(a.maxLoss)}</div></div>
-                  <div><div className="text-muted">POP</div><div className="font-semibold text-accent">{(a.pop * 100).toFixed(0)}%</div></div>
+                  <div><div className="text-muted">POP</div><div className="font-semibold text-accent"><Val value={a.pop === null ? null : a.pop * 100} format={(x) => `${x.toFixed(0)}%`} reason="No volatility: the ATM IV could not be solved from live premiums" /></div></div>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1 text-2xs">
                   {legs.map((l, i) => (
-                    <span key={i} className={l.side === 'BUY' ? 'chip bg-up/15 text-up' : 'chip bg-down/15 text-down'}>
+                    <span key={i} className={l.side === 'BUY' ? 'chip bg-up/15 text-up' : 'chip bg-down/15 text-down'} title={`Entry ${l.price.toFixed(2)}`}>
                       {l.side === 'BUY' ? 'B' : 'S'} {l.lots}× {l.type === 'FUT' ? 'FUT' : `${l.strike} ${l.type}`}
                     </span>
                   ))}
                 </div>
-                <button className="btn-primary mt-3 w-full" onClick={() => use(t, legs)}>Open in builder</button>
+                <button className="btn-primary mt-3 w-full" onClick={() => use(legs)}>Open in builder</button>
               </>
             ) : (
-              <div className="py-6 text-center text-xs text-muted">Needs two listed expiries.</div>
+              <div className="py-6 text-center text-xs text-muted"><Dash /> {why ?? 'Not available'}</div>
             )}
           </Card>
         ))}

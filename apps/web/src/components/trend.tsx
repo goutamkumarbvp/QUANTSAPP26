@@ -1,6 +1,6 @@
-import type { FlowSummary, OrbTrend } from '@q26/core';
-import { formatCompact } from '../lib/format';
-import { cx } from './ui';
+import { ORDER_FLOW_METHOD, type OrbTrend, type OrderFlowSummary } from '@q26/core';
+import { formatCompact, isNum } from '../lib/format';
+import { cx, flowTone } from './ui';
 
 const TREND_STYLE: Record<OrbTrend, { label: string; cls: string }> = {
   up: { label: 'Trending ↑', cls: 'bg-up/15 text-up' },
@@ -26,32 +26,59 @@ export function TrendBadge({ trend, whipsaw, reentered, pending, large }: { tren
   );
 }
 
-/** Horizontal buyers-vs-sellers split bar with quantities. */
-export function FlowSplit({ flow, unit = 'qty', lotSize = 1, compact }: { flow: FlowSummary; unit?: 'qty' | 'lots'; lotSize?: number; compact?: boolean }) {
-  const buyPct = flow.volume > 0 ? flow.buyPct : 50;
-  const q = (x: number) => formatCompact(unit === 'lots' ? x / lotSize : x);
+/**
+ * Buyers-vs-sellers split bar of an order-flow summary. The split is an ESTIMATE from live ticks (quote rule):
+ * the percentages are shares of the classified volume, units that could not be classified are shown apart
+ * (grey) and never split 50/50, units reported after a feed gap are listed but not counted, and a partial minute
+ * is marked as a lower bound.
+ */
+export function FlowSplit({ flow, unit = 'qty', lotSize, compact }: { flow: OrderFlowSummary; unit?: 'qty' | 'lots'; lotSize?: number | null; compact?: boolean }) {
+  const lot = unit === 'lots' && isNum(lotSize) && lotSize > 0 ? lotSize : null;
+  const q = (x: number) => formatCompact(lot ? x / lot : x);
+  const small = compact ? 'text-2xs' : 'text-xs';
+  const notes = (
+    <>
+      {flow.gapVolume > 0 && <div className="text-2xs text-warn" title="Units reported by the first tick after a feed gap: they traded at an unknown time during the gap, so they are not counted as buy or sell">feed gap: {q(flow.gapVolume)} not counted</div>}
+      {flow.partialMinutes > 0 && <div className="text-2xs text-warn" title="Recording of this contract started or restarted inside the minute: its volume is a lower bound">partial (lower bound){flow.partialMinutes > 1 ? ` · ${flow.partialMinutes} minutes` : ''}</div>}
+    </>
+  );
   if (flow.volume === 0) {
     return (
-      <div className="w-full">
-        <div className={cx('text-center font-semibold text-muted', compact ? 'text-2xs' : 'text-xs')}>No trades yet</div>
-        <div className={cx('mt-1 rounded-full bg-line', compact ? 'h-1.5' : 'h-3')} role="img" aria-label="No trades" />
+      <div className="w-full" title={ORDER_FLOW_METHOD}>
+        <div className={cx('text-center font-semibold', flow.gapVolume > 0 ? 'text-warn' : 'text-muted', small)}>{flow.gapVolume > 0 ? 'Feed gap — nothing classified' : 'No trades yet'}</div>
+        <div className={cx('mt-1 rounded-full bg-line', compact ? 'h-1.5' : 'h-3')} role="img" aria-label={flow.gapVolume > 0 ? 'Feed gap' : 'No trades'} />
+        {notes}
       </div>
     );
   }
+  const buyPct = flow.buyPct;
+  const pctOfVolume = (x: number) => `${(x / flow.volume) * 100}%`;
   return (
-    <div className="w-full">
-      <div className={cx('flex justify-between font-semibold tabular-nums', compact ? 'text-2xs' : 'text-xs')}>
-        <span className="text-up">Buyers {q(flow.buyVolume)} · {buyPct.toFixed(0)}%</span>
-        <span className="text-down">{(100 - buyPct).toFixed(0)}% · {q(flow.sellVolume)} Sellers</span>
+    <div className="w-full" title={`${ORDER_FLOW_METHOD}; percentages are of the classified volume`}>
+      {buyPct === null ? (
+        <div className={cx('text-center font-semibold text-muted', small)}>Not classified — {q(flow.volume)} traded</div>
+      ) : (
+        <div className={cx('flex justify-between font-semibold tabular-nums', small)}>
+          <span className="text-up">Buyers {q(flow.buyVolume)} · {buyPct.toFixed(0)}%</span>
+          <span className="text-down">{(100 - buyPct).toFixed(0)}% · {q(flow.sellVolume)} Sellers</span>
+        </div>
+      )}
+      <div className={cx('mt-1 flex overflow-hidden rounded-full bg-line', compact ? 'h-1.5' : 'h-3')} role="img" aria-label={buyPct === null ? 'Volume not classified' : `Buy volume ${buyPct.toFixed(0)} percent of classified`}>
+        <div className="bg-up transition-all" style={{ width: pctOfVolume(flow.buyVolume) }} />
+        <div className="bg-muted/40 transition-all" style={{ width: pctOfVolume(flow.unclassified) }} />
+        <div className="bg-down transition-all" style={{ width: pctOfVolume(flow.sellVolume) }} />
       </div>
-      <div className={cx('mt-1 flex overflow-hidden rounded-full bg-line', compact ? 'h-1.5' : 'h-3')} role="img" aria-label={`Buy volume ${buyPct.toFixed(0)} percent`}>
-        <div className="bg-up transition-all" style={{ width: `${buyPct}%` }} />
-        <div className="bg-down transition-all" style={{ width: `${100 - buyPct}%` }} />
-      </div>
+      {flow.unclassified > 0 && (
+        <div className="text-2xs text-muted tabular-nums">
+          unclassified {q(flow.unclassified)}{isNum(flow.unclassifiedPct) ? ` (${flow.unclassifiedPct.toFixed(0)}% of volume)` : ''}
+        </div>
+      )}
+      {notes}
     </div>
   );
 }
 
-export function sentimentTone(s: FlowSummary['sentiment']): string {
-  return s === 'Buyers dominant' ? 'text-up' : s === 'Sellers dominant' ? 'text-down' : 'text-muted';
+/** Text colour of an estimated order-flow sentiment ("Feed gap" included). */
+export function sentimentTone(s: OrderFlowSummary['sentiment'] | null | undefined): string {
+  return flowTone(s);
 }

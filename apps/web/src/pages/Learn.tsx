@@ -19,7 +19,7 @@ const ARTICLES: Article[] = [
       { p: ['An option is a contract that gives the buyer the right — but not the obligation — to buy (call, CE) or sell (put, PE) the underlying at a fixed price (the strike) on expiry. The buyer pays a premium; the seller (writer) receives it and takes on the obligation.'] },
       { h: 'Moneyness', p: ['A call is in-the-money (ITM) when spot is above the strike, a put when spot is below. The strike nearest to spot is at-the-money (ATM). Everything else is out-of-the-money (OTM) and consists only of time value.'] },
       { h: 'Premium = intrinsic + time value', p: ['Intrinsic value is what the option would be worth if it expired now. Time value is the extra the market pays for the chance of further movement — it decays to zero by expiry.'] },
-      { h: 'Contract specs in India', p: ['Index and stock options are European and cash-settled. NIFTY has weekly expiries every Tuesday and SENSEX every Thursday; other indices and all stocks expire on the last Tuesday of the month. Each contract has a fixed lot size (for example NIFTY 65, BANKNIFTY 30).'], tool: { to: '/option-chain', label: 'Open the option chain' } },
+      { h: 'Contract specs in India', p: ['Index and stock options are European and cash-settled. Expiry days and cycles (weekly or monthly) are set by the exchanges and change from time to time — the app shows only the expiries that are actually listed. Each contract has a fixed lot size set by the exchange and revised periodically; the app reads it from the live instrument master.'], tool: { to: '/option-chain', label: 'Open the option chain' } },
     ],
   },
   {
@@ -85,7 +85,7 @@ const ARTICLES: Article[] = [
     body: [
       { h: 'Note the first 15-minute candle', p: ['At 09:30 the first 15-minute candle (09:15–09:30) is complete. Its high and low form the opening range — the price zone where the day\'s first battle between buyers and sellers happened.'] },
       { h: 'Broken = trending', p: ['If a 1-minute candle closes above the range high, buyers have won the open and the market can be treated as trending up; a close below the range low means trending down. While price stays inside the range the market is range-bound.', 'When both sides get broken the day is a whipsaw — trust the latest break, use tighter stops, and be wary when price falls back inside the range (a possible failed breakout).'], tool: { to: '/orb', label: 'Open the range breakout tool' } },
-      { h: '1-minute order flow', p: ['Every trade either lifts the offer (an aggressive buyer) or hits the bid (an aggressive seller). Adding those up minute by minute shows who is in control right now: buy volume vs sell volume, their difference (delta) and the running cumulative delta.'] },
+      { h: '1-minute order flow', p: ['Every trade either lifts the offer (an aggressive buyer) or hits the bid (an aggressive seller). Adding those up minute by minute shows who is in control right now: buy volume vs sell volume, their difference (delta) and the running cumulative delta. The exchange does not publish who initiated a trade, so the app estimates it from live ticks: a trade at or above the best ask seen just before it counts as a buy, at or below the best bid as a sell, and anything else stays unclassified — it is never split 50/50. Volume that arrives after a feed gap is shown separately as a feed gap, and a minute recorded only in part is marked as a lower bound.'] },
       { h: 'Using them together', p: ['A breakout backed by buyers dominating the next few minutes (positive delta) is more convincing than one on thin or opposing flow. If price breaks the high but sellers dominate, treat it with suspicion.'], tool: { to: '/order-flow', label: 'Open 1-minute order flow' } },
     ],
   },
@@ -119,7 +119,7 @@ const ARTICLES: Article[] = [
     summary: 'Position sizing, margin, gamma risk and expiry-day behaviour.',
     body: [
       { p: ['Size every trade by its maximum loss, not its margin. Prefer defined-risk structures when volatility is low (gap risk is underpriced). Short options near expiry carry large gamma — small moves cause big P&L swings.'] },
-      { p: ['Set MTM targets and stop-losses on every virtual strategy and use alerts for levels that invalidate your view. Practise with paper trading and replay past sessions in Trade Recap before risking capital.'], tool: { to: '/recap', label: 'Practise with Trade Recap' } },
+      { p: ['Set MTM targets and stop-losses on every virtual strategy and use alerts for levels that invalidate your view. Practise with paper trading and replay the sessions the app has recorded in Trade Recap before risking capital.'], tool: { to: '/recap', label: 'Practise with Trade Recap' } },
     ],
   },
 ];

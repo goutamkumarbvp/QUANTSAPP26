@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import * as echarts from 'echarts/core';
 import { BarChart, CandlestickChart, HeatmapChart, LineChart, ScatterChart, TreemapChart } from 'echarts/charts';
 import {
@@ -16,6 +16,7 @@ import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsCoreOption } from 'echarts/core';
 import { formatSessionTime } from '../lib/format';
 import { useApp } from '../lib/store';
+import { cx, NoData } from './ui';
 
 echarts.use([
   LineChart, BarChart, HeatmapChart, TreemapChart, CandlestickChart, ScatterChart,
@@ -97,10 +98,55 @@ export function timeAxis(c: ChartColors, extra: Record<string, unknown> = {}): R
   return axis(c, { type: 'time', splitLine: { show: false }, axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => formatSessionTime(v), hideOverlap: true }, ...extra });
 }
 
-export function Chart({ option, height = 320, className, onEvents }: { option: EChartsCoreOption; height?: number | string; className?: string; onEvents?: Record<string, (p: unknown) => void> }) {
+/**
+ * Line series settings for data that can have holes: a missing point (null) stays a gap in the line — never
+ * bridged, never smoothed across, never filled forward. `<Chart>` enforces the same on every line series.
+ */
+export const LINE_GAPS = { connectNulls: false, smooth: false } as const;
+
+type Series = { type?: string; data?: unknown[]; [k: string]: unknown };
+
+/** Whether a data point holds a real value (the value of `[x, y]`, of `{ value }`, of a tree node's children, or the number itself). */
+function pointHasValue(p: unknown): boolean {
+  if (p === null || p === undefined) return false;
+  if (Array.isArray(p)) return p.length > 0 && pointHasValue(p[p.length - 1]);
+  if (typeof p === 'object') {
+    const o = p as { value?: unknown; children?: unknown };
+    if (Array.isArray(o.children)) return o.children.some(pointHasValue);
+    return pointHasValue(o.value);
+  }
+  return typeof p !== 'number' || Number.isFinite(p);
+}
+
+/** True when at least one series of the option has a real point (an option without series data is a blank chart). */
+export function hasChartData(option: EChartsCoreOption): boolean {
+  const series = (option as { series?: Series | Series[] }).series;
+  const list = Array.isArray(series) ? series : series ? [series] : [];
+  return list.some((s) => (s.data ?? []).some(pointHasValue));
+}
+
+/** Line series: no bridging of missing points (connectNulls off) and no smoothing across a series that has holes. */
+function noInvention(option: EChartsCoreOption): EChartsCoreOption {
+  const series = (option as { series?: Series | Series[] }).series;
+  if (!series) return option;
+  const fix = (s: Series): Series => {
+    if (s.type !== 'line') return s;
+    const holes = (s.data ?? []).some((p) => !pointHasValue(p));
+    return { ...s, connectNulls: false, ...(holes ? { smooth: false } : {}) };
+  };
+  return { ...option, series: Array.isArray(series) ? series.map(fix) : fix(series) } as EChartsCoreOption;
+}
+
+/**
+ * ECharts canvas. A chart with no real point in any series shows the blank state (`blank` = the reason, or the
+ * default text) instead of empty axes; `blank` can also be passed to force it (e.g. the server said 503).
+ */
+export function Chart({ option, height = 320, className, onEvents, blank }: { option: EChartsCoreOption; height?: number | string; className?: string; onEvents?: Record<string, (p: unknown) => void>; blank?: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const inst = useRef<echarts.ECharts | null>(null);
   const theme = useApp((s) => s.theme);
+  const forced = blank !== undefined && blank !== null && blank !== false;
+  const empty = forced || !hasChartData(option);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -116,7 +162,7 @@ export function Chart({ option, height = 320, className, onEvents }: { option: E
   }, [theme]);
 
   useEffect(() => {
-    inst.current?.setOption(option, { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
+    inst.current?.setOption(noInvention(option), { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
   }, [option, theme]);
 
   useEffect(() => {
@@ -128,7 +174,17 @@ export function Chart({ option, height = 320, className, onEvents }: { option: E
     };
   }, [onEvents, theme]);
 
-  return <div ref={ref} className={className} style={{ height, width: '100%' }} />;
+  // The canvas stays mounted (hidden) so it can draw as soon as data arrives; the blank state is laid over it.
+  return (
+    <div className={cx('relative', className)} style={{ height, width: '100%' }}>
+      <div ref={ref} style={{ height: '100%', width: '100%', visibility: empty ? 'hidden' : 'visible' }} />
+      {empty && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <NoData compact title="Nothing to chart" reason={forced && blank !== true ? blank : 'No data points are available for this chart.'} className="w-full" />
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

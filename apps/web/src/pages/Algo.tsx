@@ -2,10 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   algoById,
-  formatDate,
-  formatExpiry,
-  formatINR,
-  formatIndian,
   type AlgoBacktestDay,
   type AlgoBacktestRange,
   type AlgoCatalog,
@@ -19,9 +15,9 @@ import {
 import { Chart, axis, baseOption, pnlVisualMap, timeAxis, useChartColors } from '../components/Chart';
 import { DataTable } from '../components/DataTable';
 import { SessionDate } from '../components/pickers';
-import { Card, cx, Empty, ErrorBox, Field, Loadable, PageHeader, Pill, Segmented, Select, Spinner, Stat, Toggle } from '../components/ui';
+import { Card, cx, Dash, ErrorBox, ErrorState, Field, Gaps, Loadable, NoData, PageHeader, Pill, Segmented, Select, Spinner, Stat, Toggle, Val } from '../components/ui';
 import { api, qs } from '../lib/api';
-import { formatDateTime, formatSessionTime, pnlClass } from '../lib/format';
+import { formatDate, formatDateTime, formatExpiry, formatINR, formatIndian, formatSessionTime, isNum, pnlClass } from '../lib/format';
 import { useLive } from '../lib/hooks';
 import { useTicks } from '../lib/store';
 
@@ -40,8 +36,10 @@ const EVENT_TONE: Record<AlgoEvent['kind'], 'accent' | 'warn' | 'down' | 'up' | 
 const EVENT_LABEL: Record<AlgoEvent['kind'], string> = { ENTRY: 'Entry', ADJUSTMENT: 'Adjust', STOP: 'Stop', EXIT: 'Exit', MANUAL_STOP: 'Manual stop', ERROR: 'Error', INFO: 'Info' };
 const EXIT_LABEL: Record<AlgoDaySummary['exitKind'], string> = { EXIT: 'Time exit', STOP: 'No OTM strike', ERROR: 'Order error', MANUAL_STOP: 'Stopped', NONE: '—' };
 
-const rupee = (x: number) => formatINR(x, 0);
-const signed = (x: number) => `${x > 0 ? '+' : ''}${formatINR(x, 0)}`;
+/** Rupees; a missing figure is "—" (never 0). */
+const rupee = (x: number | null) => formatINR(x, 0);
+const signed = (x: number | null) => (isNum(x) ? `${x > 0 ? '+' : ''}${formatINR(x, 0)}` : '—');
+const toneOf = (x: number | null) => (isNum(x) ? (x > 0 ? 'up' : x < 0 ? 'down' : undefined) : undefined);
 
 /* ----------------------------------- charts ----------------------------------- */
 
@@ -54,8 +52,10 @@ function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeri
       .map((e) => {
         const pt = series.reduce((best, p) => (Math.abs(p.ts - e.ts) < Math.abs(best.ts - e.ts) ? p : best), series[0]);
         const color = { accent: c.accent, warn: c.warn, down: c.down, up: c.up, muted: c.muted }[EVENT_TONE[e.kind]];
-        return { coord: [pt.ts, pt.mtm], value: EVENT_LABEL[e.kind][0], itemStyle: { color } };
-      });
+        // The marker sits on the P&L line, so an event at a minute where the P&L is unknown has no marker.
+        return pt.mtm === null ? null : { coord: [pt.ts, pt.mtm], value: EVENT_LABEL[e.kind][0], itemStyle: { color } };
+      })
+      .filter((m): m is NonNullable<typeof m> => m !== null);
     return {
       ...baseOption(c),
       legend: { ...(baseOption(c).legend as object), data: ['Day P&L', 'Spot'] },
@@ -85,11 +85,11 @@ function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeri
       ],
     };
   }, [series, stepPct, c]);
-  if (!series.length) return <Empty>No data yet for this session.</Empty>;
+  if (!series.length) return <NoData compact title="No data for this session yet" reason="Charts are drawn from real prices only: minutes without a recorded or live price are not drawn." />;
   return (
     <div className="grid gap-3 lg:grid-cols-2">
       <div>
-        <div className="mb-1 text-xs font-medium text-muted">Day P&L (₹, before charges) and spot</div>
+        <div className="mb-1 text-xs font-medium text-muted">Day P&L (₹, before charges) and spot; a gap = no price for an open leg</div>
         <Chart option={pnl} height={height} />
       </div>
       <div>
@@ -101,7 +101,7 @@ function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeri
 }
 
 function EventLog({ events }: { events: AlgoEvent[] }) {
-  if (!events.length) return <Empty>No events yet.</Empty>;
+  if (!events.length) return <div className="py-6 text-center text-sm text-muted">No events yet.</div>;
   return (
     <div className="max-h-96 overflow-auto">
       <table className="tbl">
@@ -115,10 +115,10 @@ function EventLog({ events }: { events: AlgoEvent[] }) {
         </thead>
         <tbody>
           {events.map((e, i) => (
-            <tr key={i}>
+            <tr key={i} className={cx(e.kind === 'ERROR' && 'bg-down/5')}>
               <td className="whitespace-nowrap tabular-nums">{formatSessionTime(e.ts)}</td>
               <td><Pill tone={EVENT_TONE[e.kind]}>{EVENT_LABEL[e.kind]}</Pill></td>
-              <td className="min-w-[16rem] whitespace-normal text-xs">{e.message}</td>
+              <td className={cx('min-w-[16rem] whitespace-normal text-xs', e.kind === 'ERROR' && 'text-down')}>{e.message}</td>
               <td className="whitespace-nowrap text-xs tabular-nums">
                 {e.fills.map((f, j) => (
                   <div key={j} className={f.side === 'SELL' ? 'text-down' : 'text-up'}>
@@ -136,16 +136,25 @@ function EventLog({ events }: { events: AlgoEvent[] }) {
 
 /* --------------------------------- params form --------------------------------- */
 
-function ParamInput({ spec, value, onChange, symbols }: { spec: AlgoParamSpec; value: string | number | boolean | undefined; onChange: (v: string | number | boolean) => void; symbols: AlgoCatalog['symbols'] }) {
+function ParamInput({ spec, value, onChange, symbols, symbolsWhy }: { spec: AlgoParamSpec; value: string | number | boolean | undefined; onChange: (v: string | number | boolean) => void; symbols: AlgoCatalog['symbols']; symbolsWhy?: string }) {
   if (spec.type === 'boolean') return <Toggle checked={Boolean(value)} onChange={onChange} label={spec.label} />;
   let input;
-  if (spec.type === 'symbol') input = <Select label={spec.label} className="w-full" value={String(value ?? 'NIFTY')} onChange={onChange} options={symbols.map((s) => ({ value: s.symbol, label: `${s.symbol} (lot ${s.lotSize})` }))} />;
+  if (spec.type === 'symbol') {
+    input = symbols.length ? (
+      <Select label={spec.label} className="w-full" value={String(value ?? '')} onChange={onChange} options={symbols.map((s) => ({ value: s.symbol, label: `${s.symbol} (lot ${s.lotSize})` }))} />
+    ) : (
+      <select aria-label={spec.label} className="input w-full" disabled value="" title={symbolsWhy ?? 'No underlyings are listed yet'}>
+        <option value="">No underlyings</option>
+      </select>
+    );
+  }
   else if (spec.type === 'select') input = <Select label={spec.label} className="w-full" value={String(value ?? spec.options?.[0]?.value ?? '')} onChange={onChange} options={spec.options ?? []} />;
   else if (spec.type === 'time') input = <input aria-label={spec.label} className="input" type="time" min="09:15" max="15:30" value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />;
   else input = <input aria-label={spec.label} className="input" type="number" min={spec.min} max={spec.max} step={spec.step} value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} />;
   return (
     <Field label={spec.label}>
       {input}
+      {spec.type === 'symbol' && !symbols.length && symbolsWhy && <span className="mt-0.5 block text-2xs text-muted">{symbolsWhy}</span>}
       {spec.help && <span className="mt-0.5 block text-2xs text-muted">{spec.help}</span>}
     </Field>
   );
@@ -158,7 +167,9 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const t = run.today;
-  const net = t ? t.mtm - t.charges : 0;
+  // Net today needs the day's MTM, which needs every open leg priced live; otherwise it is unknown (never 0).
+  const net = t && isNum(t.mtm) ? t.mtm - t.charges : null;
+  const rejected = (t?.events ?? []).filter((e) => e.kind === 'ERROR');
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -185,7 +196,7 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
       }
       actions={
         <>
-          <span className={cx('text-sm font-semibold tabular-nums', pnlClass(net))} title="Today, after charges">{signed(net)}</span>
+          <span className={cx('text-sm font-semibold tabular-nums', pnlClass(net))} title={net === null ? run.gaps?.today ?? 'No live price for an open leg' : 'Today, after charges'}>{signed(net)}</span>
           {run.status === 'running' ? (
             <button className="btn-sell px-2 py-1 text-xs" disabled={busy} onClick={() => confirm(`Stop "${run.name}" and square off its open positions?`) && act(() => api(`/algo-runs/${run.id}/stop`, { method: 'POST', body: {} }))}>
               Stop & square off
@@ -198,8 +209,11 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
         </>
       }
     >
-      {error != null && <ErrorBox error={error} />}
+      {error != null && <ErrorState error={error} compact />}
       {run.error && <ErrorBox error={run.error} />}
+      {run.status === 'running' && run.gaps?.liveData && (
+        <div className="mb-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn" role="status">Waiting for live data: {run.gaps.liveData}</div>
+      )}
       <div className="text-xs text-muted">
         {String(run.params.symbol)} · {String(run.params.lots)} lot(s)/leg · start ₹{String(run.params.startPremium)} · step {String(run.params.stepPct)}% · strikes ×{String(run.params.strikeMultiple)} · {String(run.params.entryTime)}–{String(run.params.exitTime)} · deployed {formatDateTime(run.createdAt)}
       </div>
@@ -209,11 +223,11 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
             <>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-6">
                 <Stat label="Session" value={formatDate(t.date)} sub={`Expiry ${formatExpiry(t.expiry)}`} />
-                <Stat label="Realised" value={rupee(t.realized)} tone={t.realized > 0 ? 'up' : t.realized < 0 ? 'down' : undefined} />
-                <Stat label="Unrealised" value={rupee(t.unrealized)} tone={t.unrealized > 0 ? 'up' : t.unrealized < 0 ? 'down' : undefined} />
+                <Stat label="Realised" value={rupee(t.realized)} tone={toneOf(t.realized)} />
+                <Stat label="Unrealised" value={isNum(t.unrealized) ? rupee(t.unrealized) : null} reason={run.gaps?.today ?? 'An open leg has no live price'} tone={toneOf(t.unrealized)} />
                 <Stat label="Charges" value={rupee(t.charges)} tone="warn" />
-                <Stat label="Net today" value={signed(net)} tone={net > 0 ? 'up' : net < 0 ? 'down' : undefined} />
-                <Stat label="All days (net)" value={signed(run.totalNet)} tone={run.totalNet > 0 ? 'up' : run.totalNet < 0 ? 'down' : undefined} sub={`${run.history.length} finished day(s)`} />
+                <Stat label="Net today" value={net === null ? null : signed(net)} reason={run.gaps?.today ?? 'An open leg has no live price'} tone={toneOf(net)} />
+                <Stat label="All days (net)" value={isNum(run.totalNet) ? signed(run.totalNet) : null} reason={run.gaps?.totalNet ?? 'A finished day\'s result is not known yet'} tone={toneOf(run.totalNet)} sub={`${run.history.length} finished day(s)`} />
               </div>
               <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
                 <div className="space-y-1 rounded-lg border border-line p-3 text-sm">
@@ -236,8 +250,8 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
                             <td className={l.side === 'SELL' ? 'text-down' : 'text-up'}>{l.side} {l.strike} {l.type}</td>
                             <td className="num">{l.lots}</td>
                             <td className="num">{l.entryPrice.toFixed(2)}</td>
-                            <td className="num">{l.ltp?.toFixed(2) ?? '—'}</td>
-                            <td className={cx('num', pnlClass(l.pnl))}>{rupee(l.pnl)}</td>
+                            <td className="num"><Val value={l.ltp} format={(x) => x.toFixed(2)} reason="Not traded in the live session" /></td>
+                            <td className={cx('num', pnlClass(l.pnl))}><Val value={l.pnl} format={rupee} reason="Needs the leg's live price" /></td>
                           </tr>
                         ))
                       ) : (
@@ -247,6 +261,12 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
                   </table>
                 </div>
               </div>
+              <Gaps gaps={run.gaps} omit={['liveData']} />
+              {rejected.length > 0 && (
+                <div className="rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-xs text-down" role="status">
+                  {rejected.length} order{rejected.length > 1 ? 's' : ''} rejected or failed today (never counted as filled), last: {rejected[rejected.length - 1].message}
+                </div>
+              )}
               <DayCharts series={t.series} events={t.events} stepPct={Number(run.params.stepPct ?? 50)} height={220} />
               <div>
                 <div className="mb-1 text-xs font-medium text-muted">Today's events</div>
@@ -254,7 +274,7 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
               </div>
             </>
           ) : (
-            <Empty>Waiting for the market to open.</Empty>
+            <div className="py-6 text-center text-sm text-muted">Waiting for the market to open.</div>
           )}
           {run.history.length > 0 && (
             <div>
@@ -281,10 +301,10 @@ function DaysTable({ days, onPick }: { days: AlgoDaySummary[]; onPick?: (d: Algo
         { key: 'expiry', label: 'Expiry', value: (d) => d.expiry, render: (d) => formatExpiry(d.expiry), hideSm: true },
         { key: 'adj', label: 'Adj.', num: true, value: (d) => d.adjustments },
         { key: 'lvl', label: 'Max level', num: true, value: (d) => d.maxLevel, render: (d) => (d.maxLevel ? `₹${+d.maxLevel.toFixed(2)}` : '—'), hideSm: true },
-        { key: 'exit', label: 'Exit', value: (d) => d.exitKind, render: (d) => <span title={d.exitReason}>{d.entered ? EXIT_LABEL[d.exitKind] : 'No trade'}</span> },
+        { key: 'exit', label: 'Exit', value: (d) => d.exitKind, render: (d) => <span title={d.exitReason}>{d.entered ? EXIT_LABEL[d.exitKind] : 'No trade'}{d.incomplete && <> <Pill tone="warn">incomplete</Pill></>}</span> },
         { key: 'low', label: 'Worst', num: true, value: (d) => d.maxLoss, render: (d) => <span className={pnlClass(d.maxLoss)}>{rupee(d.maxLoss)}</span>, hideSm: true },
         { key: 'chg', label: 'Charges', num: true, value: (d) => d.charges, render: (d) => rupee(d.charges), hideSm: true },
-        { key: 'net', label: 'Net P&L', num: true, value: (d) => d.net, render: (d) => <span className={cx('font-medium', pnlClass(d.net))}>{signed(d.net)}</span> },
+        { key: 'net', label: 'Net P&L', num: true, value: (d) => d.net, render: (d) => <span className={cx('font-medium', pnlClass(d.net))}>{isNum(d.net) ? signed(d.net) : <Dash reason={d.incomplete ?? 'The result of this day is not known'} />}</span> },
       ]}
     />
   );
@@ -305,14 +325,15 @@ function DayBacktest({ algoId, params, date, setDate }: { algoId: string; params
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <SessionDate value={date} onChange={setDate} max={today} />
-        <span className="text-xs text-muted">Minute-by-minute replay on the simulated history; fills at the minute's last price.</span>
+        <span className="text-xs text-muted">Recorded sessions only: a minute-by-minute replay of what the recorder saw, filling at the recorded last traded price of the minute. A minute without a recorded price is not replayed.</span>
       </div>
-      <Loadable q={q}>
+      <Loadable q={q} hint="Backtests replay only the sessions the app recorded (it records while it runs): pick a date the recorder was running.">
         {(d) => (
           <>
+            {d.incomplete && <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn" role="status">This day is not final: {d.incomplete}</div>}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-8">
               <Stat label="Session" value={formatDate(d.date)} sub={d.partial ? 'in progress' : `Expiry ${formatExpiry(d.expiry)}`} />
-              <Stat label="Net P&L" value={signed(d.net)} tone={d.net > 0 ? 'up' : d.net < 0 ? 'down' : undefined} sub={`Gross ${rupee(d.pnl)}`} />
+              <Stat label="Net P&L" value={isNum(d.net) ? signed(d.net) : null} reason={d.incomplete ?? 'The result of this day is not known'} tone={toneOf(d.net)} sub={`Gross ${rupee(d.pnl)}`} />
               <Stat label="Charges" value={rupee(d.charges)} tone="warn" sub={`${d.orders} orders`} />
               <Stat label="Adjustments" value={d.adjustments} />
               <Stat label="Max level" value={d.maxLevel ? `₹${+d.maxLevel.toFixed(2)}` : '—'} />
@@ -362,32 +383,58 @@ function RangeBacktest({ algoId, params, onPickDay }: { algoId: string; params: 
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <Segmented value={days} onChange={setDays} options={[{ value: 20, label: '20 days' }, { value: 60, label: '60 days' }, { value: 120, label: '120 days' }, { value: 250, label: '1 year' }]} />
-        <span className="text-xs text-muted">Each completed session replayed independently (entry 09:20, exit 15:25). Click a day to open it.</span>
+        <span className="text-xs text-muted">Recorded sessions only, each replayed independently with the settings above. Days that cannot be replayed are listed with the reason. Click a day to open it.</span>
       </div>
       {q.isFetching && !q.data ? (
         <Spinner label="Running backtest…" />
       ) : (
-        <Loadable q={q}>
-          {(r) => (
-            <>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-8">
-                <Stat label="Period" value={`${r.stats.days} days`} sub={r.from ? `${formatDate(r.from)} → ${formatDate(r.to)}` : undefined} />
-                <Stat label="Total net" value={signed(r.stats.totalNet)} tone={r.stats.totalNet > 0 ? 'up' : r.stats.totalNet < 0 ? 'down' : undefined} sub={`charges ${rupee(r.stats.totalCharges)}`} />
-                <Stat label="Win rate" value={`${r.stats.winRate}%`} sub={`${r.stats.winDays}W · ${r.stats.lossDays}L · ${r.stats.tradedDays} traded`} />
-                <Stat label="Avg / day" value={signed(r.stats.avgNet)} tone={r.stats.avgNet > 0 ? 'up' : r.stats.avgNet < 0 ? 'down' : undefined} />
-                <Stat label="Best day" value={signed(r.stats.bestDay)} tone="up" />
-                <Stat label="Worst day" value={signed(r.stats.worstDay)} tone="down" />
-                <Stat label="Max drawdown" value={rupee(r.stats.maxDrawdown)} tone="down" />
-                <Stat label="Adjustments" value={`${r.stats.avgAdjustments} avg`} sub={`max ${r.stats.maxAdjustments} · ${r.stats.stoppedDays} stop days`} />
-              </div>
-              <Card title="Daily net P&L and equity curve">
-                <Chart option={option} height={280} />
-              </Card>
-              <Card title="Day by day" pad={false}>
-                <DaysTable days={r.days} onPick={(d) => onPickDay(d.date)} />
-              </Card>
-            </>
-          )}
+        <Loadable q={q} hint="Backtests replay only the sessions the app recorded (it records while it runs).">
+          {(r) => {
+            const none = 'No traded day among the replayed ones';
+            return (
+              <>
+                <div className="rounded-lg border border-line bg-panel2/60 px-3 py-2 text-xs" role="note">
+                  Recorded sessions only{r.recordedFrom ? <> — the app has recorded since <b>{formatDate(r.recordedFrom, true)}</b></> : null}.{' '}
+                  {r.stats.days} complete day{r.stats.days === 1 ? '' : 's'} replayed
+                  {r.stats.incompleteDays > 0 ? `, ${r.stats.incompleteDays} incomplete (left out of the statistics)` : ''}
+                  {r.stats.skippedDays > 0 ? `, ${r.stats.skippedDays} not replayed (listed below)` : ''}.
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-8">
+                  <Stat label="Period" value={`${r.stats.days} days`} sub={r.from ? `${formatDate(r.from)} → ${formatDate(r.to)}` : undefined} />
+                  <Stat label="Total net" value={signed(r.stats.totalNet)} tone={toneOf(r.stats.totalNet)} sub={`charges ${rupee(r.stats.totalCharges)}`} />
+                  <Stat label="Win rate" value={isNum(r.stats.winRate) ? `${r.stats.winRate}%` : null} reason={none} sub={`${r.stats.winDays}W · ${r.stats.lossDays}L · ${r.stats.tradedDays} traded`} />
+                  <Stat label="Avg / day" value={isNum(r.stats.avgNet) ? signed(r.stats.avgNet) : null} reason={none} tone={toneOf(r.stats.avgNet)} />
+                  <Stat label="Best day" value={isNum(r.stats.bestDay) ? signed(r.stats.bestDay) : null} reason={none} tone="up" />
+                  <Stat label="Worst day" value={isNum(r.stats.worstDay) ? signed(r.stats.worstDay) : null} reason={none} tone="down" />
+                  <Stat label="Max drawdown" value={rupee(r.stats.maxDrawdown)} tone="down" />
+                  <Stat label="Adjustments" value={isNum(r.stats.avgAdjustments) ? `${r.stats.avgAdjustments} avg` : null} reason={none} sub={`max ${isNum(r.stats.maxAdjustments) ? r.stats.maxAdjustments : '—'} · ${r.stats.stoppedDays} stop days`} />
+                </div>
+                <Card title="Daily net P&L and equity curve">
+                  <Chart option={option} height={280} blank={r.equity.length ? undefined : 'No complete replayed day: the curve is drawn from replayed days only.'} />
+                </Card>
+                <Card title="Day by day" pad={false}>
+                  {r.days.length ? <DaysTable days={r.days} onPick={(d) => onPickDay(d.date)} /> : <div className="py-6 text-center text-sm text-muted">No day could be replayed.</div>}
+                </Card>
+                {r.skipped.length > 0 && (
+                  <Card title={`Not replayed (${r.skipped.length})`} pad={false}>
+                    <div className="max-h-64 overflow-auto">
+                      <table className="tbl">
+                        <thead><tr><th>Date</th><th>Why</th></tr></thead>
+                        <tbody>
+                          {r.skipped.map((d) => (
+                            <tr key={d.date}>
+                              <td className="whitespace-nowrap tabular-nums">{formatDate(d.date, true)}</td>
+                              <td className="whitespace-normal text-xs text-muted">{d.reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Card>
+                )}
+              </>
+            );
+          }}
         </Loadable>
       )}
     </div>
@@ -460,7 +507,7 @@ export default function Algo() {
 
   return (
     <div className="space-y-3">
-      <PageHeader title="Algo Strategies" subtitle="Rule-based strategies that trade your paper account automatically. Backtest them on history, then deploy. New algos appear here as they are added.">
+      <PageHeader title="Algo Strategies" subtitle="Rule-based strategies that trade your paper account automatically. Backtest them on recorded sessions, then deploy. New algos appear here as they are added.">
         <Pill tone={running ? 'up' : 'muted'}>{running} running</Pill>
       </PageHeader>
 
@@ -501,14 +548,14 @@ export default function Algo() {
                     {algo.params
                       .filter((s) => s.type !== 'boolean')
                       .map((s) => (
-                        <ParamInput key={s.key} spec={s} value={params[s.key]} onChange={(v) => setParam(s.key, v)} symbols={cat.symbols} />
+                        <ParamInput key={s.key} spec={s} value={params[s.key]} onChange={(v) => setParam(s.key, v)} symbols={cat.symbols} symbolsWhy={cat.gaps?.symbols} />
                       ))}
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-3">
                     {algo.params
                       .filter((s) => s.type === 'boolean')
                       .map((s) => (
-                        <ParamInput key={s.key} spec={s} value={params[s.key]} onChange={(v) => setParam(s.key, v)} symbols={cat.symbols} />
+                        <ParamInput key={s.key} spec={s} value={params[s.key]} onChange={(v) => setParam(s.key, v)} symbols={cat.symbols} symbolsWhy={cat.gaps?.symbols} />
                       ))}
                   </div>
                   <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-line pt-3">
@@ -522,9 +569,9 @@ export default function Algo() {
                       {deploying ? 'Deploying…' : 'Deploy on paper account'}
                     </button>
                   </div>
-                  {error != null && <div className="mt-2"><ErrorBox error={error} /></div>}
+                  {error != null && <div className="mt-2"><ErrorState error={error} compact title="Not deployed" /></div>}
                   <p className="mt-2 text-2xs text-muted">
-                    Deployed algos place MARKET orders (MIS, tagged <code>algo:&lt;id&gt;</code>) through the paper broker every couple of seconds, run every trading day until stopped, and show up in Positions & Orders. Don't exit an algo's positions by hand — use Stop. Simulated data; not investment advice.
+                    Deployed algos place MARKET orders (MIS, tagged <code>algo:&lt;id&gt;</code>) through the paper broker every couple of seconds, run every trading day until stopped, and show up in Positions & Orders. Orders fill only at the live bid / ask: an order the broker rejects is logged on the run and never counted as filled, and a run with no live price waits instead of guessing one. Don't exit an algo's positions by hand — use Stop. Paper trading only; not investment advice.
                   </p>
                 </Card>
               )}
@@ -550,7 +597,7 @@ export default function Algo() {
                       </div>
                     ) : (
                       <Card>
-                        <Empty>No algo deployed yet. Choose a strategy, check its backtest and press “Deploy on paper account”.</Empty>
+                        <div className="py-10 text-center text-sm text-muted">No algo deployed yet. Choose a strategy, check its backtest and press “Deploy on paper account”.</div>
                       </Card>
                     )
                   }

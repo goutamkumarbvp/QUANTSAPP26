@@ -184,8 +184,8 @@ describe('margin', () => {
       { side: 'SELL', type: 'PE', strike: 25000, expiry, lots: 1, lotSize: 65, price: 220, iv: 0.13 },
       { side: 'BUY', type: 'PE', strike: 24800, expiry, lots: 1, lotSize: 65, price: 150, iv: 0.135 },
     ];
-    const hedged = estimateMargin(legs, 25000, now, { r: 0.065, defaultIv: 0.13 }, INDEX_MARGIN);
-    const naked = estimateMargin([legs[0]], 25000, now, { r: 0.065, defaultIv: 0.13 }, INDEX_MARGIN);
+    const hedged = estimateMargin(legs, 25000, now, { r: 0.065, volScanIv: 0.13 }, INDEX_MARGIN).margin!;
+    const naked = estimateMargin([legs[0]], 25000, now, { r: 0.065, volScanIv: 0.13 }, INDEX_MARGIN).margin!;
     expect(hedged.total).toBeLessThan(naked.total);
     expect(naked.total).toBeGreaterThan(25000 * 65 * 0.05);
     expect(hedged.hedgeBenefit).toBeGreaterThan(0);

@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { formatIndian, formatPct, type Notification } from '@q26/core';
+import type { Notification } from '@q26/core';
 import { api } from '../lib/api';
-import { formatDateTime, formatSessionTime } from '../lib/format';
+import { useFeed } from '../lib/feed';
+import { formatAge, formatAsOf, formatDateTime, formatIndian, formatPct, formatSessionTime, isNum } from '../lib/format';
 import { MOBILE_TABS, NAV } from '../lib/nav';
 import { useApp, useTicks } from '../lib/store';
-import { cx } from './ui';
+import { FeedDetails, feedTone } from './FeedStatus';
+import { cx, Dash } from './ui';
 
 const TICKER = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', 'MIDCPNIFTY', 'BANKEX'];
 
@@ -21,9 +23,14 @@ function Logo() {
   );
 }
 
+/** Ticks older than this while the market is open (or when the browser lost the server) are dimmed. */
+const TICKER_STALE_MS = 60_000;
+
 function Ticker() {
   const quotes = useTicks((s) => s.quotes);
   const prev = useTicks((s) => s.prev);
+  const clock = useTicks((s) => s.clock);
+  const connected = useTicks((s) => s.connected);
   const navigate = useNavigate();
   const setSymbol = useApp((s) => s.setSymbol);
   return (
@@ -31,6 +38,9 @@ function Ticker() {
       {TICKER.map((sym) => {
         const q = quotes[sym];
         const dir = q ? (q.ltp > (prev[sym] ?? q.ltp) ? 'flash-up' : q.ltp < (prev[sym] ?? q.ltp) ? 'flash-down' : '') : '';
+        // Last price time; dimmed when the connection is gone or (market open) no tick for a minute.
+        const stale = !!q && (!connected || (clock?.status === 'open' && !!clock && clock.ts - q.ts > TICKER_STALE_MS));
+        const age = q && clock ? formatAge(clock.ts - q.ts) : '';
         return (
           <button
             key={sym}
@@ -39,15 +49,16 @@ function Ticker() {
               navigate('/option-chain');
             }}
             className="flex shrink-0 flex-col rounded-md px-2.5 py-1 text-left hover:bg-panel2"
+            title={q ? `${sym} · LTP ${formatAsOf(q.ts, clock?.ts)}${stale ? ` · last update ${age} ago` : ''}` : `${sym} · no live price yet`}
           >
             <span className="text-2xs font-semibold text-muted">{sym}</span>
             {q ? (
-              <span key={q.ltp} className={cx('flex items-baseline gap-1.5 rounded text-xs tabular-nums', dir)}>
+              <span key={q.ltp} className={cx('flex items-baseline gap-1.5 rounded text-xs tabular-nums', dir, stale && 'opacity-60')}>
                 <span className="font-semibold">{formatIndian(q.ltp)}</span>
-                <span className={q.change >= 0 ? 'text-up' : 'text-down'}>{formatPct(q.changePct)}</span>
+                <span className={!isNum(q.change) ? 'text-muted' : q.change >= 0 ? 'text-up' : 'text-down'}>{formatPct(q.changePct)}</span>
               </span>
             ) : (
-              <span className="text-xs text-muted">—</span>
+              <Dash reason="No live price yet" className="text-xs" />
             )}
           </button>
         );
@@ -56,19 +67,53 @@ function Ticker() {
   );
 }
 
+/** Market clock + live-feed state (LIVE / CONNECTING / OFFLINE); click for the reason and the details. */
 function ClockChip() {
   const clock = useTicks((s) => s.clock);
   const connected = useTicks((s) => s.connected);
-  if (!clock) return <span className="chip bg-line text-muted">Connecting…</span>;
-  const live = clock.status === 'open';
+  const view = useFeed();
+  const [open, setOpen] = useState(false);
+  const tone = feedTone(view);
+  const marketOpen = clock?.status === 'open';
   return (
-    <span className="chip gap-1.5 bg-panel2 text-muted" title={`${clock.mode === 'demo' ? 'Simulated market' : 'Market clock'} · ${formatDateTime(clock.ts)}`}>
-      <span className={cx('h-1.5 w-1.5 rounded-full', connected && live ? 'animate-pulse bg-up' : 'bg-warn')} />
-      <span className="hidden sm:inline">{clock.mode === 'demo' ? 'SIM' : 'LIVE'}</span>
-      <span className="hidden tabular-nums md:inline">{formatDateTime(clock.ts)}</span>
-      <span className="tabular-nums md:hidden">{formatSessionTime(clock.ts)}</span>
-      <span className={live ? 'text-up' : 'text-warn'}>{clock.status === 'open' ? 'Open' : clock.status === 'pre-open' ? 'Pre-open' : 'Closed'}</span>
-    </span>
+    <div className="relative">
+      <button
+        type="button"
+        className="chip gap-1.5 bg-panel2 text-muted"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`Feed status: ${view.state}`}
+        title={`${view.state}${view.state === 'LIVE' && view.stale ? ' (stale)' : ''} — ${view.reason}${clock ? ` · ${formatDateTime(clock.ts)}` : ''}`}
+      >
+        <span className={cx('h-1.5 w-1.5 rounded-full', tone.dot)} />
+        <span className={cx('font-semibold', tone.text)}>{view.state}</span>
+        {clock && (
+          <>
+            <span className="hidden tabular-nums md:inline">{formatDateTime(clock.ts)}</span>
+            <span className="hidden tabular-nums sm:inline md:hidden">{formatSessionTime(clock.ts)}</span>
+            <span className={cx(marketOpen ? 'text-up' : 'text-warn', view.state !== 'LIVE' && 'hidden sm:inline')}>{clock.status === 'open' ? 'Open' : clock.status === 'pre-open' ? 'Pre-open' : 'Closed'}</span>
+          </>
+        )}
+      </button>
+      {open && (
+        <div role="dialog" aria-label="Live feed status" className="absolute right-0 z-40 mt-2 w-80 max-w-[calc(100vw-1rem)] rounded-xl border border-line bg-panel p-3 shadow-xl">
+          <FeedDetails clock={clock} view={view} appConnected={connected} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Persistent warning under the header while the live feed is not up: what is wrong, so blank values are understood. */
+function FeedBanner() {
+  const view = useFeed();
+  if (view.state === 'LIVE' && !view.stale) return null;
+  const down = view.state === 'OFFLINE';
+  return (
+    <div role="status" className={cx('border-b px-3 py-1 text-center text-2xs', down ? 'border-down/30 bg-down/10 text-down' : 'border-warn/30 bg-warn/10 text-warn')}>
+      {view.state === 'LIVE' ? 'Live feed is quiet' : view.state === 'OFFLINE' ? 'Live feed offline' : 'Connecting to the live feed'} — {view.reason}
+    </div>
   );
 }
 
@@ -220,8 +265,9 @@ export function Layout({ children }: { children: ReactNode }) {
             <Ticker />
           </div>
         </header>
-        <div className="border-b border-warn/30 bg-warn/10 px-3 py-1 text-center text-2xs text-warn">
-          Simulated market data for analysis & paper trading — not live exchange prices and not investment advice.
+        <FeedBanner />
+        <div className="border-b border-line bg-panel2/60 px-3 py-1 text-center text-2xs text-muted">
+          Live Kotak Neo data and official NSE/BSE files — a value the sources do not provide is shown as — with the reason. Paper trading only; not investment advice.
         </div>
         <main className="min-w-0 flex-1 px-3 pb-24 pt-3 sm:px-4 lg:pb-6">{children}</main>
       </div>

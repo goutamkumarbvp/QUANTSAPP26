@@ -120,7 +120,8 @@ export function optimizeStrategies(input: OptimizerInput): OptimizerOutput {
   const makeLeg = (type: OptionType, side: 'BUY' | 'SELL', strike: number, q: OptimizerQuote): CandLeg => {
     const leg: Leg = { side, type, strike, expiry, lots: 1, lotSize, price: q.price, iv: q.iv };
     const sgn = side === 'BUY' ? 1 : -1;
-    const val = (S: number, ts: number) => sgn * lotSize * (legTheoPrice(leg, S, ts, ctx) - q.price);
+    // Every candidate has a solved IV (buildCands skips quotes without one), so the theoretical price exists.
+    const val = (S: number, ts: number) => sgn * lotSize * ((legTheoPrice(leg, S, ts, ctx) as number) - q.price);
     const g = new Float64Array(G);
     for (let i = 0; i < G; i++) g[i] = val(grid[i], expTs);
     return {
@@ -259,7 +260,10 @@ export function optimizeStrategies(input: OptimizerInput): OptimizerOutput {
     const sig = legs.map((l) => `${l.side}${l.type}${l.strike}x${l.lots}`).sort().join('|');
     if (seen.has(sig)) continue;
     seen.add(sig);
-    const m = estimateMargin(legs, spot, nowTs, { ...ctx, defaultIv: input.atmIv }, marginParams);
+    const est = estimateMargin(legs, spot, nowTs, { ...ctx, volScanIv: input.atmIv }, marginParams);
+    // A combination whose margin cannot be estimated (no carry for the expiry) is not offered.
+    if (!est.margin) continue;
+    const m = est.margin;
     const capital = m.total + Math.max(0, m.premiumPaid - m.premiumReceived);
     if (input.maxCapital && capital > input.maxCapital) continue;
     // Keep the short-list varied: at most 3 variants of the same structure.

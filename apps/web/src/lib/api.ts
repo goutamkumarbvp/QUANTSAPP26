@@ -19,10 +19,30 @@ export function setToken(token: string | null): void {
   }
 }
 
+/**
+ * A failed API call. `code` is the server's machine-readable code from the JSON body
+ * (`NO_LIVE_DATA` for HTTP 503 "the live/official data for this answer is not available": the message
+ * then is the reason to show).
+ */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
   }
+}
+
+/** The server has no live/official data for this answer (HTTP 503 `{ error: <reason>, code: 'NO_LIVE_DATA' }`). */
+export function isNoLiveData(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.code === 'NO_LIVE_DATA';
+}
+
+/** A request the server rejected as wrong (HTTP 4xx): retrying the same request cannot help. */
+export function isClientError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status >= 400 && err.status < 500;
+}
+
+/** The text to show for an error: the server's reason for an ApiError, the message otherwise. */
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function api<T>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
@@ -37,8 +57,18 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
     signal: opts.signal,
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError((data && data.error) || res.statusText, res.status);
+  // A non-JSON body (a proxy's HTML error page, an empty 502) must not hide the HTTP status.
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (res.ok) throw new ApiError('The server sent a response that is not valid JSON', res.status);
+  }
+  if (!res.ok) {
+    const body = (data && typeof data === 'object' ? data : {}) as { error?: unknown; code?: unknown };
+    const message = typeof body.error === 'string' && body.error ? body.error : res.statusText || `HTTP ${res.status}`;
+    throw new ApiError(message, res.status, typeof body.code === 'string' ? body.code : undefined);
+  }
   return data as T;
 }
 

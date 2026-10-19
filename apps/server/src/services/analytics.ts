@@ -1849,7 +1849,7 @@ export class Analytics {
       allowUnlimitedRisk: req.allowUnlimitedRisk ?? false,
       maxCapital: req.maxCapital,
       atmIv,
-      ctx: { r: md.pricing.r, carry: () => carry, defaultIv: atmIv },
+      ctx: { r: md.pricing.r, carry: () => carry },
       marginParams: u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN,
       sortBy: req.sortBy ?? 'rr',
       limit: 25,

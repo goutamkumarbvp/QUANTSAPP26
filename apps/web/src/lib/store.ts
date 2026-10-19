@@ -103,6 +103,11 @@ export const useTicks = create<TickState>()((set, get) => ({
   connected: false,
   notifications: [],
   setTicks: (clock, quotes) => {
+    // A batch without quotes is the periodic clock / feed-status heartbeat: keep the last flash direction.
+    if (!quotes.length) {
+      set({ clock });
+      return;
+    }
     const prev: Record<string, number> = {};
     const cur = get().quotes;
     for (const q of quotes) prev[q.symbol] = cur[q.symbol]?.ltp ?? q.ltp;

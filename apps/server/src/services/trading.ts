@@ -221,14 +221,15 @@ export class PaperBroker {
     });
     const ivs = legs.map((l) => l.iv).filter((v): v is number => v !== undefined);
     // Reference IV of the vol scan (core estimateMargin); every option leg is valued at its own IV.
-    const defaultIv = atmIv ?? (ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : undefined);
+    const volScanIv = atmIv ?? (ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : undefined);
     const carryOf = (e: string): number => {
       const q = carry.get(e);
       if (q === undefined) throw new NoLiveData(`No live forward for ${symbol} ${e}`);
       return q;
     };
-    const m = estimateMargin(legs, S, md.pricing.valuationTs(ts), { r: md.pricing.r, carry: carryOf, defaultIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
-    return m.total;
+    const est = estimateMargin(legs, S, md.pricing.valuationTs(ts), { r: md.pricing.r, carry: carryOf, volScanIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
+    if (!est.margin) throw new NoLiveData(est.reason ?? 'Margin cannot be estimated');
+    return est.margin.total;
   }
 
   private fundsFor(uid: string, positions: Position[], ts: number): Funds {

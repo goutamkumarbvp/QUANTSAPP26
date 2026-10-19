@@ -3,7 +3,7 @@
  * breakevens, max profit / loss, probability of profit and net Greeks.
  */
 import { bsGreeks, bsPrice, intrinsic, type OptionType } from './bs';
-import { expiryTs, yearsBetween } from './dates';
+import { expiryTs, formatExpiry, yearsBetween } from './dates';
 import { normPdf } from './math';
 
 export type Side = 'BUY' | 'SELL';
@@ -28,44 +28,114 @@ export interface Leg {
   active?: boolean;
 }
 
+/**
+ * Inputs of the theoretical (before-expiry) valuation. Nothing is assumed for a missing input: a leg
+ * that needs an IV it does not have (`Leg.iv`), or a carry the context cannot give, is not valued — it
+ * is left out of the theoretical figures and named in the `missing` lists of the results (`LegGap`).
+ * Payoffs at expiry (intrinsic values) and closed legs never need either.
+ */
 export interface ValuationContext {
   r: number;
-  /** Carry yield per expiry so that S·e^{(r−q)T} matches the future of that expiry. */
-  carry?: (expiry: string) => number;
+  /**
+   * Carry yield per expiry so that S·e^{(r−q)T} matches the future of that expiry. Omit it for q = 0
+   * (a caller that does not model carry); return null when the carry of that expiry is not known —
+   * legs of that expiry are then not valued before their expiry.
+   */
+  carry?: (expiry: string) => number | null;
   /** Additive IV shift in vol points as decimal (0.02 = +2%). */
   ivShift?: number;
-  /** Default IV when a leg has none. */
-  defaultIv?: number;
+}
+
+/** A leg left out of a theoretical figure, and why. */
+export interface LegGap {
+  /** Position of the leg in the array that was passed in. */
+  index: number;
+  id?: string;
+  /** e.g. "Sell 25000 CE 27-Oct-26". */
+  label: string;
+  reason: string;
 }
 
 export const sideSign = (side: Side) => (side === 'BUY' ? 1 : -1);
 export const legQty = (leg: Leg) => leg.lots * leg.lotSize;
 const isActive = (leg: Leg) => leg.active !== false && leg.lots !== 0;
 
-function legIv(leg: Leg, ctx: ValuationContext): number {
-  const base = leg.iv && leg.iv > 0 ? leg.iv : ctx.defaultIv ?? 0.15;
-  return Math.max(0.005, base + (ctx.ivShift ?? 0));
+/** Short human label of a leg ("Buy 25000 CE 27-Oct-26", "Sell FUT 27-Oct-26"). */
+export function legLabel(leg: Leg): string {
+  return `${leg.side === 'BUY' ? 'Buy' : 'Sell'} ${leg.type === 'FUT' ? 'FUT' : `${leg.strike} ${leg.type}`} ${formatExpiry(leg.expiry)}`;
 }
 
-/** Theoretical price of the instrument for underlying `S` at time `evalTs`. */
-export function legTheoPrice(leg: Leg, S: number, evalTs: number, ctx: ValuationContext): number {
+/** The leg's IV (decimal) with the context's shift applied, or null when the leg has none. */
+function legIv(leg: Leg, ctx: ValuationContext): number | null {
+  if (!(typeof leg.iv === 'number' && Number.isFinite(leg.iv) && leg.iv > 0)) return null;
+  return Math.max(0.005, leg.iv + (ctx.ivShift ?? 0));
+}
+
+/** Carry q of `expiry`: 0 when the context models none, null when it does not know it. */
+function carryOf(expiry: string, ctx: ValuationContext): number | null {
+  if (!ctx.carry) return 0;
+  const q = ctx.carry(expiry);
+  return typeof q === 'number' && Number.isFinite(q) ? q : null;
+}
+
+/**
+ * Why the leg cannot be valued before its expiry at `evalTs`, or null when it can. Closed and inactive
+ * legs and legs at/after their expiry need nothing. `greeks`: futures need no carry for their delta.
+ */
+function legGapReason(leg: Leg, evalTs: number, ctx: ValuationContext, greeks = false): string | null {
+  if (!isActive(leg) || leg.exitPrice != null) return null;
+  if (yearsBetween(evalTs, expiryTs(leg.expiry)) <= 0) return null;
+  if (leg.type === 'FUT' && greeks) return null;
+  if (carryOf(leg.expiry, ctx) === null) return `no live forward (carry) for the ${formatExpiry(leg.expiry)} expiry`;
+  if (leg.type !== 'FUT' && legIv(leg, ctx) === null) return 'no implied volatility (none could be solved from a live premium)';
+  return null;
+}
+
+function gapsOf(legs: readonly Leg[], reasonOf: (leg: Leg) => string | null): LegGap[] {
+  const out: LegGap[] = [];
+  legs.forEach((leg, index) => {
+    const reason = reasonOf(leg);
+    if (reason) out.push({ index, id: leg.id, label: legLabel(leg), reason });
+  });
+  return out;
+}
+
+/** Legs that `strategyPnl` leaves out at `evalTs` (theoretical value needs an IV / carry they lack). */
+export function strategyGaps(legs: readonly Leg[], evalTs: number, ctx: ValuationContext): LegGap[] {
+  return gapsOf(legs, (l) => legGapReason(l, evalTs, ctx));
+}
+
+/**
+ * Theoretical price of the instrument for underlying `S` at time `evalTs`; null when it cannot be
+ * valued (an option before expiry with no IV, or no known carry). Intrinsic at/after expiry.
+ */
+export function legTheoPrice(leg: Leg, S: number, evalTs: number, ctx: ValuationContext): number | null {
   const T = yearsBetween(evalTs, expiryTs(leg.expiry));
-  const q = ctx.carry ? ctx.carry(leg.expiry) : 0;
+  if (T <= 0) return leg.type === 'FUT' ? S : intrinsic(leg.type, S, leg.strike); // settles at the underlying / intrinsic
+  const q = carryOf(leg.expiry, ctx);
+  if (q === null) return null;
   if (leg.type === 'FUT') return S * Math.exp((ctx.r - q) * T);
-  if (T <= 0) return intrinsic(leg.type, S, leg.strike);
-  return bsPrice(leg.type, S, leg.strike, T, ctx.r, legIv(leg, ctx), q);
+  const sigma = legIv(leg, ctx);
+  if (sigma === null) return null;
+  return bsPrice(leg.type, S, leg.strike, T, ctx.r, sigma, q);
 }
 
-export function legPnl(leg: Leg, S: number, evalTs: number, ctx: ValuationContext): number {
+/** P&L of one leg; 0 for an inactive leg, null when the leg cannot be valued (see `legTheoPrice`). */
+export function legPnl(leg: Leg, S: number, evalTs: number, ctx: ValuationContext): number | null {
   if (!isActive(leg)) return 0;
   const qty = legQty(leg) * sideSign(leg.side);
   if (leg.exitPrice != null) return qty * (leg.exitPrice - leg.price);
-  return qty * (legTheoPrice(leg, S, evalTs, ctx) - leg.price);
+  const px = legTheoPrice(leg, S, evalTs, ctx);
+  return px === null ? null : qty * (px - leg.price);
 }
 
+/**
+ * Total P&L of the legs that can be valued. A leg that cannot be valued (no IV / carry before its
+ * expiry) is left out — `strategyGaps` names those legs for the same arguments.
+ */
 export function strategyPnl(legs: readonly Leg[], S: number, evalTs: number, ctx: ValuationContext): number {
   let pnl = 0;
-  for (const leg of legs) pnl += legPnl(leg, S, evalTs, ctx);
+  for (const leg of legs) pnl += legPnl(leg, S, evalTs, ctx) ?? 0;
   return pnl;
 }
 
@@ -83,6 +153,10 @@ export interface PayoffCurve {
   prices: number[];
   expiry: number[];
   target: number[];
+  /** Legs left out of `target` (theoretical value on the target date needs an IV they lack). */
+  targetMissing: LegGap[];
+  /** Legs left out of `expiry` (only legs of a later expiry than the nearest can lack an IV here). */
+  expiryMissing: LegGap[];
 }
 
 export function payoffCurve(
@@ -102,6 +176,8 @@ export function payoffCurve(
     prices,
     expiry: prices.map((S) => strategyPnl(legs, S, atExpiry, ctx)),
     target: prices.map((S) => strategyPnl(legs, S, opts.targetTs, ctx)),
+    targetMissing: strategyGaps(legs, opts.targetTs, ctx),
+    expiryMissing: strategyGaps(legs, atExpiry, ctx),
   };
 }
 
@@ -142,25 +218,33 @@ export interface StrategyGreeks {
   gamma: number;
   theta: number;
   vega: number;
+  /** Option legs left out of the sums (no IV / carry to value them with); their Greeks are unknown, not zero. */
+  missing: LegGap[];
 }
 
 export function strategyGreeks(legs: readonly Leg[], S: number, nowTs: number, ctx: ValuationContext): StrategyGreeks {
-  const g: StrategyGreeks = { delta: 0, gamma: 0, theta: 0, vega: 0 };
-  for (const leg of legs) {
-    if (!isActive(leg) || leg.exitPrice != null) continue;
+  const g: StrategyGreeks = { delta: 0, gamma: 0, theta: 0, vega: 0, missing: [] };
+  legs.forEach((leg, index) => {
+    if (!isActive(leg) || leg.exitPrice != null) return;
     const qty = legQty(leg) * sideSign(leg.side);
     if (leg.type === 'FUT') {
       g.delta += qty;
-      continue;
+      return;
     }
     const T = yearsBetween(nowTs, expiryTs(leg.expiry));
-    const q = ctx.carry ? ctx.carry(leg.expiry) : 0;
-    const gr = bsGreeks(leg.type, S, leg.strike, T, ctx.r, legIv(leg, ctx), q);
+    const reason = legGapReason(leg, nowTs, ctx, true);
+    if (reason) {
+      g.missing.push({ index, id: leg.id, label: legLabel(leg), reason });
+      return;
+    }
+    // Before expiry the gap check above guarantees an IV and a carry; at/after expiry (sigma 0) the Greeks are the intrinsic ones.
+    const sigma = T > 0 ? (legIv(leg, ctx) as number) : 0;
+    const gr = bsGreeks(leg.type, S, leg.strike, T, ctx.r, sigma, carryOf(leg.expiry, ctx) ?? 0);
     g.delta += qty * gr.delta;
     g.gamma += qty * gr.gamma;
     g.theta += qty * gr.theta;
     g.vega += qty * gr.vega;
-  }
+  });
   return g;
 }
 
@@ -170,12 +254,18 @@ export interface StrategyAnalysis {
   breakevens: number[];
   /** Positive = net credit received, negative = net debit paid. */
   netPremium: number;
-  pop: number;
-  expectedPnl: number;
+  /** Null when no volatility was given to spread the underlying's distribution (`opts.sigma`, or an IV on a leg). */
+  pop: number | null;
+  expectedPnl: number | null;
   riskReward: number | null;
   greeks: StrategyGreeks;
+  /** Theoretical P&L now of the legs that can be valued (`missingNow` are left out) plus closed legs. */
   currentPnl: number;
   realizedPnl: number;
+  /** Legs left out of `currentPnl` and `greeks` (no IV / carry to value them with before expiry). */
+  missingNow: LegGap[];
+  /** Legs left out of the at-expiry figures (maxProfit, maxLoss, breakevens, pop, expectedPnl): later-expiry legs without an IV. */
+  missingAtExpiry: LegGap[];
 }
 
 /**
@@ -228,16 +318,20 @@ export function analyzeStrategy(
   opts: { sigma?: number } = {},
 ): StrategyAnalysis {
   const active = legs.filter(isActive);
-  const realizedPnl = active.filter((l) => l.exitPrice != null).reduce((a, l) => a + legPnl(l, S, nowTs, ctx), 0);
+  // A closed leg's P&L is its realised one and needs no valuation (legPnl is never null for it).
+  const realizedPnl = active.filter((l) => l.exitPrice != null).reduce((a, l) => a + (legPnl(l, S, nowTs, ctx) ?? 0), 0);
   const netPremium = active
     .filter((l) => l.type !== 'FUT' && l.exitPrice == null)
     .reduce((a, l) => a - sideSign(l.side) * l.price * legQty(l), 0);
-  const greeks = strategyGreeks(active, S, nowTs, ctx);
+  // Gaps are taken over the caller's `legs` so that `LegGap.index` points into it (inactive legs are skipped by both).
+  const greeks = strategyGreeks(legs, S, nowTs, ctx);
   const currentPnl = strategyPnl(active, S, nowTs, ctx);
+  const missingNow = strategyGaps(legs, nowTs, ctx);
   const expTs = nearestExpiryTs(active);
   if (!active.length || !Number.isFinite(expTs)) {
-    return { maxProfit: realizedPnl, maxLoss: realizedPnl, breakevens: [], netPremium, pop: realizedPnl > 0 ? 1 : 0, expectedPnl: realizedPnl, riskReward: null, greeks, currentPnl, realizedPnl };
+    return { maxProfit: realizedPnl, maxLoss: realizedPnl, breakevens: [], netPremium, pop: realizedPnl > 0 ? 1 : 0, expectedPnl: realizedPnl, riskReward: null, greeks, currentPnl, realizedPnl, missingNow, missingAtExpiry: [] };
   }
+  const missingAtExpiry = strategyGaps(legs, expTs, ctx);
 
   const f = (x: number) => strategyPnl(active, x, expTs, ctx);
   const strikes = active.filter((l) => l.type !== 'FUT').map((l) => l.strike);
@@ -262,10 +356,17 @@ export function analyzeStrategy(
   if (slope < -tol) maxLoss = null;
 
   const breakevens = findBreakevens(f, Math.max(0.01, S * 0.2), Math.max(S * 2.5, ...strikes.map((k) => k * 1.5)), 3000);
-  const sigma = opts.sigma ?? (active.find((l) => l.iv)?.iv ?? ctx.defaultIv ?? 0.15);
-  const { pop, expected } = probabilityOfProfit(active, S, sigma, nowTs, ctx);
+  // The distribution of the underlying at expiry needs a volatility: the caller's, else a leg's own IV — never an assumed one.
+  const sigma = opts.sigma ?? active.find((l) => l.iv !== undefined && l.iv > 0)?.iv;
+  let pop: number | null = null;
+  let expectedPnl: number | null = null;
+  if (sigma !== undefined || yearsBetween(nowTs, expTs) <= 0) {
+    const r = probabilityOfProfit(active, S, sigma ?? 0, nowTs, ctx);
+    pop = r.pop;
+    expectedPnl = r.expected;
+  }
   const riskReward = maxProfit !== null && maxLoss !== null && maxLoss < 0 ? maxProfit / Math.abs(maxLoss) : null;
-  return { maxProfit, maxLoss, breakevens, netPremium, pop, expectedPnl: expected, riskReward, greeks, currentPnl, realizedPnl };
+  return { maxProfit, maxLoss, breakevens, netPremium, pop, expectedPnl, riskReward, greeks, currentPnl, realizedPnl, missingNow, missingAtExpiry };
 }
 
 /** Grid of P&L for spot moves (rows) × evaluation dates (columns). */

@@ -4,8 +4,9 @@ import { useMutation } from '@tanstack/react-query';
 import { formatExpiry, formatINR, formatIndian, type OptimizerCandidate } from '@q26/core';
 import { PayoffChart, StrategySummary, useStrategyView } from '../components/Payoff';
 import { ExpirySelect, SymbolSelect } from '../components/pickers';
-import { Card, cx, ErrorBox, Field, PageHeader, Segmented, Spinner, Toggle } from '../components/ui';
+import { AsOf, Card, Coverage, cx, ErrorState, Field, NoData, PageHeader, Segmented, Spinner, Toggle } from '../components/ui';
 import { api } from '../lib/api';
+import { formatDateTime, isNum } from '../lib/format';
 import { useChain } from '../lib/hooks';
 import { useApp, useBuilder } from '../lib/store';
 
@@ -14,12 +15,17 @@ interface OptimizerResponse {
   results: OptimizerCandidate[];
   expiry: string;
   spot: number;
+  forward: number;
   tookMs: number;
+  /** The target date the strategies were valued at (epoch ms). */
+  targetTs: number;
+  /** How many strikes had a live premium (the rest were skipped). */
+  coverage: string;
 }
 
 function Detail({ symbol, cand }: { symbol: string; cand: OptimizerCandidate }) {
   const view = useStrategyView(symbol, cand.legs);
-  if (!view.analysis) return <Spinner />;
+  if (!view.analysis) return view.loading || !view.blank ? <Spinner /> : <NoData compact title="No payoff available" reason={view.blank} />;
   return (
     <div className="space-y-3">
       <PayoffChart view={view} height={300} />
@@ -35,7 +41,7 @@ export default function Optimizer() {
   const navigate = useNavigate();
   const [expiry, setExpiry] = useState<string>();
   const chain = useChain(symbol, expiry, { refetch: 15000 });
-  const spot = chain.data?.symbol === symbol ? chain.data.spot : undefined;
+  const spot = chain.data?.symbol === symbol && isNum(chain.data.spot) ? chain.data.spot : undefined;
   const [direction, setDirection] = useState<'up' | 'down'>('up');
   const [targetPct, setTargetPct] = useState(2);
   const [target, setTarget] = useState('');
@@ -47,7 +53,7 @@ export default function Optimizer() {
   const [sortBy, setSortBy] = useState<'rr' | 'profit' | 'pop'>('rr');
   const [selected, setSelected] = useState(0);
 
-  // Pre-fill target/stop from the view when the underlying changes.
+  // Pre-fill target/stop from the live spot and the chosen move when the underlying changes (never without a live spot).
   useEffect(() => {
     if (!spot) return;
     const t = direction === 'up' ? spot * (1 + targetPct / 100) : spot * (1 - targetPct / 100);
@@ -120,13 +126,19 @@ export default function Optimizer() {
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Toggle checked={unlimited} onChange={setUnlimited} label="Allow unlimited-risk strategies" />
-          <button className="btn-primary" disabled={!chain.data || !target || run.isPending} onClick={() => run.mutate()}>
+          <button className="btn-primary" disabled={!chain.data || !target || run.isPending} title={!chain.data ? 'The live option chain has not loaded' : !target ? 'Enter a target price' : undefined} onClick={() => run.mutate()}>
             {run.isPending ? 'Scanning combinations…' : '⚙ Find best strategies'}
           </button>
           {res && <span className="text-xs text-muted">Scanned <b className="text-ink">{res.scanned.toLocaleString('en-IN')}</b> combinations in {res.tookMs} ms · expiry {formatExpiry(res.expiry)}</span>}
         </div>
       </Card>
-      {run.error ? <ErrorBox error={run.error} /> : null}
+      {run.error ? <ErrorState error={run.error} title="No strategies can be ranked" hint="The optimizer prices every candidate from the live chain: it needs a live spot, forward, ATM IV and strikes with a live premium." /> : null}
+      {res && (
+        <div className="space-y-0.5 text-2xs text-muted">
+          <Coverage text={res.coverage} label="Coverage" />
+          <div>Premiums are the mid of the live bid / ask (else the last traded price); IV is solved from them. Forward {formatIndian(res.forward, 1)} · target date {formatDateTime(res.targetTs)}. <AsOf ts={chain.data?.valuationTs} label="Chain valued at" /></div>
+        </div>
+      )}
       {res && !res.results.length && <Card><div className="py-6 text-center text-sm text-muted">No strategy makes money at your target with the given constraints. Try a bigger move, later date, more legs or allow unlimited risk.</div></Card>}
       {res && res.results.length > 0 && (
         <div className="grid gap-3 lg:grid-cols-5">
@@ -148,7 +160,7 @@ export default function Optimizer() {
                       <span>At target <b className="text-up">{formatINR(r.targetPnl)}</b></span>
                       <span>At SL <b className={r.stopPnl >= 0 ? 'text-up' : 'text-down'}>{formatINR(r.stopPnl)}</b></span>
                       <span>POP <b className="text-ink">{(r.pop * 100).toFixed(0)}%</b></span>
-                      <span>Cap <b className="text-ink">{formatINR(r.margin)}</b></span>
+                      <span title="Margin estimate (SPAN-style) on live prices">Margin est. <b className="text-ink">{formatINR(r.margin)}</b></span>
                     </div>
                   </button>
                 </li>
