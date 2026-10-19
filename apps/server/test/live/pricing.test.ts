@@ -11,7 +11,9 @@ import {
   impliedForward,
   isLivePrice,
   liveSessionDates,
+  premiumTs,
   timeToExpiry,
+  valuationTs,
 } from '../../src/live/pricing';
 import { ExchangeCalendar } from '../../src/live/calendar';
 import { NoLiveData, keyId } from '../../src/live/types';
@@ -378,5 +380,84 @@ describe('LivePricing', () => {
     expect(out?.forward.source).toBe('parity');
     expect(out?.forward.forward).toBeCloseTo(F, 6);
     expect(out?.iv).toBeCloseTo(0.12, 6);
+  });
+});
+
+describe('valuation time (review: IV/Greeks/carry drifted outside the session on unchanged premiums)', () => {
+  const r = 0.065;
+  const cal = new ExchangeCalendar(); // 2026-10-09 Fri, 10-12 Mon … 10-16 Fri, 10-19 Mon, 10-20 Tue
+  const friClose = ist('2026-10-09', 15, 30);
+
+  it('valuationTs: now while the session is open, else the close of the session whose quotes are live', () => {
+    expect(valuationTs(cal, ist('2026-10-09', 15, 29))).toBe(ist('2026-10-09', 15, 29));
+    expect(valuationTs(cal, ist('2026-10-12', 9, 15))).toBe(ist('2026-10-12', 9, 15));
+    const outside = [ist('2026-10-09', 15, 30), ist('2026-10-09', 18, 0), ist('2026-10-10', 12, 0), ist('2026-10-11', 23, 59), ist('2026-10-12', 0, 1), ist('2026-10-12', 9, 5), ist('2026-10-12', 9, 14)];
+    for (const t of outside) {
+      expect(valuationTs(cal, t)).toBe(friClose);
+      // The same session liveSessionDates treats as live.
+      expect(liveSessionDates(cal, t).has('2026-10-09')).toBe(true);
+    }
+    expect(valuationTs(cal, ist('2026-10-12', 16, 0))).toBe(ist('2026-10-12', 15, 30));
+    // A holiday Monday: Friday's close until Tuesday's open.
+    const hol = new ExchangeCalendar(['2026-10-12']);
+    expect(valuationTs(hol, ist('2026-10-12', 11, 0))).toBe(friClose);
+    expect(valuationTs(hol, ist('2026-10-13', 9, 0))).toBe(friClose);
+    expect(valuationTs(hol, ist('2026-10-13', 9, 30))).toBe(ist('2026-10-13', 9, 30));
+  });
+
+  it('premiumTs: an LTP at its own trade time of a live session, capped by the valuation time', () => {
+    const now = ist('2026-10-12', 14, 0);
+    expect(premiumTs(cal, now, now, ist('2026-10-12', 10, 0))).toBe(ist('2026-10-12', 10, 0));
+    expect(premiumTs(cal, now, now)).toBe(now); // a mid, or an LTP without a trade time
+    expect(premiumTs(cal, now, now, Number.NaN)).toBe(now);
+    expect(premiumTs(cal, now, now, ist('2026-10-09', 15, 0))).toBe(now); // not a trade of a live session
+    expect(premiumTs(cal, now, now, now + 60_000)).toBe(now); // capped
+    const sun = ist('2026-10-11', 12, 0);
+    expect(premiumTs(cal, sun, friClose, ist('2026-10-09', 11, 0))).toBe(ist('2026-10-09', 11, 0));
+    expect(premiumTs(cal, sun, friClose, ist('2026-10-12', 9, 5))).toBe(friClose); // a pre-open trade after the close is capped
+  });
+
+  it('LivePricing: unchanged Friday premiums give the same forward, carry, ATM IV, IV and Greeks after the close, on the weekend and before the open', () => {
+    const EXP = '2026-10-20';
+    const strikes = [24_800, 24_900, 25_000, 25_100, 25_200];
+    const ref = new FakeRef({ [`NIFTY|${EXP}`]: strikes }, { 'NIFTY|OPT': [EXP], 'NIFTY|FUT': [] });
+    const fri = ist('2026-10-16', 15, 29);
+    const F = 25_030;
+    const T = timeToExpiry(EXP, fri);
+    const quotes: LiveQuote[] = [{ key: { symbol: 'NIFTY', kind: 'SPOT' }, ts: fri, ltp: 25_000 }];
+    for (const K of strikes) for (const type of ['CE', 'PE'] as OptKind[]) quotes.push({ key: { symbol: 'NIFTY', kind: type, expiry: EXP, strike: K }, ts: fri, ltp: black76Price(type, F, K, T, r, 0.14) });
+    const map = new Map(quotes.map((x) => [keyId(x.key), x]));
+    let t = fri;
+    const p = new LivePricing({ r, ref, calendar: cal, getQuote: (k) => map.get(keyId(k)), now: () => t });
+    const premium = black76Price('CE', F, 25_200, T, r, 0.14);
+    const read = () => ({
+      fwd: p.forward('NIFTY', EXP),
+      atm: p.atmIv('NIFTY') as number,
+      iv: p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium }) as number,
+      theta: (p.greeks({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_000, iv: 0.14 }) as { theta: number }).theta,
+    });
+    const base = read();
+    expect(base.atm).toBeCloseTo(0.14, 6);
+    expect(base.iv).toBeCloseTo(0.14, 6);
+    const friClose16 = ist('2026-10-16', 15, 30);
+    for (const when of [ist('2026-10-16', 16, 0), ist('2026-10-18', 12, 0), ist('2026-10-19', 9, 5)]) {
+      t = when;
+      expect(p.valuationTs()).toBe(friClose16);
+      const v = read();
+      // One minute (15:29 → the 15:30 close) apart, nothing more.
+      expect(v.fwd.forward).toBeCloseTo(base.fwd.forward, 4);
+      expect(v.fwd.carry).toBeCloseTo(base.fwd.carry, 4);
+      expect(v.atm).toBeCloseTo(base.atm, 4);
+      expect(v.iv).toBeCloseTo(base.iv, 4);
+      expect(v.theta).toBeCloseTo(base.theta, 1);
+      // No look-ahead: a session ts before the close needs its own forward; a weekend ts is the close.
+      expect(p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium, ts: ist('2026-10-16', 12, 0) })).toBeNull();
+      expect(p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium, ts: ist('2026-10-17', 10, 0) })).toBeCloseTo(v.iv, 9);
+    }
+    // An LTP traded at 11:00 on Friday is valued at 11:00.
+    t = ist('2026-10-18', 12, 0);
+    const at11 = black76Price('CE', F, 25_200, timeToExpiry(EXP, ist('2026-10-16', 11, 0)), r, 0.16);
+    expect(p.valuationTs(undefined, ist('2026-10-16', 11, 0))).toBe(ist('2026-10-16', 11, 0));
+    expect(p.iv({ symbol: 'NIFTY', expiry: EXP, type: 'CE', strike: 25_200, premium: at11, ltt: ist('2026-10-16', 11, 0) })).toBeCloseTo(0.16, 3);
   });
 });

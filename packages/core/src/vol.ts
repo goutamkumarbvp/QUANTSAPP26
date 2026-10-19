@@ -48,19 +48,29 @@ export function parkinsonVol(highs: readonly number[], lows: readonly number[], 
   return Math.sqrt(s / (4 * Math.log(2) * c)) * Math.sqrt(TRADING_DAYS);
 }
 
-/** IV Rank: where current IV sits between the period low (0) and high (100). */
-export function ivRank(current: number, history: readonly number[]): number {
+/** Fewest finite look-back observations IV rank / percentile are computed from. */
+export const MIN_IV_RANK_HISTORY = 2;
+
+/** The finite look-back values when rank/percentile are defined: enough of them, not all equal, and a finite current IV. */
+function rankable(current: number, history: readonly number[]): number[] | null {
   const vals = history.filter(Number.isFinite);
-  if (!vals.length || !Number.isFinite(current)) return NaN;
-  const lo = Math.min(...vals, current);
-  const hi = Math.max(...vals, current);
-  return hi > lo ? ((current - lo) / (hi - lo)) * 100 : 50;
+  if (vals.length < MIN_IV_RANK_HISTORY || !Number.isFinite(current)) return null;
+  return Math.max(...vals) > Math.min(...vals) ? vals : null;
 }
 
-/** IV Percentile: % of observations in the look-back below the current IV. */
-export function ivPercentile(current: number, history: readonly number[]): number {
-  const vals = history.filter(Number.isFinite);
-  if (!vals.length || !Number.isFinite(current)) return NaN;
+/** IV Rank: where current IV sits between the period low (0) and high (100); null for a flat or too-short history. */
+export function ivRank(current: number, history: readonly number[]): number | null {
+  const vals = rankable(current, history);
+  if (!vals) return null;
+  const lo = Math.min(...vals, current);
+  const hi = Math.max(...vals, current);
+  return ((current - lo) / (hi - lo)) * 100;
+}
+
+/** IV Percentile: % of observations in the look-back below the current IV; null for a flat or too-short history. */
+export function ivPercentile(current: number, history: readonly number[]): number | null {
+  const vals = rankable(current, history);
+  if (!vals) return null;
   let below = 0;
   for (const v of vals) if (v < current) below++;
   return (below / vals.length) * 100;

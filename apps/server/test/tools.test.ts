@@ -307,12 +307,22 @@ describe('scanners', () => {
     expect(m2).toBeDefined();
   });
 
-  it('price scanners rank live stock prices; the future\'s OI is attached when live, else null (never 0)', async () => {
+  it('price scanners rank live stock prices with the stock\'s own volume (no OI or build-up of its future); losers are only stocks that are down', async () => {
     const { p, tools } = setup();
     const res = await tools.scanner('price-gainers', p.now());
     expect(res.rows).toHaveLength(1);
-    expect(res.rows[0]).toMatchObject({ symbol: 'RELIANCE', type: 'EQ', ltp: 1_400, metric: 0.72, oi: 1_200_000, oiChangePct: null, buildUp: null });
-    expect(res.coverage).toBe('1 of 1 F&O stocks with a live price and the previous close');
+    // The stock's own session volume (3.2M on its quote), not the near future's 300,000; OI is the future's, so null.
+    expect(res.rows[0]).toMatchObject({ symbol: 'RELIANCE', type: 'EQ', ltp: 1_400, metric: 0.72, volume: 3_200_000, oi: null, oiChangePct: null });
+    expect(res.rows[0].buildUp ?? null).toBeNull();
+    expect(res.coverage).toBe('1 of 1 F&O stocks with a live price and the previous close (1 up)');
+    // RELIANCE is up 0.72 %: it is not a loser.
+    const losers = await tools.scanner('price-losers', p.now());
+    expect(losers.rows).toEqual([]);
+    expect(losers.coverage).toBe('1 of 1 F&O stocks with a live price and the previous close (0 down)');
+    // Down: listed as a loser, not a gainer.
+    p.setQuote(spotKey('RELIANCE'), { ltp: 1_380, prevClose: 1_390, volume: 3_300_000 });
+    expect((await tools.scanner('price-losers', p.now())).rows).toMatchObject([{ symbol: 'RELIANCE', ltp: 1_380, metric: -0.72, volume: 3_300_000, oi: null }]);
+    expect((await tools.scanner('price-gainers', p.now())).rows).toEqual([]);
   });
 
   it('option scanners come from the snapshot: rows without live inputs are left out, turnover = volume × ATP', async () => {

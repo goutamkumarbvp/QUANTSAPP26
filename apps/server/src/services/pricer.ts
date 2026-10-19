@@ -3,7 +3,8 @@
  * the instrument master. Nothing is synthesised: no spreads around the LTP, no model premium. Blank
  * rules (see services/live.ts): ltp only when it is a trade of the live session; bid/ask only from a
  * live book (open session, quote ≤ 10 s old); previous close/OI from the quote, else the previous
- * session's official files; IV solved from the premium by md.pricing. An expired contract is valued
+ * session's official files; IV solved from the premium by md.pricing (at its valuation time: outside the
+ * session the close of the last session; an LTP at its own trade time). An expired contract is valued
  * at the exchange's final settlement (md.history.settlement), else NoLiveData until it is published.
  */
 import { expiryTs, formatExpiry, type InstrumentType } from '@q26/core';
@@ -100,8 +101,8 @@ export class Pricer {
     return l;
   }
 
-  /** Lot size of a contract on its last listed day, from the official files (expired contracts). */
-  private pastLotSize(key: InstrumentKey): number | null {
+  /** Lot size of a contract on its last listed day (its expiry), from the official files (expired contracts); null when not loaded. */
+  pastLotSize(key: InstrumentKey): number | null {
     if (!key.expiry) return null;
     try {
       if (key.kind === 'FUT') return this.md.history.dailyFutures(key.symbol, key.expiry, key.expiry).find((f) => f.expiry === key.expiry)?.lotSize ?? null;
@@ -169,8 +170,10 @@ export class Pricer {
     let iv: number | null = null;
     if (s.type === 'EQ') iv = pct(md.pricing.atmIv(u.symbol));
     else if (s.type !== 'FUT') {
-      const premium = saneMid(book) ?? ltp;
-      if (premium !== null) iv = pct(md.pricing.iv({ symbol: u.symbol, expiry: s.expiry!, type: s.type, strike: s.strike as number, premium }));
+      // Valued at md.pricing's valuation time; an LTP (no sane live book) at its own trade time.
+      const mid = saneMid(book);
+      const premium = mid ?? ltp;
+      if (premium !== null) iv = pct(md.pricing.iv({ symbol: u.symbol, expiry: s.expiry!, type: s.type, strike: s.strike as number, premium, ...(mid === null ? { ltt: q.ltt } : {}) }));
     }
     const reasons: string[] = [];
     if (ltp === null) reasons.push(`${label} has not traded in the live session`);

@@ -164,13 +164,17 @@ interface NearFutureRow {
   buildUp: BuildUp | null;
 }
 
-/** Flow of one recorded minute (volume = buy + sell + unclassified). */
+/** Flow of one recorded minute (volume = buy + sell + unclassified; gapVolume apart, never classified). */
 interface FlowMin {
   ts: number;
   volume: number;
   buyVolume: number;
   sellVolume: number;
   unclassified: number;
+  /** Units reported after a feed gap that ended in the minute (MinuteRecord.gapVolume), 0 when none. */
+  gapVolume: number;
+  /** The minute's volume is a lower bound (MinuteRecord.partial). */
+  partial: boolean;
   close: number | null;
 }
 
@@ -179,35 +183,44 @@ export type LastMinuteFlow = OrderFlowSummary & { ts: number; close: number | nu
 
 /**
  * A recorded minute as order flow. The recorder classifies every unit of Δvolume (buy / sell /
- * unclassified); a record without the split is counted as unclassified, never divided up.
+ * unclassified); a record without the split is counted as unclassified, never divided up. The volume
+ * reported after a feed gap (gapVolume) is carried apart and never classified.
  */
 function flowOf(r: MinuteRecord): FlowMin {
   const buy = isNum(r.buyVolume) && r.buyVolume > 0 ? r.buyVolume : 0;
   const sell = isNum(r.sellVolume) && r.sellVolume > 0 ? r.sellVolume : 0;
-  const unclassified = Math.max(0, (r.volume as number) - buy - sell);
-  return { ts: r.ts, volume: buy + sell + unclassified, buyVolume: buy, sellVolume: sell, unclassified, close: r.traded ? r.close : null };
+  const unclassified = Math.max(0, (isNum(r.volume) ? r.volume : 0) - buy - sell);
+  const gapVolume = isNum(r.gapVolume) && r.gapVolume > 0 ? r.gapVolume : 0;
+  return { ts: r.ts, volume: buy + sell + unclassified, buyVolume: buy, sellVolume: sell, unclassified, gapVolume, partial: r.partial === true, close: r.traded ? r.close : null };
 }
 
-/** Totals over minutes; shares are of the classified volume, the unclassified share is reported beside them. */
-export function summariseOrderFlow(minutes: readonly { volume: number; buyVolume: number; sellVolume: number; unclassified: number }[]): OrderFlowSummary {
+/**
+ * Totals over minutes; shares are of the classified volume, the unclassified share is reported beside
+ * them. Volume reported after feed gaps is summed apart (gapVolume) and never classified.
+ */
+export function summariseOrderFlow(minutes: readonly { volume: number; buyVolume: number; sellVolume: number; unclassified: number; gapVolume?: number; partial?: boolean }[]): OrderFlowSummary {
   let buy = 0;
   let sell = 0;
   let uncl = 0;
+  let gap = 0;
+  let partialMinutes = 0;
   for (const m of minutes) {
     buy += m.buyVolume;
     sell += m.sellVolume;
     uncl += m.unclassified;
+    gap += m.gapVolume ?? 0;
+    if (m.partial) partialMinutes++;
   }
   const classified = buy + sell;
   const volume = classified + uncl;
   const buyPct = classified > 0 ? r1((buy / classified) * 100) : null;
   let sentiment: OrderFlowSummary['sentiment'];
-  if (volume === 0) sentiment = 'No trades';
+  if (volume === 0) sentiment = gap > 0 ? 'Feed gap' : 'No trades';
   else if (buyPct === null) sentiment = 'Not classified';
   else if (buyPct >= 50 + FLOW_BALANCED_BAND) sentiment = 'Buyers dominant';
   else if (buyPct <= 50 - FLOW_BALANCED_BAND) sentiment = 'Sellers dominant';
   else sentiment = 'Balanced';
-  return { buyVolume: buy, sellVolume: sell, unclassified: uncl, volume, delta: buy - sell, buyPct, unclassifiedPct: volume > 0 ? r1((uncl / volume) * 100) : null, sentiment };
+  return { buyVolume: buy, sellVolume: sell, unclassified: uncl, volume, gapVolume: gap, partialMinutes, delta: buy - sell, buyPct, unclassifiedPct: volume > 0 ? r1((uncl / volume) * 100) : null, sentiment };
 }
 
 function signalFor(type: OptKind, bu: BuildUp | null): string {
@@ -408,27 +421,27 @@ export class MarketTools {
 
       case 'price-gainers':
       case 'price-losers': {
+        // Stock (EQ) rows carry the stock's own values: its session volume from its quote; no OI or
+        // build-up (a stock has none; its future's are not the stock's). Gainers are up, losers down.
         const sign = id === 'price-gainers' ? 1 : -1;
         const stocks = md.ref.underlyings().filter((u) => u.kind === 'stock');
-        const futs = new Map(this.nearFutures().rows.map((r) => [r.symbol, r]));
-        const quotes: { symbol: string; ltp: number; changePct: number }[] = [];
+        const quotes: { symbol: string; ltp: number; changePct: number; volume: number | null }[] = [];
         let noPrev = 0;
         for (const u of stocks) {
           try {
             const q = underlyingQuote(md, u.symbol);
+            const vol = md.live.quote(spotKey(u.symbol))?.volume;
             if (q.changePct === null) noPrev++;
-            else quotes.push({ symbol: u.symbol, ltp: q.ltp, changePct: q.changePct });
+            else quotes.push({ symbol: u.symbol, ltp: q.ltp, changePct: q.changePct, volume: isNum(vol) ? vol : null });
           } catch (e) {
             if (!(e instanceof NoLiveData)) throw e;
           }
         }
         if (!quotes.length) throw new NoLiveData(noPrev ? `${noPrev} stocks are live but their previous close is not available` : 'No live F&O stock prices');
         if (noPrev) gaps.add('changePct', `${noPrev} live stocks have no previous close (left out)`);
-        const rows = top(quotes, (q) => sign * q.changePct).map((q) => {
-          const f = futs.get(q.symbol);
-          return eqRow(q.symbol, q, q.changePct, '% Chg', f ? { oi: f.oi, oiChangePct: f.oiChangePct, volume: f.volume, buildUp: f.buildUp } : {});
-        });
-        return done(rows, `${quotes.length} of ${stocks.length} F&O stocks with a live price and the previous close`);
+        const moved = quotes.filter((q) => sign * q.changePct > 0);
+        const rows = top(moved, (q) => sign * q.changePct).map((q) => eqRow(q.symbol, q, q.changePct, '% Chg', { volume: q.volume }));
+        return done(rows, `${quotes.length} of ${stocks.length} F&O stocks with a live price and the previous close (${moved.length} ${sign > 0 ? 'up' : 'down'})`);
       }
 
       case 'iv-gainers':
@@ -942,7 +955,7 @@ export class MarketTools {
     const date = currentSession(md, ts);
     const r = md.intraday
       .bars(futKey(s, fe), date)
-      .filter((x) => isNum(x.volume) && x.ts + MINUTE <= ts)
+      .filter((x) => (isNum(x.volume) || isNum(x.gapVolume)) && x.ts + MINUTE <= ts)
       .at(-1);
     if (!r) return fail(`No recorded minute of the ${s} ${formatExpiry(fe)} future on ${date}`);
     const f = flowOf(r);
@@ -971,7 +984,7 @@ export class MarketTools {
 
     const all = md.intraday.bars(c.key, date);
     // Completed minutes only (live: ended by now); minutes without a volume (none for futures/options) carry no flow.
-    const recs = all.filter((r) => isNum(r.volume) && (!live || r.ts + MINUTE <= ts));
+    const recs = all.filter((r) => (isNum(r.volume) || isNum(r.gapVolume)) && (!live || r.ts + MINUTE <= ts));
     if (!recs.length) {
       throw new NoLiveData(
         all.length
@@ -994,6 +1007,8 @@ export class MarketTools {
         buyVolume: f.buyVolume,
         sellVolume: f.sellVolume,
         unclassified: f.unclassified,
+        gapVolume: f.gapVolume > 0 ? f.gapVolume : null,
+        partial: f.partial,
         delta,
         cumDelta: cum,
         buyPct: classified > 0 ? r1((f.buyVolume / classified) * 100) : null,
@@ -1020,6 +1035,9 @@ export class MarketTools {
       case 'No trades':
         signal = `${span}: no trades in this contract`;
         break;
+      case 'Feed gap':
+        signal = `${span}: the feed had a gap before this minute — ${formatCompact(lastMinute.gapVolume)} traded during the gap, not classified`;
+        break;
       case 'Not classified':
         signal = `${span}: ${formatCompact(lastMinute.volume)} traded, none of it classifiable (no usable bid/ask before the trades)`;
         break;
@@ -1029,6 +1047,8 @@ export class MarketTools {
       default:
         signal = `${span}: ${who} were more aggressive (${(lastMinute.buyPct as number).toFixed(0)}% of classified volume bought${unclText})${trend5}`;
     }
+    if (lastMinute.sentiment !== 'Feed gap' && lastMinute.gapVolume > 0) signal += `; a feed gap ended in this minute: ${formatCompact(lastMinute.gapVolume)} traded during the gap are not classified`;
+    if (lastMinute.partialMinutes > 0) signal += '; recording started inside this minute, so its volume is a lower bound';
     signal += ` — ${ORDER_FLOW_METHOD}`;
 
     const gaps = new Gaps();
@@ -1036,6 +1056,14 @@ export class MarketTools {
     const missing = Math.round((last.ts - first) / MINUTE) + 1 - recs.length;
     const open0 = md.calendar.ts(date, 0);
     if (first > open0) gaps.add('minutes', `Recording of ${c.label} on ${date} starts at ${formatTimeIST(first)}`);
+    const gapMins = flows.filter((f) => f.gapVolume > 0);
+    if (gapMins.length) {
+      gaps.add('feedGaps', `${gapMins.length} minute${gapMins.length > 1 ? 's' : ''} (${gapMins.slice(0, 5).map((f) => formatTimeIST(f.ts)).join(', ')}${gapMins.length > 5 ? ' …' : ''}) follow a feed gap: ${formatCompact(session.gapVolume)} traded during the gaps at unknown times, shown as gapVolume, not in the minutes' volume and never classified`);
+    }
+    const partialMins = flows.filter((f) => f.partial);
+    if (partialMins.length) {
+      gaps.add('partial', `Recording of ${c.label} started (or restarted) inside ${partialMins.map((f) => formatTimeIST(f.ts)).slice(0, 5).join(', ')}: the volume of ${partialMins.length > 1 ? 'those minutes is a lower bound' : 'that minute is a lower bound'} (trades before the first tick seen are not counted)`);
+    }
     const coverage = `${recs.length} recorded minutes ${formatTimeIST(first)}–${formatTimeIST(last.ts + MINUTE)}${missing > 0 ? `; ${missing} minutes in between have no record (no ticks received)` : ''}`;
 
     const limit = Math.max(1, Math.min(SESSION_MINUTES, Math.floor(opts.limit ?? 60) || 60));

@@ -94,6 +94,14 @@ export interface Quote {
   ts: number;
 }
 
+/**
+ * GET /api/quotes: quotes of the requested underlyings that have one (live, or recorded at `?at=`);
+ * every symbol left out (unknown, or without a price) is named in `gaps` (symbol → reason).
+ */
+export interface QuotesResponse extends DataGaps {
+  quotes: Quote[];
+}
+
 /** Candle; daily bars of contracts carry the official close only (no open/high/low), index bars no volume. */
 export interface Candle {
   ts: number;
@@ -131,6 +139,12 @@ export interface OptionQuote {
   timeValue: number | null;
   /** Premium the IV/Greeks are solved from: 'mid' of a live two-sided book, else the session 'ltp'; null = no usable premium. */
   ivSource: 'mid' | 'ltp' | null;
+  /**
+   * Time the IV/Greeks are valued at (epoch ms; time to expiry is measured from it): the chain's
+   * `valuationTs` for a mid; for an 'ltp' premium the LTP's own trade time when the feed reports one
+   * (capped by `valuationTs`), else `valuationTs`; null without a premium.
+   */
+  ivTs: number | null;
   /** Time of the leg's quote (epoch ms); null when there is no quote. */
   ts: number | null;
 }
@@ -147,16 +161,26 @@ export interface OptionChain extends DataGaps {
   expiries: string[];
   /** Evaluation time (now, or the ?at= time of a recorded chain). */
   ts: number;
+  /**
+   * Time IV, Greeks, forward, carry and daysToExpiry are valued at: `ts` while the session is open,
+   * otherwise the close (15:30 IST) of the last session before it (its premiums are the last ones).
+   */
+  valuationTs: number;
   spot: number | null;
   spotChange: number | null;
   spotChangePct: number | null;
+  /** Time of `spot` (epoch ms): the live quote's, or the start of the recorded minute of an as-of chain; null without a spot. */
+  spotTs: number | null;
   /** Same-expiry future when listed, else the nearest future (live price). */
   future: number | null;
   futureExpiry: string | null;
   /** Forward of this expiry (Black-76 input) and where it came from. */
   forward: number | null;
   forwardSource: 'future' | 'parity' | 'spot' | null;
-  /** Carry yield q such that spot·e^{(r−q)T} = this expiry's forward; null without a live spot. */
+  /**
+   * Carry yield q such that spot·e^{(r−q)T} = this expiry's forward; null without a live spot, and
+   * when the forward is taken from spot (forwardSource 'spot': no dividend yield is implied, `gaps.carry`).
+   */
   carry: number | null;
   lotSize: number;
   strikeStep: number;
@@ -883,7 +907,11 @@ export interface OptimizerRequest {
 
 /* ------------------------- opening range & order flow ------------------------- */
 
-export interface OrbResponse {
+/**
+ * Opening range of one session. A completed session's ltp/changePct/dayHigh/dayLow are null (with
+ * `gaps.day`) when its 1-minute bars do not reach the close: the last bar is not the session's close.
+ */
+export interface OrbResponse extends DataGaps {
   symbol: string;
   date: string;
   rangeMinutes: number;
@@ -891,12 +919,13 @@ export interface OrbResponse {
   rangeStartTs: number;
   rangeEndTs: number;
   live: boolean;
-  /** Live price of the underlying (live session), else the last bar's close. */
-  ltp: number;
+  /** Live price of the underlying (live session), else the session's last bar close (null when the bars stop before the close). */
+  ltp: number | null;
   /** vs the previous session's close (quote, else the official close); null when unknown. */
   changePct: number | null;
-  dayHigh: number;
-  dayLow: number;
+  /** High/low of the bars so far (live session), else of the whole session (null when the bars stop before the close). */
+  dayHigh: number | null;
+  dayLow: number | null;
   evaluation: OrbEvaluation;
   summary: string;
   /** Traded 1-minute candles from 09:15 (minutes without a trade are absent); the last one may still be forming when `live`. */
@@ -974,6 +1003,14 @@ export interface OrderFlowMinute {
   buyVolume: number;
   sellVolume: number;
   unclassified: number;
+  /**
+   * Units reported by the first tick after a feed gap that ended in this minute (no tick of the
+   * contract for a whole minute or more: a dropped feed, a reconnect): they traded at an unknown time
+   * during the gap, so they are not in `volume` and never classified. Null when no gap ended here.
+   */
+  gapVolume: number | null;
+  /** `volume` is a lower bound: recording of the contract started (or restarted) inside this minute. */
+  partial: boolean;
   /** buyVolume − sellVolume. */
   delta: number;
   cumDelta: number;
@@ -988,16 +1025,23 @@ export interface OrderFlowSummary {
   buyVolume: number;
   sellVolume: number;
   unclassified: number;
-  /** All units traded = buyVolume + sellVolume + unclassified. */
+  /** All units traded in the minutes = buyVolume + sellVolume + unclassified (gapVolume excluded). */
   volume: number;
+  /** Units reported after feed gaps (traded at an unknown time during the gap): not in `volume`, never classified. */
+  gapVolume: number;
+  /** Minutes whose volume is a lower bound (recording of the contract started or restarted inside them). */
+  partialMinutes: number;
   /** buyVolume − sellVolume. */
   delta: number;
   /** Buy share of the classified volume (%); null when nothing was classified. */
   buyPct: number | null;
   /** Unclassified share of all volume (%); null when nothing traded. */
   unclassifiedPct: number | null;
-  /** On the classified volume (±5 points around 50 % = balanced); 'Not classified' when trades happened but none could be classified. */
-  sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced' | 'No trades' | 'Not classified';
+  /**
+   * On the classified volume (±5 points around 50 % = balanced); 'Not classified' when trades happened
+   * but none could be classified; 'Feed gap' when the only volume is gapVolume (traded during a feed gap).
+   */
+  sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced' | 'No trades' | 'Not classified' | 'Feed gap';
 }
 
 /** GET /api/order-flow/:symbol — recorded minutes only (503 when the contract was not recorded that session). */
@@ -1059,9 +1103,27 @@ export interface DashboardChain extends DataGaps {
   daysToExpiry: number | null;
   /** Strikes the OI aggregates (PCR, max pain, support/resistance) cover. */
   coverage: string | null;
-  orb: { high: number; low: number; trend: OrbTrend; whipsaw: boolean; reentered: boolean; summary: string } | null;
-  /** Near future's last completed recorded minute (quote-rule estimate, see `method`). */
-  flow: { buyPct: number | null; unclassifiedPct: number | null; delta: number; sentiment: OrderFlowSummary['sentiment']; method: typeof ORDER_FLOW_METHOD; ts: number } | null;
+  /**
+   * Opening range of session `date`: today's once it has opened (`live` while the session is open);
+   * before 09:15 (and on holidays) the previous session's, which `note` says.
+   */
+  orb: { date: string; live: boolean; note: string | null; high: number; low: number; trend: OrbTrend; whipsaw: boolean; reentered: boolean; summary: string } | null;
+  /**
+   * Near future's last completed recorded minute (quote-rule estimate, see `method`). `gapVolume`: units
+   * reported after a feed gap that ended in that minute (never classified); `partial`: its volume is a
+   * lower bound (recording started inside it); `note` explains either.
+   */
+  flow: {
+    buyPct: number | null;
+    unclassifiedPct: number | null;
+    delta: number;
+    sentiment: OrderFlowSummary['sentiment'];
+    method: typeof ORDER_FLOW_METHOD;
+    ts: number;
+    gapVolume: number;
+    partial: boolean;
+    note: string | null;
+  } | null;
 }
 
 /**

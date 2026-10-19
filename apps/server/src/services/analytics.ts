@@ -513,7 +513,10 @@ export class Analytics {
     if (hist.length < MIN_IV_HISTORY) {
       return { ivr: null, ivp: null, reason: `IV rank/percentile need ${IV_WINDOW} sessions of official ATM IV history (at least ${MIN_IV_HISTORY}); ${hist.length} loaded` };
     }
-    return { ivr: rn(ivRank(current, hist), 1), ivp: rn(ivPercentile(current, hist), 1) };
+    const ivr = ivRank(current, hist);
+    const ivp = ivPercentile(current, hist);
+    if (ivr === null || ivp === null) return { ivr: null, ivp: null, reason: `The official ATM IV history of the last ${hist.length} sessions is flat: IV rank/percentile are undefined` };
+    return { ivr: rn(ivr, 1), ivp: rn(ivp, 1) };
   }
 
   /** Previous-session close of an underlying for a session: the quote's (same session), else official. */
@@ -604,7 +607,9 @@ export class Analytics {
 
   /**
    * Opening range of one session from recorded 1-minute bars (traded minutes only), else Kotak
-   * 1-minute history (last 30 sessions). Live session: the minute in progress is the last bar.
+   * 1-minute history (last 30 sessions). Live session: the minute in progress is the last bar. A
+   * completed session reports its last price, change and day high/low only when its bars reach the
+   * close (ORB_CLOSE_SLACK_MIN); else they are null with the reason in `gaps.day`.
    */
   async orb(symbol: string, _ts?: number, opts: { date?: string; rangeMinutes?: number; rule?: OrbRule } = {}): Promise<OrbResponse> {
     const md = this.md;
@@ -619,7 +624,11 @@ export class Analytics {
     if (!day.bars.length) throw new NoLiveData(`No ${s} trade recorded on ${date} yet`);
     const ev = this.evaluate(day, s, date, live ? now : md.calendar.ts(date, M), rangeMinutes, rule);
     const last = day.bars[day.bars.length - 1];
-    const ltp = (live ? livePrice(md, md.live.quote(spotKey(s))) : null) ?? last.close;
+    const gaps = new Gaps();
+    // A completed session's close and day range come from bars that reach its close only.
+    const whole = live || last.ts >= md.calendar.ts(date, M - ORB_CLOSE_SLACK_MIN);
+    if (!whole) gaps.add('day', `${day.source === 'kotak' ? 'Kotak 1-minute history' : 'Recording'} of ${s} on ${date} ends at ${formatTimeIST(last.ts + MINUTE)}: the session's last price and day high/low are not known`);
+    const ltp = whole ? ((live ? livePrice(md, md.live.quote(spotKey(s))) : null) ?? last.close) : null;
     return {
       symbol: s,
       date,
@@ -630,12 +639,13 @@ export class Analytics {
       live,
       ltp,
       changePct: changeOf(ltp, this.prevCloseOf(s, date)).changePct,
-      dayHigh: Math.max(...day.bars.map((b) => b.high)),
-      dayLow: Math.min(...day.bars.map((b) => b.low)),
+      dayHigh: whole ? Math.max(...day.bars.map((b) => b.high)) : null,
+      dayLow: whole ? Math.min(...day.bars.map((b) => b.low)) : null,
       evaluation: ev,
       summary: describeOrb(ev),
       bars: day.bars,
       source: day.source,
+      ...gaps.out(),
     };
   }
 
@@ -1467,7 +1477,9 @@ export class Analytics {
       strikes.push(rowK);
     });
     if (iv.every((row) => row.every((v) => v === null))) throw new NoLiveData(Object.values(gaps.out().gaps ?? {}).join('; ') || `No ${s} option premium to solve`);
-    return { symbol: s, spot, expiries, daysToExpiry: expiries.map((e) => +daysToExpiry(now, e).toFixed(1)), moneyness: [...B], iv, strikes, ...gaps.out() };
+    // Days to expiry from the valuation time the IVs are solved at (outside the session: the last close).
+    const valTs = md.pricing.valuationTs(now);
+    return { symbol: s, spot, expiries, daysToExpiry: expiries.map((e) => +daysToExpiry(valTs, e).toFixed(1)), moneyness: [...B], iv, strikes, ...gaps.out() };
   }
 
   /** Realised-volatility cone of the consecutive official daily closes (≤ 505); short windows are null. */
@@ -1509,7 +1521,8 @@ export class Analytics {
   /**
    * Straddle/strangle premium through a session from recorded minutes (Kotak 1-minute history for
    * active contracts the recorder does not hold). Rolling: the centre is the strike nearest the
-   * forward of that time (same-expiry future, else spot carried at r).
+   * forward of that time (same-expiry future, else spot carried at r). 400 for a fixed strike outside
+   * the expiry's strikes, a negative width, or one wider than the strikes allow.
    */
   async straddle(symbol: string, expiryIn: string | undefined, strikeIn: number | 'atm', mode: 'rolling' | 'fixed', date: string | undefined, interval: number, _ts?: number, strangleWidth = 0): Promise<StraddleResponse> {
     const md = this.md;
@@ -1527,7 +1540,14 @@ export class Analytics {
     const strikes = this.strikesFor(s, expiry, day, current);
     if (!strikes.length) throw new NoLiveData(`No ${s} ${expiry} strikes recorded or listed for ${day}`);
     const nearest = (x: number) => strikes.reduce((a, k) => (Math.abs(k - x) < Math.abs(a - x) ? k : a));
-    const width = isNum(strangleWidth) ? Math.max(0, strangleWidth) : 0;
+    // A strike or width outside the strikes is refused, not snapped to the nearest end of the strip.
+    const lo = strikes[0];
+    const hi = strikes[strikes.length - 1];
+    const range = `${s} ${expiry} strikes recorded or listed for ${day} (${lo}–${hi})`;
+    if (strikeIn !== 'atm' && !(isNum(strikeIn) && strikeIn >= lo && strikeIn <= hi)) throw httpError(400, `Strike ${strikeIn} is outside the ${range}`);
+    if (!(isNum(strangleWidth) && strangleWidth >= 0)) throw httpError(400, `Strangle width must be a non-negative number of points (got ${strangleWidth})`);
+    if (2 * strangleWidth > hi - lo) throw httpError(400, `Strangle width ${strangleWidth} is wider than the ${range} allow`);
+    const width = strangleWidth;
     const load = this.loader(day, true);
     const sources = new Set<'recorded' | 'kotak'>();
     const closesOf = async (key: InstrumentKey, track = false) => {
@@ -1817,7 +1837,8 @@ export class Analytics {
     const t0 = performance.now();
     const out = optimizeStrategies({
       spot: chain.spot,
-      nowTs: now,
+      // The chain's IVs and carry are solved at its valuation time (outside the session: the last close).
+      nowTs: chain.valuationTs,
       expiry: chain.expiry,
       lotSize: chain.lotSize,
       rows,
@@ -1889,7 +1910,8 @@ export class Analytics {
         const ltp = livePrice(md, q, dates);
         const mid = saneMid(liveBook(md, q, now));
         const premium = mid ?? ltp;
-        const iv = premium !== null && forward !== null ? md.pricing.iv({ symbol: u.symbol, expiry, type, strike, premium, forward }) : null;
+        // Valued at md.pricing's valuation time; an LTP (no sane live book) at its own trade time.
+        const iv = premium !== null && forward !== null ? md.pricing.iv({ symbol: u.symbol, expiry, type, strike, premium, forward, ...(mid === null ? { ltt: q.ltt } : {}) }) : null;
         const eod = prev.rows.get(`${type}|${strike}`);
         const prevLtp = isPos(q.prevClose) ? q.prevClose : tradedClose(eod);
         const oi = isNum(q.oi) ? q.oi : null;

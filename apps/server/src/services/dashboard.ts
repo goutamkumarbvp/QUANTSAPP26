@@ -11,7 +11,7 @@
  *    order flow (MarketTools.lastMinuteFlow, a labelled quote-rule estimate), each part separately;
  *  - fiiDii: the latest official FII/DII days.
  */
-import type { BuildUpCounts, DashboardChain, DashboardMover, DashboardResponse, FiiDiiDay, FuturesBuildUpRow, Quote } from '@q26/core';
+import { formatIndian, formatTimeIST, type BuildUpCounts, type DashboardChain, type DashboardMover, type DashboardResponse, type FiiDiiDay, type FuturesBuildUpRow, type Quote } from '@q26/core';
 import { NoLiveData, type MarketDataProvider } from '../live/types';
 import { emptyCounts, type Analytics } from './analytics';
 import { buildOptionChain, changeOf, clockInfo, eodClose, Gaps, liveDates, livePrice, sessionDateOf, spotKey, underlyingQuote } from './live';
@@ -87,13 +87,22 @@ async function chainCard(md: MarketDataProvider, analytics: Analytics, tools: Ma
   try {
     const o = await analytics.orb(symbol, ts);
     const ev = o.evaluation;
-    card.orb = { high: ev.high, low: ev.low, trend: ev.trend, whipsaw: ev.whipsaw, reentered: ev.reentered, summary: o.summary };
+    // Before 09:15 (and on a non-trading day) the range shown is the last session's: say so.
+    const today = md.calendar.session(ts).date;
+    const note = o.date === today ? null : md.calendar.isTradingDay(today) ? `Previous session (${o.date}): today's session opens at 09:15` : `Last session (${o.date}): ${today} is not a trading day`;
+    card.orb = { date: o.date, live: o.live, note, high: ev.high, low: ev.low, trend: ev.trend, whipsaw: ev.whipsaw, reentered: ev.reentered, summary: o.summary };
   } catch (e) {
     gaps.add('orb', reasonOf(e, `dashboard.${symbol}.orb`, onError));
   }
   try {
     const f = tools.lastMinuteFlow(symbol, ts, (why) => gaps.add('flow', why));
-    if (f) card.flow = { buyPct: f.buyPct, unclassifiedPct: f.unclassifiedPct, delta: f.delta, sentiment: f.sentiment, method: f.method, ts: f.ts };
+    if (f) {
+      const partial = f.partialMinutes > 0;
+      const notes: string[] = [];
+      if (f.gapVolume > 0) notes.push(`${formatTimeIST(f.ts)}: a feed gap ended in this minute — ${formatIndian(f.gapVolume, 0)} units traded during the gap are not classified`);
+      if (partial) notes.push(`${formatTimeIST(f.ts)}: recording started inside this minute — its volume is a lower bound`);
+      card.flow = { buyPct: f.buyPct, unclassifiedPct: f.unclassifiedPct, delta: f.delta, sentiment: f.sentiment, method: f.method, ts: f.ts, gapVolume: f.gapVolume, partial, note: notes.length ? notes.join('; ') : null };
+    }
   } catch (e) {
     gaps.add('flow', reasonOf(e, `dashboard.${symbol}.flow`, onError));
   }

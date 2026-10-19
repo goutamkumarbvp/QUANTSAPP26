@@ -109,7 +109,7 @@ function parseLines(text: string): unknown[] {
   return out;
 }
 
-const OPTIONAL_NUM_FIELDS = ['volume', 'oi', 'bid', 'ask', 'bidQty', 'askQty', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
+const OPTIONAL_NUM_FIELDS = ['volume', 'gapVolume', 'oi', 'bid', 'ask', 'bidQty', 'askQty', 'totalBuyQty', 'totalSellQty', 'buyVolume', 'sellVolume', 'unclassified', 'atp'] as const;
 
 /** A valid record (unknown fields dropped). `traded` is required: there is no default for it. */
 function toMinuteRecord(v: unknown): MinuteRecord | undefined {
@@ -118,6 +118,7 @@ function toMinuteRecord(v: unknown): MinuteRecord | undefined {
   if (!isNum(o.ts) || !isNum(o.open) || !isNum(o.high) || !isNum(o.low) || !isNum(o.close) || typeof o.traded !== 'boolean') return undefined;
   const rec: MinuteRecord = { ts: o.ts, open: o.open, high: o.high, low: o.low, close: o.close, traded: o.traded };
   for (const f of OPTIONAL_NUM_FIELDS) if (isNum(o[f])) rec[f] = o[f];
+  if (o.partial === true) rec.partial = true;
   return rec;
 }
 
@@ -131,10 +132,11 @@ function toChainMinute(v: unknown): ChainMinute | undefined {
   return { ts: o.ts, spot: o.spot, ceOi: o.ceOi, peOi: o.peOi, ceVolume: o.ceVolume, peVolume: o.peVolume, pcr: numOrNull(o.pcr), maxPain: numOrNull(o.maxPain), atmStrike: o.atmStrike, atmIv: numOrNull(o.atmIv) };
 }
 
-/** Merge two records of the same minute (written before and after a restart). */
+/** Merge two records of the same minute (written before and after a restart: the later one is then `partial`, and so is the merge). */
 function mergeSameMinute(a: MinuteRecord, b: MinuteRecord): MinuteRecord {
   const out: MinuteRecord = { ...a, ...b, open: a.open, high: Math.max(a.high, b.high), low: Math.min(a.low, b.low), close: b.close, traded: a.traded || b.traded };
-  for (const f of ['volume', 'buyVolume', 'sellVolume', 'unclassified'] as const) {
+  if (a.partial || b.partial) out.partial = true;
+  for (const f of ['volume', 'gapVolume', 'buyVolume', 'sellVolume', 'unclassified'] as const) {
     if (a[f] !== undefined || b[f] !== undefined) out[f] = (a[f] ?? 0) + (b[f] ?? 0);
   }
   return out;

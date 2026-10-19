@@ -5,7 +5,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { z, ZodError } from 'zod';
-import { expiryTs, type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type ServerMessage, type SymbolInfo } from '@q26/core';
+import { expiryTs, type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type QuotesResponse, type ServerMessage, type SymbolInfo } from '@q26/core';
 import { profile } from './auth';
 import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
@@ -185,8 +185,8 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   /** Index underlyings from the instrument master (by name while it is not loaded). */
   const indexSymbols = (): string[] => (md.ref.ready() ? md.ref.underlyings().filter((u) => u.kind === 'index').map((u) => u.symbol) : INDEX_SYMBOLS);
-  /** Quotes of the symbols that have one (live, or recorded at `asOf`); 503 when none has. */
-  const quotesOf = (symbols: string[], asOf?: number): Quote[] => {
+  /** Quotes of the symbols that have one (live, or recorded at `asOf`); 503 when none has. Each one left out is added to `gaps` (symbol → reason). */
+  const quotesOf = (symbols: string[], asOf?: number, gaps?: Gaps): Quote[] => {
     const out: Quote[] = [];
     const why: string[] = [];
     for (const s of symbols) {
@@ -195,6 +195,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
       } catch (err) {
         if (!(err instanceof NoLiveData)) throw err;
         why.push(err.message);
+        gaps?.add(s, err.message);
       }
     }
     if (!out.length && why.length) throw new NoLiveData([...new Set(why)].slice(0, 3).join('; '));
@@ -233,9 +234,27 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   app.get('/api/clock', async () => clockInfo(md));
 
-  app.get('/api/quotes', async (req) => {
+  // Unknown symbols in the list are left out and named in `gaps` (404 only when none is known).
+  app.get('/api/quotes', async (req): Promise<QuotesResponse> => {
     const list = [...new Set((qs(req).symbols ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))].slice(0, 80);
-    return quotesOf(list.length ? list : indexSymbols(), at(req));
+    const gaps = new Gaps();
+    const known: string[] = [];
+    let unknown: Error | null = null;
+    for (const s of list.length ? list : indexSymbols()) {
+      try {
+        md.ref.underlying(s);
+        known.push(s);
+      } catch (err) {
+        if (err instanceof NoLiveData || (err as { statusCode?: number }).statusCode !== 404) known.push(s); // master not loaded: quotesOf says so
+        else {
+          unknown ??= err as Error;
+          gaps.add(s, (err as Error).message);
+        }
+      }
+    }
+    if (!known.length && unknown) throw unknown;
+    const quotes = quotesOf(known, at(req), gaps);
+    return { quotes, ...gaps.out() };
   });
 
   app.get('/api/indices', async (req) => quotesOf(indexSymbols(), at(req)));
@@ -368,10 +387,20 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   /* ---------------------------- strategy tools ---------------------------- */
 
+  // A malformed strike or width is a 400, never replaced by ATM / 0 (Analytics also rejects ones outside the strikes).
   app.get<{ Params: { symbol: string } }>('/api/straddle/:symbol', async (req) => {
     const q = qs(req);
-    const strike = q.strike && q.strike !== 'atm' ? num(q.strike, NaN) : 'atm';
-    return an.straddle(req.params.symbol, q.expiry, Number.isFinite(strike as number) || strike === 'atm' ? strike : 'atm', q.mode === 'fixed' ? 'fixed' : 'rolling', q.date, num(q.interval, 1), now(), num(q.width, 0));
+    let strike: number | 'atm' = 'atm';
+    if (q.strike && q.strike !== 'atm') {
+      strike = Number(q.strike);
+      if (!(Number.isFinite(strike) && strike > 0)) throw httpError(400, `strike must be a positive strike price or 'atm' (got '${q.strike}')`);
+    }
+    let width = 0;
+    if (q.width !== undefined && q.width !== '') {
+      width = Number(q.width);
+      if (!(Number.isFinite(width) && width >= 0)) throw httpError(400, `width must be a non-negative number of points (got '${q.width}')`);
+    }
+    return an.straddle(req.params.symbol, q.expiry, strike, q.mode === 'fixed' ? 'fixed' : 'rolling', q.date, num(q.interval, 1), now(), width);
   });
 
   app.post('/api/strategy-chart', async (req) => {

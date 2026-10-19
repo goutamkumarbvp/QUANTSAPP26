@@ -229,6 +229,23 @@ describe('volatility', () => {
     expect(cone[0].min).toBeLessThanOrEqual(cone[0].median);
     expect(cone[0].median).toBeLessThanOrEqual(cone[0].max);
   });
+
+  it('IV rank / percentile are null (not 50) for a flat or too-short history', () => {
+    // Flat: no range to rank in (was 50 for rank, 0 for percentile).
+    expect(ivRank(14, [14, 14, 14])).toBeNull();
+    expect(ivPercentile(14, [14, 14, 14])).toBeNull();
+    expect(ivRank(15, [14, 14, 14])).toBeNull();
+    expect(ivPercentile(15, [14, 14, 14])).toBeNull();
+    // Too short (one observation, or none finite) and a non-finite current IV.
+    expect(ivRank(15, [10])).toBeNull();
+    expect(ivPercentile(15, [10])).toBeNull();
+    expect(ivRank(15, [Number.NaN, Number.NaN])).toBeNull();
+    expect(ivRank(Number.NaN, [10, 20])).toBeNull();
+    expect(ivPercentile(Number.NaN, [10, 20])).toBeNull();
+    // A real range still ranks, including a current IV outside it.
+    expect(ivRank(25, [10, 20])).toBe(100);
+    expect(ivPercentile(25, [10, 20])).toBe(100);
+  });
 });
 
 describe('optimizer', () => {

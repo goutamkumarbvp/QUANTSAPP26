@@ -233,8 +233,25 @@ export interface MinuteRecord {
    * new last-trade time (for index spots: a new index value time). False for quote-only minutes.
    */
   traded: boolean;
-  /** Units traded in the minute (Δ cumulative volume); absent when the feed reports no volume (e.g. index spots). */
+  /**
+   * Units traded in the minute (Δ cumulative volume); absent when the feed reports no volume (e.g.
+   * index spots). Excludes `gapVolume`, so volume = buyVolume + sellVolume + unclassified.
+   */
   volume?: number;
+  /**
+   * Δ cumulative volume reported by the first tick after a feed gap (the instrument's previous tick
+   * was older than the start of the previous minute: a gap spanning whole minutes, a reconnect or a
+   * re-subscription). Those units traded at some time during the gap, not necessarily in this minute:
+   * they are kept out of volume/buyVolume/sellVolume/unclassified and never classified, so that
+   * Σ(volume + gapVolume) still equals the session's Δ cumulative volume. Absent when no gap ended here.
+   */
+  gapVolume?: number;
+  /**
+   * True when the minute's volume is a lower bound: the recorder's volume baseline was set inside it
+   * (recording or the subscription started, e.g. after a restart, with session volume already traded),
+   * so trades of the minute before that first tick are not counted anywhere. Absent otherwise.
+   */
+  partial?: true;
   oi?: number;
   bid?: number;
   ask?: number;
@@ -359,18 +376,30 @@ export interface Pricing {
   /** Risk-free rate (config input, not market data). */
   r: number;
   /**
+   * The time premiums are valued at, i.e. time to expiry is measured from it: `ts` (default now)
+   * while the session is open, otherwise the close (15:30 IST) of the last session before it, whose
+   * premiums are the last ones (they do not decay overnight or over a weekend). With `ltt`, the
+   * last-trade time of an LTP premium: that trade's time when it is of a live session, capped by the
+   * former. Callers report this time next to the IV/Greeks they show.
+   */
+  valuationTs(ts?: number, ltt?: number): number;
+  /**
    * Throws NoLiveData when neither a future, a put-call pair nor a spot price is live, when no live
    * spot is there to imply the carry from, or once the expiry has passed (carry is never NaN).
+   * Valued at valuationTs().
    */
   forward(symbol: string, expiry: string): ForwardEstimate;
   /**
-   * Implied vol (decimal) of a market premium; null when it cannot be solved. Without `forward` the
-   * forward comes from the live quotes (no spot needed when a future or a put-call pair is live); a
-   * past `ts` then gives null (no look-ahead), so as-of callers pass the forward of that time.
+   * Implied vol (decimal) of a market premium; null when it cannot be solved. `ts` (default now) is
+   * taken to its valuation time (valuationTs); `ltt` is the last-trade time of an LTP premium (omit it
+   * for the mid of a live book). Without `forward` the forward comes from the live quotes (no spot
+   * needed when a future or a put-call pair is live); a `ts` before the valuation time of now then
+   * gives null (no look-ahead), so as-of callers pass the forward of that time.
    */
-  iv(input: { symbol: string; expiry: string; type: OptKind; strike: number; premium: number; ts?: number; forward?: number }): number | null;
-  greeks(input: { symbol: string; expiry: string; type: OptKind; strike: number; iv: number; ts?: number; forward?: number }): Greeks | null;
-  /** ATM IV of an expiry (nearest when omitted) from live premiums; null when unavailable. */
+  iv(input: { symbol: string; expiry: string; type: OptKind; strike: number; premium: number; ts?: number; forward?: number; ltt?: number }): number | null;
+  /** Black-76 Greeks at the same time rules as iv(). */
+  greeks(input: { symbol: string; expiry: string; type: OptKind; strike: number; iv: number; ts?: number; forward?: number; ltt?: number }): Greeks | null;
+  /** ATM IV of an expiry (nearest when omitted) from live premiums, valued at valuationTs(); null when unavailable. */
   atmIv(symbol: string, expiry?: string): number | null;
 }
 

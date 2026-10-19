@@ -3,7 +3,8 @@
  * watchlists, on live data only. Each alert is evaluated on the live value of its input:
  *  - PRICE, OPTION_PRICE, OI_CHANGE: the Pricer (live-session trade price; OI vs the previous
  *    session's OI from the quote or the official file);
- *  - IV: ATM IV solved from live premiums (md.pricing.atmIv);
+ *  - IV: ATM IV solved from live premiums (md.pricing.atmIv) at their valuation time: outside the
+ *    session the last close, so unchanged premiums give an unchanged IV (no overnight/weekend drift);
  *  - PCR: the live option chain's aggregate (strikes with OI on both sides), built once per cycle;
  *  - MTM: the strategy's live MTM (StrategyManager);
  *  - ORB_BREAK: the opening range on recorded 1-minute bars (Analytics.orbConfirmed);
@@ -252,6 +253,7 @@ export class AlertService {
   /**
    * Buy % (of the classified volume) of the near future's last completed recorded minute, once that
    * minute completed after the alert was armed and at least MIN_CLASSIFIED_SHARE of it was classified.
+   * A minute that follows a feed gap (gapVolume) or whose volume is a lower bound (partial) is skipped.
    */
   private readFlow(a: AlertDef, cycle: Cycle): Reading {
     let f = cycle.flows.get(a.symbol);
@@ -262,6 +264,9 @@ export class AlertService {
     }
     if (typeof f === 'string') return { skip: f };
     if (f.ts + MINUTE <= (a.armedAt ?? a.createdAt)) return { skip: `Waiting for a minute completed after the alert was armed (last recorded minute ${formatTimeIST(f.ts)})` };
+    // A minute after a feed gap (or one whose recording started inside it) is incomplete: never evaluated.
+    if (f.gapVolume > 0) return { skip: `${formatTimeIST(f.ts)}: a feed gap ended in this minute (${formatIndian(f.gapVolume, 0)} units traded during the gap cannot be classified): not evaluated` };
+    if (f.partialMinutes > 0) return { skip: `${formatTimeIST(f.ts)}: recording of the ${a.symbol} ${formatExpiry(f.expiry)} future started inside this minute (its volume is incomplete): not evaluated` };
     if (f.volume === 0) return { skip: `${formatTimeIST(f.ts)}: no trades in the ${a.symbol} ${formatExpiry(f.expiry)} future` };
     if (f.buyPct === null || (f.unclassifiedPct ?? 0) > (1 - MIN_CLASSIFIED_SHARE) * 100) {
       return { skip: `${formatTimeIST(f.ts)}: only ${(100 - (f.unclassifiedPct ?? 100)).toFixed(0)}% of the volume could be classified (needs ${MIN_CLASSIFIED_SHARE * 100}%)` };

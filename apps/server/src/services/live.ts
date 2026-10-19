@@ -26,6 +26,7 @@ import {
   MARKET_CLOSE_MIN,
   maxPain,
   oiSupportResistance,
+  SESSION_MINUTES,
   type BuildUp,
   type Candle,
   type ChainRow,
@@ -195,6 +196,32 @@ function recordedFromOpen(md: MarketDataProvider, key: InstrumentKey, date: stri
   const recs = md.intraday.bars(key, date).filter((r) => !traded || r.traded);
   if (!recs.length) return false;
   return Math.min(...recs.map((r) => r.ts)) <= md.calendar.ts(date, RECORDING_OPEN_SLACK_MIN);
+}
+
+/**
+ * An as-of (`?at=`) answer needs the recorder to have been running at `at`: the last minute of the
+ * underlying's spot (else of the instrument itself) completed by `at` must have ended at most this
+ * many minutes before `at` (after the close: before the 15:30 close). The algo replay's rule
+ * (SessionTape.alive), with one minute of slack. Otherwise the last recorded values are hours old
+ * and are not shown as the values at `at`.
+ */
+export const AS_OF_RECORDING_SLACK_MIN = 2;
+
+/** `at`, capped at the close of its session date (nothing is recorded after 15:30). */
+function asOfRef(md: MarketDataProvider, at: number): number {
+  return Math.min(at, md.calendar.ts(md.calendar.session(at).date, SESSION_MINUTES));
+}
+
+/** A recorded minute (its start `ts`) completed by `at` shows the recorder running at `at` (AS_OF_RECORDING_SLACK_MIN). */
+export function recordedNear(md: MarketDataProvider, rec: { ts: number } | undefined, at: number): boolean {
+  return !!rec && rec.ts + MINUTE <= at && rec.ts + MINUTE > asOfRef(md, at) - AS_OF_RECORDING_SLACK_MIN * MINUTE;
+}
+
+/** NoLiveData for an as-of time at which the recorder was not running ("last recorded minute HH:MM"). */
+function notRecordingAt(md: MarketDataProvider, what: string, at: number, last: number | undefined): NoLiveData {
+  const ref = asOfRef(md, at);
+  const lastText = last !== undefined ? `last recorded minute ${formatTimeIST(last)}` : 'no minute recorded before it';
+  return new NoLiveData(`Nothing recorded for ${what} at ${formatTimeIST(ref)} on ${md.calendar.session(at).date} (${lastText}): the recorder was not running`);
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -409,10 +436,11 @@ export function underlyingQuote(md: MarketDataProvider, symbol: string): Quote {
 
 /**
  * As-of quote of an underlying at a past `at`, from recorded minutes only: ltp = the last recorded
- * minute close, `ts` = that minute (it can be older than `at` when nothing was recorded since);
- * open/high/low over that day's traded minutes up to `at`, only when the recording covers the
- * session's open (else null); prevClose = official close of the previous session; future = the
- * nearest recorded future; atmIv = the recorded chain minute.
+ * minute close, `ts` = that minute; NoLiveData when that minute ended more than
+ * AS_OF_RECORDING_SLACK_MIN before `at` (the recorder was not running then). open/high/low over that
+ * day's traded minutes up to `at`, only when the recording covers the session's open (else null);
+ * prevClose = official close of the previous session; future = the nearest recorded future and
+ * atmIv = the recorded chain minute, each only when recorded just before `at` (else null).
  */
 export function underlyingQuoteAt(md: MarketDataProvider, symbol: string, at: number): Quote {
   const u = md.ref.underlying(symbol);
@@ -420,16 +448,18 @@ export function underlyingQuoteAt(md: MarketDataProvider, symbol: string, at: nu
   requireRecorded(md, date);
   const rec = md.intraday.at(spotKey(u.symbol), at);
   if (!rec) throw new NoLiveData(`No recorded ${u.symbol} price at ${formatTimeIST(at)} on ${date}`);
+  if (!recordedNear(md, rec, at)) throw notRecordingAt(md, u.symbol, at, rec.ts);
   const traded = recordedFromOpen(md, spotKey(u.symbol), date, true) ? minutesUpTo(md, spotKey(u.symbol), at).filter((r) => r.traded) : [];
   const prevDate = md.calendar.prev(onOrBefore(md, date));
   const prevClose = eodClose(md, u.symbol, prevDate);
   const keys = md.intraday.recordedKeys(date).filter((k) => k.symbol === u.symbol && k.expiry && expiryTs(k.expiry) > at);
   const fut = keys.filter((k) => k.kind === 'FUT').sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string))[0];
   const futRec = fut ? md.intraday.at(fut, at) : undefined;
-  const future = futRec ? futRec.close : null;
+  const future = futRec && recordedNear(md, futRec, at) ? futRec.close : null;
   const fPrev = fut ? tradedClose(eodFuture(md, u.symbol, fut.expiry as string, prevDate)) : null;
   const optExp = keys.filter((k) => k.kind === 'CE' || k.kind === 'PE').map((k) => k.expiry as string).sort()[0];
-  const cm = optExp ? md.intraday.chainSeries(u.symbol, optExp, date).filter((c) => c.ts + MINUTE <= at).at(-1) : undefined;
+  const cmLast = optExp ? md.intraday.chainSeries(u.symbol, optExp, date).filter((c) => c.ts + MINUTE <= at).at(-1) : undefined;
+  const cm = recordedNear(md, cmLast, at) ? cmLast : undefined;
   return {
     symbol: u.symbol,
     ltp: rec.close,
@@ -478,16 +508,23 @@ const BLANK_LEG: OptionQuote = {
   intrinsic: null,
   timeValue: null,
   ivSource: null,
+  ivTs: null,
   ts: null,
 };
 
 export const blankLeg = (): OptionQuote => ({ ...BLANK_LEG });
+
+/** Gap reason of a chain whose forward is spot carried at r: no dividend yield is implied, so no carry is shown. */
+const SPOT_CARRY_GAP = (what: 'live' | 'recorded') =>
+  `The forward is spot carried at r (no ${what} future or put-call pair): the dividend yield is not implied, so the carry is unknown`;
 
 interface ChainCtx {
   md: MarketDataProvider;
   symbol: string;
   expiry: string;
   evalTs: number;
+  /** Valuation time of the chain (md.pricing.valuationTs of evalTs). */
+  valTs: number;
   asOf: boolean;
   dates: ReadonlySet<string> | null;
   spot: number | null;
@@ -498,8 +535,9 @@ interface ChainCtx {
 /**
  * One leg: ltp = live-session trade (as-of: the recorded minute close); bid/ask only from a live book
  * (as-of: the book recorded with the minute just completed at `at`); IV/Greeks from md.pricing on the mid of a sane live
- * book, else the ltp (ivSource says which), null without a premium or a forward; prevOi/prevClose from
- * the quote, else the previous session's official row (its close only when it traded).
+ * book, else the ltp (ivSource says which), null without a premium or a forward; valued at the chain's
+ * valuation time, a live LTP at its own trade time (ivTs); prevOi/prevClose from the quote, else the
+ * previous session's official row (its close only when it traded).
  */
 function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | undefined): OptionQuote {
   if (!q) return blankLeg();
@@ -512,11 +550,13 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
   const mid = saneMid(book);
   const premium = mid ?? ltp;
   const ivSource: OptionQuote['ivSource'] = mid !== null ? 'mid' : ltp !== null ? 'ltp' : null;
+  // A live LTP is valued at its own trade time (an older trade is not decayed to now); a mid at the chain's valuation time.
+  const ivTs = ivSource === null ? null : ivSource === 'ltp' && !c.asOf ? md.pricing.valuationTs(c.valTs, q.ltt) : c.valTs;
   let iv: number | null = null;
   let g: ReturnType<MarketDataProvider['pricing']['greeks']> = null;
-  if (premium !== null && c.forward !== null) {
-    iv = md.pricing.iv({ symbol: c.symbol, expiry: c.expiry, type, strike, premium, ts: c.evalTs, forward: c.forward });
-    if (iv !== null) g = md.pricing.greeks({ symbol: c.symbol, expiry: c.expiry, type, strike, iv, ts: c.evalTs, forward: c.forward });
+  if (premium !== null && ivTs !== null && c.forward !== null) {
+    iv = md.pricing.iv({ symbol: c.symbol, expiry: c.expiry, type, strike, premium, ts: ivTs, forward: c.forward });
+    if (iv !== null) g = md.pricing.greeks({ symbol: c.symbol, expiry: c.expiry, type, strike, iv, ts: ivTs, forward: c.forward });
   }
   const eod = c.prev.get(`${type}|${strike}`);
   const prevClose = isPos(q.prevClose) && !c.asOf ? q.prevClose : tradedClose(eod);
@@ -547,6 +587,7 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
     intrinsic: r2(intrinsic),
     timeValue: ltp !== null && intrinsic !== null ? r2(Math.max(0, ltp - intrinsic)) : null,
     ivSource,
+    ivTs,
     ts: q.ts,
   };
 }
@@ -557,7 +598,11 @@ function buildLeg(c: ChainCtx, type: OptKind, strike: number, q: LiveQuote | und
  * support/resistance) use real OI of the strikes that have it on both sides (`coverage` says which);
  * OI changes need every such strike's previous-close OI, else null. ivChange = ATM IV now − ATM IV
  * solved from the previous session's official traded closes (null when those are not loaded).
- * NoLiveData when nothing of the chain is live (or recorded at `at`).
+ * IV, Greeks, forward, carry and daysToExpiry are valued at md.pricing.valuationTs of now (or `at`):
+ * outside the session the close of the last session, whose premiums they are.
+ * NoLiveData when nothing of the chain is live (or recorded at `at`), and for an `at` at which the
+ * recorder was not running (recordedNear on the spot, else on the newest recorded leg). 400 for an
+ * expiry that is not listed or has expired.
  */
 export async function buildOptionChain(md: MarketDataProvider, symbol: string, expiry?: string | null, opts: BuildChainOptions = {}): Promise<OptionChain> {
   const u = md.ref.underlying(symbol);
@@ -565,6 +610,7 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   const now = md.clock.now();
   const asOf = opts.at !== undefined && opts.at < now;
   const evalTs = asOf ? (opts.at as number) : now;
+  const valTs = md.pricing.valuationTs(evalTs);
   const gaps = new Gaps();
   const r = md.pricing.r;
 
@@ -576,6 +622,8 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   if (!exp) throw new NoLiveData(asOf ? `No recorded ${s} option chain on ${md.calendar.session(evalTs).date}` : `No ${s} option expiry is listed`);
   if (!expiries.includes(exp)) {
     if (asOf) throw new NoLiveData(`No recorded ${s} ${exp} option chain on ${md.calendar.session(evalTs).date}`);
+    // Still in the instrument master (it lists the day's contracts until the next load) but past its expiry.
+    if (expiryTs(exp) <= now && md.ref.expiries(s, 'OPT').includes(exp)) throw httpError(400, `${s} expiry ${exp} has expired`);
     throw httpError(400, `${exp} is not a listed ${s} option expiry`);
   }
 
@@ -583,18 +631,22 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   if (asOf) {
     const rec = md.intraday.chainAt(s, exp, evalTs);
     if (!rec) throw new NoLiveData(`No recorded ${s} ${exp} option chain at ${formatTimeIST(evalTs)} on ${md.calendar.session(evalTs).date}`);
+    // The recorder must have been running at `at`: the spot's minute (else the newest recorded leg or future) ended just before it.
+    const newest = rec.spot?.ts ?? Math.max(...[rec.future, ...rec.rows.flatMap((row) => [row.ce, row.pe])].map((q) => q?.ts ?? -Infinity));
+    if (!recordedNear(md, { ts: newest }, evalTs)) throw notRecordingAt(md, rec.spot ? s : `${s} ${exp} options`, evalTs, Number.isFinite(newest) ? newest : undefined);
     raw = rec;
   } else raw = await md.live.chain(s, exp);
 
   const session = asOf ? onOrBefore(md, md.calendar.session(evalTs).date) : currentSession(md, now);
   const prevDate = md.calendar.prev(session);
   const dates = asOf ? null : liveDates(md);
-  const T = timeToExpiry(exp, evalTs);
+  const T = timeToExpiry(exp, valTs);
 
   // Spot and its change.
   const spotQ = asOf ? raw.spot : md.live.quote(spotKey(s));
   const spot = asOf ? (raw.spot && isPos(raw.spot.ltp) ? raw.spot.ltp : null) : livePrice(md, spotQ, dates ?? undefined);
   if (spot === null) gaps.add('spot', asOf ? `No recorded ${s} price at ${formatTimeIST(evalTs)}` : `No live ${s} price`);
+  const spotTs = spot !== null && spotQ ? spotQ.ts : null;
   const spotPrev = !asOf && spotQ && isPos(spotQ.prevClose) ? spotQ.prevClose : eodClose(md, s, prevDate);
   const spotCh = changeOf(spot, spotPrev);
 
@@ -614,7 +666,8 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
       const f = md.pricing.forward(s, exp);
       forward = f.forward;
       forwardSource = f.source;
-      carry = rn(r - f.carry, 6);
+      if (f.source === 'spot') gaps.add('carry', SPOT_CARRY_GAP('live'));
+      else carry = rn(r - f.carry, 6);
     } catch (e) {
       if (!(e instanceof NoLiveData)) throw e;
       const f = impliedForward({ future: sameFut, rows: premiumRows }, T, r);
@@ -629,14 +682,15 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
     if (f) {
       forward = f.forward;
       forwardSource = f.source;
-      if (spot !== null && T > 0) carry = rn(f.source === 'spot' ? 0 : r - Math.log(f.forward / spot) / T, 6);
+      if (f.source === 'spot') gaps.add('carry', SPOT_CARRY_GAP('recorded'));
+      else if (spot !== null && T > 0) carry = rn(r - Math.log(f.forward / spot) / T, 6);
       else gaps.add('carry', 'No recorded spot price to imply the carry from');
     } else gaps.add('forward', `No recorded future, put-call pair or spot price for ${s} ${exp}`);
   }
   if (forward === null) gaps.add('iv', 'IV and Greeks need a forward price (live future, put-call pair or spot)');
 
   const prev = eodOptions(md, s, exp, prevDate);
-  const ctx: ChainCtx = { md, symbol: s, expiry: exp, evalTs, asOf, dates, spot, forward, prev };
+  const ctx: ChainCtx = { md, symbol: s, expiry: exp, evalTs, valTs, asOf, dates, spot, forward, prev };
 
   // Rows: the chain's strikes plus listed strikes inside its range (blank legs), ascending.
   const byStrike = new Map<number, { ce?: LiveQuote; pe?: LiveQuote }>();
@@ -686,7 +740,7 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
   const ref = forward ?? spot;
   let atm: number | null = null;
   if (ref !== null) for (const row of rows) if (atm === null || Math.abs(row.strike - ref) < Math.abs(atm - ref)) atm = row.strike;
-  const atmIvDec = asOf ? (chainAtmIv(raw, r, evalTs)?.iv ?? null) : md.pricing.atmIv(s, exp);
+  const atmIvDec = asOf ? (chainAtmIv(raw, r, valTs)?.iv ?? null) : md.pricing.atmIv(s, exp);
   if (atmIvDec === null) gaps.add('atmIv', 'ATM IV could not be solved from the available premiums');
   const prevAtmIv = eodAtmIvOf(md, s, exp, prevDate);
   if (prevAtmIv === null) gaps.add('ivChange', `No traded official option closes of ${s} ${exp} for ${prevDate}`);
@@ -718,7 +772,9 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
     expiry: exp,
     expiries,
     ts: evalTs,
+    valuationTs: valTs,
     spot,
+    spotTs,
     spotChange: spotCh.change,
     spotChangePct: spotCh.changePct,
     future,
@@ -728,7 +784,7 @@ export async function buildOptionChain(md: MarketDataProvider, symbol: string, e
     carry,
     lotSize,
     strikeStep: u.strikeStep,
-    daysToExpiry: +daysToExpiry(evalTs, exp).toFixed(2),
+    daysToExpiry: +daysToExpiry(valTs, exp).toFixed(2),
     atm,
     atmIv,
     ivChange,
@@ -809,32 +865,42 @@ export function futuresQuotes(md: MarketDataProvider, symbol: string): FuturesQu
 
 /**
  * As-of futures at a past `at` from recorded minutes (previous-session values from the official
- * files). Volume = the recorded minute volumes up to `at`, only when the future was recorded from the
- * session's open (a later recording's sum is not the session volume: null).
+ * files); NoLiveData when the recorder was not running at `at` (recordedNear on the spot, else on the
+ * newest future). Each row is its future's last recorded minute (`ts`); its basis only when that
+ * minute and the spot's were both recorded just before `at`. Volume = the recorded minute volumes
+ * (plus the volume recorded after feed gaps) up to `at`, only when the future was recorded from the
+ * session's open and no minute's volume is a lower bound (`partial`: a recording restarted inside
+ * it); else null, as a partial sum is not the session volume.
  */
 export function futuresQuotesAt(md: MarketDataProvider, symbol: string, at: number): FuturesQuote[] {
   const u = md.ref.underlying(symbol);
   const date = md.calendar.session(at).date;
   requireRecorded(md, date);
   const prevDate = md.calendar.prev(onOrBefore(md, date));
-  const spot = md.intraday.at(spotKey(u.symbol), at)?.close ?? null;
+  const spotRec = md.intraday.at(spotKey(u.symbol), at);
+  if (spotRec && !recordedNear(md, spotRec, at)) throw notRecordingAt(md, u.symbol, at, spotRec.ts);
+  const spot = spotRec?.close ?? null;
   const keys = md.intraday
     .recordedKeys(date)
     .filter((k) => k.symbol === u.symbol && k.kind === 'FUT' && k.expiry && expiryTs(k.expiry) > at)
     .sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string));
   if (!keys.length) throw new NoLiveData(`No recorded ${u.symbol} futures on ${date}`);
-  return keys.map((key) => {
-    const recs = minutesUpTo(md, key, at);
+  const series = keys.map((key) => ({ key, recs: minutesUpTo(md, key, at) }));
+  if (!spotRec) {
+    const newest = Math.max(...series.map((x) => x.recs.at(-1)?.ts ?? -Infinity));
+    if (!recordedNear(md, { ts: newest }, at)) throw notRecordingAt(md, `${u.symbol} futures`, at, Number.isFinite(newest) ? newest : undefined);
+  }
+  return series.map(({ key, recs }) => {
     const last = recs.at(-1);
     const eod = eodFuture(md, u.symbol, key.expiry as string, prevDate);
-    const vols = recordedFromOpen(md, key, date) ? recs.filter((x) => isNum(x.volume)) : [];
+    const vols = recordedFromOpen(md, key, date) && !recs.some((x) => x.partial) ? recs.filter((x) => isNum(x.volume) || isNum(x.gapVolume)) : [];
     return futureRow(u.symbol, key.expiry as string, {
       ltp: last ? last.close : null,
       prevClose: tradedClose(eod),
       oi: last && isNum(last.oi) ? last.oi : null,
       prevOi: eod && isNum(eod.oi) ? eod.oi : null,
-      volume: vols.length ? vols.reduce((a, x) => a + (x.volume as number), 0) : null,
-      spot,
+      volume: vols.length ? vols.reduce((a, x) => a + (x.volume ?? 0) + (x.gapVolume ?? 0), 0) : null,
+      spot: recordedNear(md, last, at) ? spot : null,
       ts: last ? last.ts : null,
     });
   });

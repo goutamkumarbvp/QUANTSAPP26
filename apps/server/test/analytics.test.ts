@@ -5,7 +5,7 @@
  * NoLiveData before any data exists. Runs on the TEST-ONLY FakeProvider + loadSampleBook; every
  * input below (quotes, minutes, official rows) is constructed by this test (test data, not market data).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   addDays,
   classifyBuildUp,
@@ -405,6 +405,16 @@ describe('volatility', () => {
     expect(an.ivTable()).toBe(rows); // cached within 5 s
   });
 
+  it('IV rank/percentile are blank with the reason (not 50) when the official ATM IV history is flat', () => {
+    const { p, an } = setup();
+    const live = p.pricing.atmIv('NIFTY') as number;
+    // TEST DATA: a full window of official ATM IV, every session at the live ATM IV.
+    vi.spyOn(p.history, 'dailyAtmIv').mockImplementation(() => Array.from({ length: IV_WINDOW }, (_, i) => ({ date: addDays('2025-01-01', i), iv: live, expiry: '2026-10-13' })));
+    const n = an.ivTable().find((r) => r.symbol === 'NIFTY')!;
+    expect([n.ivr, n.ivp]).toEqual([null, null]);
+    expect(n.gaps?.ivr).toMatch(/history of the last 252 sessions is flat/);
+  });
+
   it('IV chart: recorded intraday ATM IV, daily rows from the official files, current IV from live premiums', () => {
     const { p, an, w1 } = setup();
     const r = an.ivChart('NIFTY', undefined, PREV, 60, 30);
@@ -454,8 +464,8 @@ describe('volatility', () => {
     const live = p.pricing.atmIv('NIFTY', w1)!;
     const window = hist.slice(-IV_WINDOW).map((h) => h.iv);
     const row = an.ivTable().find((x) => x.symbol === 'NIFTY')!;
-    expect(row.ivr).toBe(+ivRank(live, window).toFixed(1));
-    expect(row.ivp).toBe(+ivPercentile(live, window).toFixed(1));
+    expect(row.ivr).toBe(+(ivRank(live, window) as number).toFixed(1));
+    expect(row.ivp).toBe(+(ivPercentile(live, window) as number).toFixed(1));
     expect(row.ivr!).toBeGreaterThan(0);
     expect(row.hv).toBe(pct(hv));
     expect(row.ivHvSpread).toBe(r2(row.iv! - row.hv!));

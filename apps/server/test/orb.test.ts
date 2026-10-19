@@ -149,7 +149,7 @@ describe('opening range from recorded minutes', () => {
     expect(past.bars).toHaveLength(375);
     expect(past.ltp).toBe(past.bars[374].close);
     // vs the official close of the session before (24950 × 0.997, sample EOD bars).
-    expect(past.changePct).toBeCloseTo(((past.ltp - 24875.15) / 24875.15) * 100, 2);
+    expect(past.changePct).toBeCloseTo((((past.ltp as number) - 24875.15) / 24875.15) * 100, 2);
     await expect(an.orb('NIFTY', undefined, { date: '2026-10-04' })).rejects.toMatchObject({ statusCode: 400 }); // a Sunday
     await expect(an.orb('NIFTY', undefined, { date: '2026-10-13' })).rejects.toMatchObject({ statusCode: 400 }); // future
   });

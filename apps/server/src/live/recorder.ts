@@ -18,7 +18,13 @@
  *    quantities reported with that bid / ask (absent when that update carried none);
  *  - each positive Δvolume is classified with the quote rule against the bid/ask seen BEFORE the
  *    tick: LTP ≥ ask → buy, LTP ≤ bid → sell, else (or no sane bid/ask) unclassified. This is an
- *    estimate, and only meaningful if the feed is per trade (critic U4).
+ *    estimate, and only meaningful if the feed is per trade (critic U4);
+ *  - feed gaps: when the instrument's previous tick is older than the start of the previous minute
+ *    (counted from the open), the Δvolume of the first tick after it traded at an unknown time in the
+ *    gap: it is booked as `gapVolume` (never as the minute's volume, never classified, and it does
+ *    not make the minute traded), so Σ(volume + gapVolume) still reconciles with the cumulative volume;
+ *  - a volume baseline set after the open with volume already traded (restart, late subscription)
+ *    marks that minute `partial`: its volume is a lower bound.
  * Minute bucket = the tick's exchange timestamp (critic U7: LUT/LTT, epoch seconds on the wire).
  * Ticks dated another day, outside 09:15–15:30, without a price, whose LTT is another day or whose
  * session volume is still 0 after the open (no trade yet today), or whose timestamp is further than
@@ -97,6 +103,12 @@ interface Inst {
   /** Highest cumulative volume seen today (baseline). */
   cumVol?: number;
   tracksVolume: boolean;
+  /** Latest tick timestamp seen today (feed-gap detection). */
+  lastTs?: number;
+  /** Minute in which the volume baseline was set after the open with volume already traded (that minute is `partial`). */
+  baseMinute?: number;
+  /** Δvolume of the first tick after a feed gap, not yet put on a minute (MinuteRecord.gapVolume). */
+  pendingGap: number;
   /** Latest last-trade time seen today (epoch ms). */
   lastLtt?: number;
   ltp?: number;
@@ -257,11 +269,25 @@ export class Recorder implements LiveBarSource {
     // State: classification uses the quote seen BEFORE this tick.
     const prevBid = inst.bid;
     const prevAsk = inst.ask;
+    const open = calendar.ts(today, 0);
+    // Feed gap: no tick of this instrument since before the start of the previous minute (counted
+    // from the open: the pre-open's last tick is not a gap), e.g. a dropped feed, a reconnect or a
+    // re-subscription. The volume this tick reports traded somewhere in that gap.
+    const gap = inst.lastTs !== undefined && Math.max(inst.lastTs, open) < minuteOf(q.ts) - MINUTE_MS;
+    if (inst.lastTs === undefined || q.ts > inst.lastTs) inst.lastTs = q.ts;
     let dv = 0;
     if (isNum(q.volume) && q.volume >= 0) {
       inst.tracksVolume = true;
       if (inst.cumVol !== undefined && q.volume > inst.cumVol) dv = q.volume - inst.cumVol;
+      // First volume seen after the open with trades already done (a restart, a late subscription):
+      // the trades of this minute before this tick are not counted anywhere.
+      else if (inst.cumVol === undefined && q.volume > 0 && q.ts >= open) inst.baseMinute = minuteOf(q.ts);
       if (inst.cumVol === undefined || q.volume > inst.cumVol) inst.cumVol = q.volume;
+    }
+    // The gap's volume is booked apart (gapVolume of the next minute written), never as this minute's trades.
+    if (gap && dv > 0) {
+      inst.pendingGap += dv;
+      dv = 0;
     }
     // A last-trade time newer than any seen today is a trade in the minute of that time (the first
     // LTT seen only sets the baseline, unless it falls in the tick's own minute).
@@ -320,6 +346,11 @@ export class Recorder implements LiveBarSource {
       bar.sellVolume = 0;
       bar.unclassified = 0;
     }
+    if (inst.pendingGap > 0) {
+      bar.gapVolume = (bar.gapVolume ?? 0) + inst.pendingGap;
+      inst.pendingGap = 0;
+    }
+    if (inst.baseMinute === bar.ts) bar.partial = true;
     if (dv > 0 || (tradeMinute !== undefined && tradeMinute >= minuteOf(q.ts))) addTrade(bar, q.ltp, dv, prevBid, prevAsk);
     else {
       // Quote-only tick: its LTP repeats the last trade (of this minute once the minute has traded).
@@ -480,7 +511,7 @@ export class Recorder implements LiveBarSource {
     const id = keyId(key);
     let inst = this.insts.get(id);
     if (!inst) {
-      inst = { key: { ...key }, id, bar: null, lastWritten: -Infinity, tracksVolume: false, snaps: [] };
+      inst = { key: { ...key }, id, bar: null, lastWritten: -Infinity, tracksVolume: false, pendingGap: 0, snaps: [] };
       this.insts.set(id, inst);
     }
     return inst;

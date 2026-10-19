@@ -362,7 +362,8 @@ export class MemoryIntraday implements IntradayStore, IntradayWriter {
         continue;
       }
       const merged: MinuteRecord = { ...a, ...rec, open: a.open, high: Math.max(a.high, rec.high), low: Math.min(a.low, rec.low), close: rec.close, traded: a.traded || rec.traded };
-      for (const f of ['volume', 'buyVolume', 'sellVolume', 'unclassified'] as const) if (a[f] !== undefined || rec[f] !== undefined) merged[f] = (a[f] ?? 0) + (rec[f] ?? 0);
+      if (a.partial || rec.partial) merged.partial = true;
+      for (const f of ['volume', 'gapVolume', 'buyVolume', 'sellVolume', 'unclassified'] as const) if (a[f] !== undefined || rec[f] !== undefined) merged[f] = (a[f] ?? 0) + (rec[f] ?? 0);
       m.set(rec.ts, merged);
     }
   }

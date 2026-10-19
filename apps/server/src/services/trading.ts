@@ -7,11 +7,15 @@
  *  - fills only against a live book: MARKET buys at the live ask, sells at the live bid; a MARKET
  *    order without one is rejected ("No live bid/ask for <label>"); LIMIT/SL/SL-M orders keep working
  *    until a live book (and, for triggers, a live-session LTP) is there, only while the market is open;
+ *    they are DAY orders: cancelled ("Day order expired") at the close of their session (the session
+ *    they were placed in, or the next one when placed after the close or on a holiday);
+ *  - exiting a position larger than the exchange freeze quantity places it in slices below the
+ *    listing's freeze quantity (one order when the freeze quantity is not known);
  *  - positions are marked at the live-session LTP; without one, ltp/unrealized/pnl are null with the
  *    reason (never a last-known price shown as live);
  *  - margin = core estimateMargin on the live spot, each option leg's IV solved from its live premium
- *    (else the expiry's ATM IV) and the expiry's live forward; an order that adds risk is rejected
- *    with the reason when those inputs are not live;
+ *    (else the ATM IV of the leg's own expiry) and the expiry's live forward, valued at md.pricing's
+ *    valuation time; an order that adds risk is rejected with the reason when those inputs are not live;
  *  - an expired contract settles only at the exchange settlement price (md.history.settlement);
  *    until it is published the position stays open as 'awaiting settlement'.
  */
@@ -20,6 +24,7 @@ import {
   estimateMargin,
   expiryTs,
   INDEX_MARGIN,
+  SESSION_MINUTES,
   STOCK_MARGIN,
   type Funds,
   type Leg,
@@ -184,7 +189,9 @@ export class PaperBroker {
 
   /**
    * Margin estimate of one underlying's open positions (0 when nothing is short and there is no
-   * future). NoLiveData when the live spot, a leg's IV or an expiry's forward is not available.
+   * future), valued at md.pricing.valuationTs (the IVs and forwards are solved there: outside the
+   * session the last close). A leg without a solvable premium of its own takes the ATM IV of its own
+   * expiry only. NoLiveData when the live spot, a leg's IV or an expiry's forward is not available.
    */
   private marginFor(symbol: string, positions: Position[], ts: number): number {
     const open = positions.filter((p) => p.status === 'open' && p.netQty !== 0);
@@ -206,20 +213,21 @@ export class PaperBroker {
         } catch (e) {
           if (!isClientError(e)) throw e;
         }
-        solved ??= md.pricing.atmIv(symbol, p.expiry) ?? atmIv;
+        solved ??= md.pricing.atmIv(symbol, p.expiry);
         if (solved === null) throw new NoLiveData(`No live IV for ${p.instrument}: margin cannot be estimated`);
         iv = solved;
       }
       return { side: p.netQty > 0 ? 'BUY' : 'SELL', type: p.type, strike: p.strike ?? 0, expiry: p.expiry, lots: Math.abs(p.netQty) / p.lotSize, lotSize: p.lotSize, price: p.avgPrice, iv };
     });
     const ivs = legs.map((l) => l.iv).filter((v): v is number => v !== undefined);
+    // Reference IV of the vol scan (core estimateMargin); every option leg is valued at its own IV.
     const defaultIv = atmIv ?? (ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : undefined);
     const carryOf = (e: string): number => {
       const q = carry.get(e);
       if (q === undefined) throw new NoLiveData(`No live forward for ${symbol} ${e}`);
       return q;
     };
-    const m = estimateMargin(legs, S, ts, { r: md.pricing.r, carry: carryOf, defaultIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
+    const m = estimateMargin(legs, S, md.pricing.valuationTs(ts), { r: md.pricing.r, carry: carryOf, defaultIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
     return m.total;
   }
 
@@ -278,8 +286,12 @@ export class PaperBroker {
   }
 
   place(uid: string, req: OrderRequest): Order {
+    return this.placeOrder(uid, req, MAX_LOTS_PER_ORDER);
+  }
+
+  private placeOrder(uid: string, req: OrderRequest, maxLots: number): Order {
     const ts = this.now();
-    if (!Number.isInteger(req.lots) || req.lots < 1 || req.lots > MAX_LOTS_PER_ORDER) throw httpError(400, `Lots must be between 1 and ${MAX_LOTS_PER_ORDER}`);
+    if (!Number.isInteger(req.lots) || req.lots < 1 || req.lots > maxLots) throw httpError(400, `Lots must be between 1 and ${MAX_LOTS_PER_ORDER}`);
     if (req.type !== 'FUT' && !(Number(req.strike) > 0)) throw httpError(400, 'Strike is required for options');
     if ((req.orderType === 'LIMIT' || req.orderType === 'SL') && !(Number(req.price) > 0)) throw httpError(400, 'Limit price is required');
     if ((req.orderType === 'SL' || req.orderType === 'SL-M') && !(Number(req.triggerPrice) > 0)) throw httpError(400, 'Trigger price is required');
@@ -328,6 +340,10 @@ export class PaperBroker {
     const spec: InstrumentSpec = { symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry };
     if (expiryTs(order.expiry) < ts) {
       this.finish(uid, order, 'CANCELLED', 'Contract expired before execution', ts);
+      return;
+    }
+    if (ts >= this.dayOrderEnd(order)) {
+      this.finish(uid, order, 'CANCELLED', 'Day order expired', ts);
       return;
     }
     const isMarket = order.orderType === 'MARKET';
@@ -398,6 +414,14 @@ export class PaperBroker {
     this.finish(uid, order, 'COMPLETE', undefined, ts);
   }
 
+  /** Close (15:30) of the session a working order belongs to: the one it was placed in, or the next when placed after the close / on a holiday. */
+  private dayOrderEnd(order: Order): number {
+    const cal = this.md.calendar;
+    let date = cal.session(order.createdAt).date;
+    if (!cal.isTradingDay(date) || order.createdAt >= cal.ts(date, SESSION_MINUTES)) date = cal.next(date);
+    return cal.ts(date, SESSION_MINUTES);
+  }
+
   private finish(uid: string, order: Order, status: Order['status'], message: string | undefined, ts: number) {
     order.status = status;
     order.message = message;
@@ -417,13 +441,35 @@ export class PaperBroker {
     return order;
   }
 
-  exitPosition(uid: string, key: string): Order {
+  /**
+   * Square off a position with MARKET orders. The user order limit (MAX_LOTS_PER_ORDER) does not apply:
+   * a position larger than the exchange freeze quantity is placed in slices below the listing's
+   * freeze quantity, else (freeze quantity not known) as one order. Slicing stops at the first slice
+   * that does not complete (its reason is on that order). Returns the orders placed.
+   */
+  exitPosition(uid: string, key: string): Order[] {
     const pos = this.positions(uid).find((p) => p.key === key);
     if (!pos || pos.netQty === 0) throw httpError(404, 'No open position');
     if (pos.status === 'awaiting settlement') throw httpError(400, `${pos.instrument} has expired: it closes at the exchange settlement price`);
-    return this.place(uid, {
-      symbol: pos.symbol, type: pos.type, strike: pos.strike, expiry: pos.expiry, side: pos.netQty > 0 ? 'SELL' : 'BUY', lots: Math.abs(pos.netQty) / pos.lotSize, orderType: 'MARKET', product: pos.product, tag: 'exit',
-    });
+    const spec = specOf(pos);
+    const listing = this.pricer.validate(spec, this.now(), { trade: true });
+    const lots = Math.abs(pos.netQty) / pos.lotSize;
+    // Freeze quantity (units): an order must stay below it; whole lots per slice.
+    const freeze = listing.freezeQty;
+    const perSlice = freeze && freeze > listing.lotSize ? Math.floor((freeze - 1) / listing.lotSize) : lots;
+    const orders: Order[] = [];
+    for (let left = lots; left > 0; ) {
+      const n = Math.min(perSlice, left);
+      const o = this.placeOrder(
+        uid,
+        { symbol: pos.symbol, type: pos.type, strike: pos.strike, expiry: pos.expiry, side: pos.netQty > 0 ? 'SELL' : 'BUY', lots: n, orderType: 'MARKET', product: pos.product, tag: 'exit' },
+        Infinity,
+      );
+      orders.push(o);
+      if (o.status !== 'COMPLETE') break;
+      left -= n;
+    }
+    return orders;
   }
 
   reset(uid: string): void {
@@ -432,19 +478,26 @@ export class PaperBroker {
     this.db.save();
   }
 
-  /** Called every second: works pending orders for all users (never throws). */
+  /**
+   * Called every second: works pending orders for all users. Missing live data is expected (the order
+   * is retried next tick); an unexpected error does not stop the other orders and is rethrown once
+   * every order was worked (the services' tick wrapper reports it to onError).
+   */
   tick(): void {
     const ts = this.now();
+    const errors: unknown[] = [];
     for (const [uid, orders] of Object.entries(this.db.data.orders)) {
       for (const o of orders) {
         if (o.status !== 'OPEN' && o.status !== 'TRIGGER_PENDING') continue;
         try {
           this.process(uid, o, ts);
-        } catch {
-          /* keep working the other orders; this one is retried next tick */
+        } catch (e) {
+          if (!isClientError(e)) errors.push(e); // this one is retried next tick
         }
       }
     }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `${errors.length} working orders failed: ${errors.slice(0, 3).map(errMsg).join('; ')}`);
   }
 
   /** Contracts of working orders and open positions of every user (streamed in the provider's 'user' tier). */
@@ -482,7 +535,9 @@ export class StrategyManager {
   /**
    * Legs of a live contract are validated against the instrument master and take its lot size; a leg
    * without an entry price takes the live-session LTP (NoLiveData without one). Legs of an expired
-   * contract that carry their price are kept with the lot size given (the master no longer lists them).
+   * contract that carry their price (the master no longer lists them) keep the lot size given, else
+   * the contract's lot size from the official F&O file of its last day; NoLiveData when neither is
+   * there (today's lot size of the underlying is never used for a past contract).
    */
   private normaliseLegs(symbol: string, legs: Leg[], ts: number): Leg[] {
     const u = this.md.ref.underlying(symbol);
@@ -502,6 +557,11 @@ export class StrategyManager {
         if (ltp === null) throw new NoLiveData(`No live price for ${instrumentLabel(spec)} to use as the entry price`);
         price = ltp;
       }
+      let lotSize = listing?.lotSize ?? (Number(l.lotSize) > 1 ? Number(l.lotSize) : null);
+      if (lotSize === null) {
+        lotSize = this.pricer.pastLotSize(specKey(spec));
+        if (lotSize === null) throw new NoLiveData(`Lot size of ${instrumentLabel(spec)} is unknown: the contract has expired and the official F&O file of ${l.expiry} (its last day) is not loaded; send the leg's lot size`);
+      }
       return {
         id: l.id ?? `leg-${i}-${randomUUID().slice(0, 6)}`,
         side: l.side,
@@ -509,7 +569,7 @@ export class StrategyManager {
         strike: l.type === 'FUT' ? 0 : Number(l.strike),
         expiry: l.expiry,
         lots,
-        lotSize: listing?.lotSize ?? (Number(l.lotSize) > 1 ? Number(l.lotSize) : u.lotSize),
+        lotSize,
         price: +price.toFixed(2),
         iv: l.iv,
         exitPrice: l.exitPrice ?? null,

@@ -99,8 +99,9 @@ describe('Recorder: minute bars', () => {
     expect(writer.minutes).toHaveLength(0);
 
     tick(FUT, t(10, 1, 2), { ltp: 101.6, volume: 1040 }); // rollover; ≥ prior ask 101.5 → buy 9
+    // The baseline was set inside 10:00 with 1000 already traded: that minute's volume is a lower bound.
     expect(writer.of(FUT)).toEqual([
-      { ts: t(10, 0), open: 100.5, high: 101, low: 99, close: 100.8, traded: true, volume: 31, buyVolume: 10, sellVolume: 15, unclassified: 6, oi: 5100, bid: 100.5, ask: 101.5, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1 },
+      { ts: t(10, 0), open: 100.5, high: 101, low: 99, close: 100.8, traded: true, volume: 31, buyVolume: 10, sellVolume: 15, unclassified: 6, oi: 5100, bid: 100.5, ask: 101.5, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1, partial: true },
     ]);
     expect(rec.liveBar(FUT)).toMatchObject({ ts: t(10, 1), open: 101.6, volume: 9, buyVolume: 9, sellVolume: 0, unclassified: 0 });
   });
@@ -162,9 +163,10 @@ describe('Recorder: minute bars', () => {
     tick(FUT, t(10, 0, 10), { ltp: 100, volume: 1 });
     tick(FUT, t(10, 3, 10), { ltp: 103, volume: 4 });
     at(t(10, 10));
-    expect(writer.of(FUT).map((r) => [r.ts, r.close, r.volume])).toEqual([
-      [t(10, 0), 100, 0],
-      [t(10, 3), 103, 3],
+    // No tick for whole minutes before 10:03: its Δ3 traded somewhere in the gap (gapVolume, not 10:03's volume).
+    expect(writer.of(FUT).map((r) => [r.ts, r.close, r.volume, r.gapVolume])).toEqual([
+      [t(10, 0), 100, 0, undefined],
+      [t(10, 3), 103, 0, 3],
     ]);
   });
 
@@ -224,10 +226,12 @@ describe('Recorder: minute bars', () => {
     at(t(9, 20));
     expect(writer.of(k)).toEqual([]);
     expect(rec.stats().stateOnly.oldTrade).toBe(2);
-    // First trade today: a bar, with the volume measured from the baseline set by the snapshots.
+    // First trade today: a bar (its LTT is in the minute), with the volume measured from the baseline
+    // set by the snapshots. The previous tick (09:17:03) is older than 09:20, so the 75 units traded
+    // at an unknown time since then: gapVolume, never classified against the 4-minute-old book.
     tick(k, t(9, 21, 7), { ltp: 43, ltt: t(9, 21, 7), volume: 75 });
     at(t(9, 23));
-    expect(writer.of(k)).toEqual([{ ts: t(9, 21), open: 43, high: 43, low: 43, close: 43, traded: true, volume: 75, buyVolume: 75, sellVolume: 0, unclassified: 0, oi: 9_000, bid: 41, ask: 43 }]);
+    expect(writer.of(k)).toEqual([{ ts: t(9, 21), open: 43, high: 43, low: 43, close: 43, traded: true, volume: 0, gapVolume: 75, buyVolume: 0, sellVolume: 0, unclassified: 0, oi: 9_000, bid: 41, ask: 43 }]);
   });
 
   it('a minute opens at its first trade, not at the earlier trade its quote-only ticks repeat; a late-reported trade keeps its minute (review)', () => {
@@ -451,8 +455,9 @@ describe('Recorder: session hooks and the store', () => {
     tick(SPOT, t(10, 1, 5), { ltp: 25_003 });
 
     const reopened = new IntradayFiles({ dataDir: dir });
-    // 120 was the baseline tick (no trade known in the minute); 121 is the minute's trade.
-    expect(reopened.bars(opt('CE', 25_000), D)).toEqual([{ ts: t(10, 0), open: 121, high: 121, low: 121, close: 121, traded: true, volume: 65, buyVolume: 0, sellVolume: 0, unclassified: 65, oi: 1_065, bid: 120.9, ask: 121.1 }]);
+    // 120 was the baseline tick (no trade known in the minute; 65 already traded, so the minute is
+    // partial, and that survives the store); 121 is the minute's trade.
+    expect(reopened.bars(opt('CE', 25_000), D)).toEqual([{ ts: t(10, 0), open: 121, high: 121, low: 121, close: 121, traded: true, volume: 65, buyVolume: 0, sellVolume: 0, unclassified: 65, oi: 1_065, bid: 120.9, ask: 121.1, partial: true }]);
     expect(store.liveBar(SPOT)).toMatchObject({ ts: t(10, 1), close: 25_003 });
     expect(reopened.chainSeries('NIFTY', EXP, D)).toEqual([expect.objectContaining({ ts: t(10, 0), spot: 25_000, ceOi: 1_065, peOi: 1_200, ceVolume: 130, peVolume: 130, atmStrike: 25_000 })]);
     expect(reopened.chainAt('NIFTY', EXP, t(10, 1, 30))?.rows[0]).toMatchObject({ strike: 25_000, ce: { ltp: 121, oi: 1_065 }, pe: { ltp: 110, oi: 1_200 } });
