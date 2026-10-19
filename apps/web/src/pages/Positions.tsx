@@ -36,7 +36,12 @@ function NewOrder({ onTicket }: { onTicket: (t: TicketSpec) => void }) {
   const optQuote = row ? (type === 'CE' ? row.ce : row.pe) : undefined;
   const price = isFut ? futs.data?.find((x) => x.expiry === e)?.ltp ?? null : optQuote?.ltp ?? null;
   const priceWhy = !e ? 'No listed expiry' : !isFut && k === undefined ? 'No strikes: the option chain is not available' : 'Not traded in the live session; the order ticket shows the live bid / ask';
-  const blocked = !e ? 'No listed expiry' : !isFut && k === undefined ? 'No strike: the option chain is not available' : null;
+  // No contract chosen (no expiry, or an option without a strike): Buy / Sell are disabled and say why.
+  const blocked = !e
+    ? `${isFut ? 'Select an expiry' : 'Select an expiry and strike'}: ${exp.isLoading ? 'loading the listed expiries…' : exp.error ? errorText(exp.error) : 'no expiry is listed'}`
+    : !isFut && k === undefined
+      ? `Select a strike: ${chain.isLoading ? 'loading the strikes…' : chain.error ? errorText(chain.error) : 'the option chain is not available'}`
+      : null;
   return (
     <div className="flex flex-wrap items-end gap-2">
       <SymbolSelect value={symbol} onChange={setSymbol} />
@@ -53,8 +58,9 @@ function NewOrder({ onTicket }: { onTicket: (t: TicketSpec) => void }) {
         </Field>
       )}
       <span className="pb-2 text-sm text-muted">LTP <b className="text-ink"><Val value={price} format={formatPrice} reason={priceWhy} /></b></span>
-      <button className="btn-buy" disabled={!!blocked} title={blocked ?? undefined} onClick={() => e && onTicket({ symbol, type, strike: isFut ? undefined : k, expiry: e, side: 'BUY', price })}>Buy</button>
-      <button className="btn-sell" disabled={!!blocked} title={blocked ?? undefined} onClick={() => e && onTicket({ symbol, type, strike: isFut ? undefined : k, expiry: e, side: 'SELL', price })}>Sell</button>
+      <button className="btn-buy" disabled={!!blocked} title={blocked ?? undefined} onClick={() => !blocked && e && onTicket({ symbol, type, strike: isFut ? undefined : k, expiry: e, side: 'BUY', price })}>Buy</button>
+      <button className="btn-sell" disabled={!!blocked} title={blocked ?? undefined} onClick={() => !blocked && e && onTicket({ symbol, type, strike: isFut ? undefined : k, expiry: e, side: 'SELL', price })}>Sell</button>
+      {blocked && <p className="w-full text-2xs text-muted">{blocked}</p>}
     </div>
   );
 }

@@ -30,6 +30,8 @@ test('home: index cards, derivatives snapshot with ORB and order flow (estimate)
   await expect(page.getByText(/estimated from live ticks \(quote rule\)/).first()).toBeVisible();
   // A card without data keeps its reason (no recorded BANKNIFTY minutes in the fixture).
   await expect(page.getByText(/No recorded BANKNIFTY minutes/).first()).toBeVisible();
+  // The fixture server runs no operations (GET /api/ops is a 404): a neutral note, not an error.
+  await expect(page.getByText('Operations are not running on this server')).toBeVisible();
   await shot(page, info, 'home');
   await clean(page, watch);
 });

@@ -114,6 +114,24 @@ test('home: no index value, no chain figure, only reasons', async ({ page }) => 
   expect(await watch.check()).toEqual([]);
 });
 
+test('home: the Operations panel shows no broker, no data, paper trading only, and its three buttons', async ({ page }) => {
+  const watch = watchErrors(page);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(/Market Overview/, { timeout: 20_000 });
+  const ops = page.locator('section', { has: page.getByRole('heading', { level: 2, name: 'Operations', exact: true }) });
+  await expect(ops).toBeVisible({ timeout: 20_000 });
+  for (const chip of ['DISCONNECTED', 'DATA UNAVAILABLE', 'PAPER TRADING', 'NOT READY']) await expect(ops.getByText(chip, { exact: true })).toBeVisible();
+  // Empty NEO_*: the login monitor says so.
+  await expect(ops.getByRole('region', { name: 'Login Monitor' }).getByText('NO_CREDENTIALS', { exact: true })).toBeVisible();
+  for (const name of ['Re-login now', 'Run health check', 'Run audit now']) {
+    const button = ops.getByRole('button', { name, exact: true });
+    await expect(button).toBeVisible();
+    await expect(button).toBeDisabled(); // the e2e session is a guest: the reason is on the page
+  }
+  await expect(ops.getByText('Sign in with a registered account to run operations').first()).toBeVisible();
+  expect(await watch.check()).toEqual([]);
+});
+
 /*
  * The old paper-trading, optimizer and algo journeys need live prices; they run in fixture.spec.ts
  * (FIXTURE server). Here, with no master, the ticket cannot be opened: see live-master.spec.ts for

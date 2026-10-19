@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ORDER_FLOW_METHOD, type BuildUp, type Candle, type DashboardChain, type DashboardMover, type DashboardResponse, type FiiDiiDay, type Quote } from '@q26/core';
+import { OperationsPanel } from '../components/Operations';
 import { TrendBadge } from '../components/trend';
 import { Chart, baseOption, axis, useChartColors } from '../components/Chart';
 import { AsOf, BuildUpBadge, Card, Chg, Coverage, Dash, flowTone, Gaps, Loadable, NoData, PageHeader, Val } from '../components/ui';
@@ -140,7 +141,14 @@ function ChainRow({ c, onOpen }: { c: DashboardChain; onOpen: (symbol: string) =
       <td className={`num ${c.pcr === null ? '' : c.pcr >= 1 ? 'text-up' : 'text-down'}`}><Val value={c.pcr} format={(x) => x.toFixed(2)} reason={strikesWhy} /></td>
       <td className="num"><Val value={c.maxPain} format={(x) => formatIndian(x, 0)} reason={strikesWhy} /></td>
       <td className="num">
-        <Val value={c.atmIv} format={(x) => x.toFixed(2)} reason={chainWhy('ATM IV needs live option premiums')} /> <Chg value={c.ivChange} className="text-2xs" reason="Needs the previous session's official option closes" />
+        {/* One dash when neither the IV nor its change is available (not "— —"). */}
+        {!isNum(c.atmIv) && !isNum(c.ivChange) ? (
+          <Dash reason={chainWhy('ATM IV needs live option premiums')} />
+        ) : (
+          <>
+            <Val value={c.atmIv} format={(x) => x.toFixed(2)} reason={chainWhy('ATM IV needs live option premiums')} /> <Chg value={c.ivChange} className="text-2xs" reason="Needs the previous session's official option closes" />
+          </>
+        )}
       </td>
       <td className="num text-up"><Val value={c.support} format={(x) => formatIndian(x, 0)} reason={strikesWhy} /></td>
       <td className="num text-down"><Val value={c.resistance} format={(x) => formatIndian(x, 0)} reason={strikesWhy} /></td>
@@ -185,6 +193,8 @@ export default function Home() {
   return (
     <div className="space-y-3">
       <PageHeader title="Market Overview" subtitle="Indices, derivatives snapshot, movers and institutional flows" />
+      {/* Login monitor, 24×7 watchdog and weekly audit: independent of the market data below. */}
+      <OperationsPanel />
       <Loadable q={q}>
         {(d) => {
           const g = d.gaps ?? {};

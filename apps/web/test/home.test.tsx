@@ -124,6 +124,30 @@ describe('Home dashboard, card by card', () => {
     expect(html).not.toMatch(/>0<\/span>/);
   });
 
+  it('ATM IV: one dash (not "— —") when neither the IV nor its change is available', () => {
+    const html = render(blank);
+    expect(html).not.toMatch(/—<\/span> <span[^>]*>—<\/span>/);
+    // Each blank chain row's ATM IV cell is a single dash with the chain's reason.
+    expect(html.match(/<td class="num"><span class="text-muted cursor-help" title="Instrument master not loaded yet" aria-label="Not available: Instrument master not loaded yet">—<\/span><\/td>/g)?.length).toBeGreaterThanOrEqual(3);
+    // With an IV and no change, both stay: the IV and the change's dash with its reason.
+    const filled = render(populated);
+    expect(filled).toMatch(/13\.40<\/span> <span[^>]*title="Needs the previous session&#x27;s official option closes"/);
+  });
+
+  it('the Operations panel is on the dashboard, independent of the market data', () => {
+    const ops: [unknown[], unknown] = [['ops'], {
+      login: { state: 'NO_CREDENTIALS', detail: 'Kotak credentials missing in .env: NEO_CONSUMER_KEY: live data and login are off', checkEveryMs: 30_000, lastCheckAt: ts, consecutiveFailures: 0, today: { logins: 0, failures: 0, sessionLosses: 0 }, events: [] },
+      watchdog: { state: 'STARTING', intervalMs: 30_000, lastRunAt: null, runs: 0, supervised: false, process: { pid: 1, uptimeSec: 5, rssMb: 90, heapUsedMb: 40, heapLimitMb: 4144, eventLoopP99Ms: null }, checks: [], incidents: [] },
+      audit: { running: false, schedule: 'Every Saturday 10:00 IST (covers Saturday to Saturday)', nextRunAt: null, last: null, history: [] },
+      broker: 'DISCONNECTED', feed: 'DATA UNAVAILABLE', safety: { mode: 'paper', autoExecutionToBroker: false, liveOrderAuthority: false, brokerSubmission: false }, liveTrading: 'NOT READY',
+    }];
+    const html = render(new ApiError('Kotak feed is not connected', 503, 'NO_LIVE_DATA'), [ops]);
+    expect(html).toContain('Kotak feed is not connected');
+    expect(html).toContain('>Operations</h2>');
+    for (const t of ['DISCONNECTED', 'DATA UNAVAILABLE', 'PAPER TRADING', 'NOT READY', 'NO_CREDENTIALS', 'Re-login now', 'Run health check', 'Run audit now']) expect(html).toContain(t);
+    expect(html).not.toMatch(BAD);
+  });
+
   it('a 503 NO_LIVE_DATA for the whole page renders the blank state with the server reason', () => {
     const html = render(new ApiError('Kotak feed is not connected', 503, 'NO_LIVE_DATA'));
     expect(html).toContain('Kotak feed is not connected');

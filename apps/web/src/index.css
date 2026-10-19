@@ -64,11 +64,12 @@ body {
   .btn-ghost {
     @apply btn bg-panel2 text-ink hover:bg-line border border-line;
   }
+  /* Disabled Buy / Sell are grey (not a faded green / red that still reads as clickable). */
   .btn-buy {
-    @apply btn bg-up text-white hover:brightness-110;
+    @apply btn bg-up text-white enabled:hover:brightness-110 disabled:bg-line disabled:text-muted;
   }
   .btn-sell {
-    @apply btn bg-down text-white hover:brightness-110;
+    @apply btn bg-down text-white enabled:hover:brightness-110 disabled:bg-line disabled:text-muted;
   }
   .input {
     @apply w-full rounded-lg border border-line bg-panel2 px-2.5 py-1.5 text-sm text-ink outline-none focus:border-accent focus:ring-1 focus:ring-accent/40;

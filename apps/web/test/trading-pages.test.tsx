@@ -288,6 +288,29 @@ describe('Positions', () => {
     expect(html).not.toMatch(BAD);
   });
 
+  it('Place order: Buy / Sell are disabled with the reason shown while no contract is selected', () => {
+    const order = (html: string) => ({
+      buy: /<button class="btn-buy"([^>]*)>Buy<\/button>/.exec(html)?.[1] ?? '',
+      sell: /<button class="btn-sell"([^>]*)>Sell<\/button>/.exec(html)?.[1] ?? '',
+    });
+    // No expiry listed: no contract at all.
+    const base = seeds([], funds()).filter(([k]) => k[0] !== 'expiries');
+    const none = render(<Positions />, [...base, [['expiries', 'NIFTY', 'live'], { options: [], futures: [] }]]);
+    expect(order(none).buy).toContain('disabled=""');
+    expect(order(none).sell).toContain('disabled=""');
+    expect(none).toContain('<p class="w-full text-2xs text-muted">Select an expiry and strike: no expiry is listed</p>');
+    // An expiry but no strike yet (the option chain has not answered).
+    const noStrike = render(<Positions />, seeds([], funds()));
+    expect(order(noStrike).buy).toContain('disabled=""');
+    expect(noStrike).toMatch(/<p class="w-full text-2xs text-muted">Select a strike: /);
+    // The chain lists the strikes: a contract is selected and the buttons work, with no reason line.
+    const ready = render(<Positions />, [...seeds([], funds()), [['chain', 'NIFTY', '2026-10-20', 'live'], chainOf({ expiry: '2026-10-20' })]]);
+    expect(order(ready).buy).not.toContain('disabled');
+    expect(order(ready).sell).not.toContain('disabled');
+    expect(ready).not.toContain('Select a strike');
+    expect(ready).not.toContain('Select an expiry');
+  });
+
   it('an empty account: P&L totals are dashes with "No open positions", never ₹0', () => {
     const html = render(<Positions />, seeds([], funds({ unrealizedPnl: 0, usedMargin: 0, available: 1_000_000, premiumPaid: 0 })));
     expect(html).toContain('No open positions');

@@ -4,7 +4,7 @@ import type { MarketClockInfo } from '@q26/core';
 import { hasChartData } from '../src/components/Chart';
 import { DataTable } from '../src/components/DataTable';
 import { FeedDetails } from '../src/components/FeedStatus';
-import { BuildUpBadge, Chg, Coverage, Dash, ErrorState, Gaps, Loadable, NoData, Stat, Val } from '../src/components/ui';
+import { BuildUpBadge, Chg, Coverage, Dash, ErrorState, gapLabel, Gaps, Loadable, NoData, Stat, Val } from '../src/components/ui';
 import { ApiError } from '../src/lib/api';
 import { feedView } from '../src/lib/feed';
 
@@ -74,6 +74,21 @@ describe('NoData / Gaps / Coverage', () => {
     expect(html(<Gaps gaps={{}} />)).toBe('');
     const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`s${i}`, `why ${i}`]));
     expect(html(<Gaps gaps={many} max={3} />)).toContain('+7 more');
+  });
+
+  it('Gaps shows readable section names, not internal keys', () => {
+    const out = html(<Gaps gaps={{ buildUpCounts: 'Instrument master not loaded yet', oiGainers: 'No OI yet', atmIv: 'no live premium', someNewSection: 'x', 'intraday.oi': 'y', NIFTY: 'unknown symbol', '2026-10-27': 'no premium' }} max={10} />);
+    expect(out).toContain('<span class="font-medium">Build-up counts</span>');
+    expect(out).toContain('<span class="font-medium">OI gainers</span>');
+    expect(out).toContain('<span class="font-medium">ATM IV</span>');
+    expect(out).toContain('<span class="font-medium">Some new section</span>'); // camelCase fallback
+    expect(out).toContain('<span class="font-medium">Intraday · OI</span>');
+    expect(out).toContain('<span class="font-medium">NIFTY</span>'); // names stay as they are
+    expect(out).toContain('<span class="font-medium">2026-10-27</span>');
+    expect(out).not.toMatch(/font-medium">(buildUpCounts|oiGainers|atmIv|someNewSection)</);
+    expect(gapLabel('carry')).toBe('Carry');
+    expect(gapLabel('staleLegs')).toBe('Stale legs');
+    expect(gapLabel('NIFTY 24000 CE')).toBe('NIFTY 24000 CE');
   });
 
   it('Coverage renders nothing without a note', () => {

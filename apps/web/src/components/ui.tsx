@@ -189,16 +189,66 @@ export function Val({ value, format, reason, className }: { value: number | stri
   return <span className={cx('tabular-nums', className)}>{format ? format(value) : formatIndian(value)}</span>;
 }
 
+/** Display names of the server's `gaps` sections (internal keys such as `buildUpCounts`). */
+const GAP_LABELS: Record<string, string> = {
+  atmIv: 'ATM IV',
+  available: 'Available funds',
+  book: 'Order book',
+  buildUpCounts: 'Build-up counts',
+  carry: 'Carry',
+  chain: 'Option chain',
+  change: 'Change',
+  changePct: '% change',
+  currentIv: 'Current IV',
+  daily: 'Daily',
+  feedGaps: 'Feed gaps',
+  fiiDii: 'FII / DII',
+  flow: '1-min flow',
+  forward: 'Forward',
+  hv: 'HV',
+  indices: 'Indices',
+  iv: 'IV',
+  ivChange: 'IV change',
+  ivr: 'IV rank',
+  liveData: 'Live data',
+  margin: 'Margin',
+  movers: 'Movers',
+  oi: 'OI',
+  oiChange: 'OI change',
+  oiGainers: 'OI gainers',
+  orb: 'Opening range',
+  pain: 'Max pain',
+  pcr: 'PCR',
+  pnl: 'P&L',
+  premiumTurnover: 'Premium turnover',
+  staleLegs: 'Stale legs',
+  totalNet: 'Total net',
+  unrealizedPnl: 'Unrealised P&L',
+};
+
+/**
+ * The name shown for a `gaps` section: a known key's label, else a camelCase key split into words
+ * ("someSection" → "Some section"); "a.b" sections are labelled part by part ("Intraday · OI"). Keys
+ * that are already names (symbols, expiries, contract labels) are shown as they are.
+ */
+export function gapLabel(key: string): string {
+  if (GAP_LABELS[key]) return GAP_LABELS[key];
+  if (key.includes('.')) return key.split('.').map(gapLabel).join(' · ');
+  if (!/^[a-z][a-zA-Z0-9]*$/.test(key)) return key;
+  const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 /** Sections of a response that are not available, as a small muted notice: section → reason. */
 export function Gaps({ gaps, only, omit, max = 6, className }: { gaps?: Record<string, string> | null; only?: string[]; omit?: string[]; max?: number; className?: string }) {
   const all = Object.entries(gaps ?? {}).filter(([k, why]) => why && (!only || only.includes(k)) && !omit?.includes(k));
   if (!all.length) return null;
   const shown = all.slice(0, max);
   return (
-    <ul className={cx('space-y-0.5 text-2xs text-muted', className)} aria-label="Not available" title={all.length > shown.length ? all.map(([k, why]) => `${k} → ${why}`).join('\n') : undefined}>
+    <ul className={cx('space-y-0.5 text-2xs text-muted', className)} aria-label="Not available" title={all.length > shown.length ? all.map(([k, why]) => `${gapLabel(k)} → ${why}`).join('\n') : undefined}>
       {shown.map(([k, why]) => (
-        <li key={k}>
-          <span className="font-medium">{k}</span> → {why}
+        <li key={k} data-gap={k}>
+          <span className="font-medium">{gapLabel(k)}</span> → {why}
         </li>
       ))}
       {all.length > shown.length && <li>+{all.length - shown.length} more</li>}

@@ -5,19 +5,24 @@ import type { Page, TestInfo } from '@playwright/test';
 /**
  * Collects what must never happen on a page: uncaught errors, console errors and API failures. A 503
  * NO_LIVE_DATA answer is the server saying "nothing live" (the page shows a blank state with the
- * reason), so it is allowed, as is the browser's console line for it; any other API status ≥ 400 is
- * an error. Call `check()` at the end of a test to await the response bodies.
+ * reason), so it is allowed, as is the browser's console line for it. So is GET /api/ops answering 404
+ * "Operations … are not running on this server" (the FIXTURE server runs no login monitor / watchdog /
+ * audit; the dashboard shows that state). Any other API status ≥ 400 is an error. Call `check()` at the
+ * end of a test to await the response bodies.
  */
-export function watchErrors(page: Page): { errors: string[]; noLiveData: string[]; check: () => Promise<string[]> } {
+export function watchErrors(page: Page): { errors: string[]; noLiveData: string[]; opsNotRunning: string[]; check: () => Promise<string[]> } {
   const errors: string[] = [];
   const noLiveData: string[] = [];
+  const opsNotRunning: string[] = [];
   const pending: Promise<void>[] = [];
+  const isOpsStatus = (url: string) => new URL(url).pathname === '/api/ops';
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => {
     if (m.type() !== 'error') return;
     const text = m.text();
     if (/favicon|WebSocket|ERR_ABORTED/i.test(text)) return;
     if (/Failed to load resource: the server responded with a status of 503/.test(text)) return; // checked below by body
+    if (/Failed to load resource: the server responded with a status of 404/.test(text) && isOpsStatus(m.location().url)) return; // checked below by body
     errors.push(`console: ${text}`);
   });
   page.on('response', (r) => {
@@ -31,6 +36,7 @@ export function watchErrors(page: Page): { errors: string[]; noLiveData: string[
           /* not JSON */
         }
         if (r.status() === 503 && body?.code === 'NO_LIVE_DATA' && body.error) noLiveData.push(`${new URL(r.url()).pathname}: ${body.error}`);
+        else if (r.status() === 404 && isOpsStatus(r.url()) && /not running/.test(body?.error ?? '')) opsNotRunning.push(body!.error!);
         else errors.push(`HTTP ${r.status()} ${r.url()}${body?.error ? ` — ${body.error}` : ''}`);
       })(),
     );
@@ -38,6 +44,7 @@ export function watchErrors(page: Page): { errors: string[]; noLiveData: string[
   return {
     errors,
     noLiveData,
+    opsNotRunning,
     check: async () => {
       await Promise.allSettled(pending);
       return errors;
