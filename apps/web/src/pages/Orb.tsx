@@ -6,7 +6,7 @@ import { SessionDate, SymbolSelect } from '../components/pickers';
 import { TrendBadge } from '../components/trend';
 import { Card, Chg, Coverage, cx, Dash, Gaps, Loadable, PageHeader, Segmented, Stat, Val } from '../components/ui';
 import { qs } from '../lib/api';
-import { formatDate, formatFixed, formatIndian, formatPct, formatSessionTime, isNum } from '../lib/format';
+import { DASH, formatDate, formatFixed, formatIndian, formatPct, formatSessionTime, isNum } from '../lib/format';
 import { useLive, useMeta } from '../lib/hooks';
 import { useApp, useTicks } from '../lib/store';
 
@@ -283,7 +283,7 @@ export default function Orb() {
                 <Stat
                   label="Trend days"
                   value={`${h.stats.trendDays}/${h.stats.days}`}
-                  sub={`Avg follow-through ${isNum(h.stats.avgFollowThroughPct) ? `${formatFixed(h.stats.avgFollowThroughPct, 2)}%` : '—'}`}
+                  sub={`Avg follow-through ${isNum(h.stats.avgFollowThroughPct) ? `${formatFixed(h.stats.avgFollowThroughPct, 2)}%` : DASH}`}
                   hint={isNum(h.stats.avgFollowThroughPct) ? 'Closed beyond the range on the side it first broke' : 'No day broke the range, so there is no follow-through to average'}
                 />
               </div>

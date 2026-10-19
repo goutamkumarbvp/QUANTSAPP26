@@ -125,7 +125,9 @@ export async function buildDashboard(md: MarketDataProvider, analytics: Analytic
       missing.push(reasonOf(e, `dashboard.indices.${s}`, onError));
     }
   }
-  if (missing.length) gaps.add('indices', missing.slice(0, 4).join('; ') + (missing.length > 4 ? ` (+${missing.length - 4} more)` : ''));
+  // The same reason for every index (e.g. the instrument master not loaded) is said once.
+  const reasons = [...new Set(missing)];
+  if (reasons.length) gaps.add('indices', reasons.slice(0, 4).join('; ') + (reasons.length > 4 ? ` (+${reasons.length - 4} more)` : ''));
 
   // Stock movers: live spot change; near-future OI change and build-up.
   let gainers: DashboardMover[] = [];

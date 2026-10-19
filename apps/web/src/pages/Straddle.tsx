@@ -3,7 +3,7 @@ import type { StraddlePoint, StraddleResponse } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../components/pickers';
 import { Card, Coverage, Field, Gaps, Loadable, PageHeader, Segmented, Stat, Toggle } from '../components/ui';
-import { qs } from '../lib/api';
+import { isNoLiveData, qs } from '../lib/api';
 import { formatDate, formatFixed, formatIndian, formatSessionTime, isNum } from '../lib/format';
 import { useChain, useLive, useSymbolInfo } from '../lib/hooks';
 import { useApp, useTicks } from '../lib/store';
@@ -71,7 +71,8 @@ export default function Straddle() {
     };
   }, [q.data, legsShown, width, interval, c]);
   // Only the windows in which both legs traded have a premium.
-  const priced = (q.data?.points ?? []).filter((p): p is StraddlePoint & { straddle: number } => isNum(p.straddle));
+  // A 503 replaces the chart with its reason: the stats must not keep showing the previous answer.
+  const priced = (isNoLiveData(q.error) ? [] : q.data?.points ?? []).filter((p): p is StraddlePoint & { straddle: number } => isNum(p.straddle));
   const last = priced[priced.length - 1];
   const first = priced[0];
   const hi = priced.length ? Math.max(...priced.map((p) => p.straddle)) : null;

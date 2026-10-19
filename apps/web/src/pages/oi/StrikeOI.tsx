@@ -125,13 +125,13 @@ export default function StrikeOI() {
                   label="Total Call OI"
                   value={view.ce ? formatCompact(view.ce.total) : null}
                   reason="No strike in the window has call OI"
-                  sub={<span>Chg <Chg value={view.ceChg ? view.ceChg.total / 1e5 : null} decimals={2} reason={noChange(view.d)} /> L{view.ceChg && view.ce && view.ceChg.n < view.ce.n ? ` · ${view.ceChg.n} of ${view.ce.n} strikes` : ''}</span>}
+                  sub={<span>Chg <Chg value={view.ceChg ? view.ceChg.total / 1e5 : null} decimals={2} reason={noChange(view.d)} />{view.ceChg && ' L'}{view.ceChg && view.ce && view.ceChg.n < view.ce.n ? ` · ${view.ceChg.n} of ${view.ce.n} strikes` : ''}</span>}
                 />
                 <Stat
                   label="Total Put OI"
                   value={view.pe ? formatCompact(view.pe.total) : null}
                   reason="No strike in the window has put OI"
-                  sub={<span>Chg <Chg value={view.peChg ? view.peChg.total / 1e5 : null} decimals={2} reason={noChange(view.d)} /> L{view.peChg && view.pe && view.peChg.n < view.pe.n ? ` · ${view.peChg.n} of ${view.pe.n} strikes` : ''}</span>}
+                  sub={<span>Chg <Chg value={view.peChg ? view.peChg.total / 1e5 : null} decimals={2} reason={noChange(view.d)} />{view.peChg && ' L'}{view.peChg && view.pe && view.peChg.n < view.pe.n ? ` · ${view.peChg.n} of ${view.pe.n} strikes` : ''}</span>}
                 />
                 <Stat
                   label="PCR (shown strikes)"

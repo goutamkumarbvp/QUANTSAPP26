@@ -82,13 +82,14 @@ export default function OptionChainPage() {
   const setSymbol = useApp((s) => s.setSymbol);
   const [expiry, setExpiry] = useState<string>();
   const [params] = useSearchParams();
-  // `?at=<epoch ms>` opens the page on a recorded chain.
-  const [asOf, setAsOf] = useState(() => {
+  // `?at=<epoch ms>` opens the page on a recorded chain, at that exact time (the input only shows minutes).
+  const [urlAt] = useState(() => {
     const t = Number(params.get('at'));
-    return Number.isFinite(t) && t > 0 ? istLocal(t) : '';
+    return Number.isFinite(t) && t > 0 ? t : undefined;
   });
+  const [asOf, setAsOf] = useState(() => (urlAt !== undefined ? istLocal(urlAt) : ''));
   const serverNow = useServerNow();
-  const atTs = recordedTs(asOf, serverNow);
+  const atTs = urlAt !== undefined && urlAt < serverNow && asOf === istLocal(urlAt) ? urlAt : recordedTs(asOf, serverNow);
   return (
     <div className="space-y-3">
       <PageHeader title="Option Chain" subtitle="Strike-wise premium, OI, change in OI, IV, Greeks and build-up. Click a premium to trade; hover for B/S to build a strategy.">
@@ -151,12 +152,12 @@ function ChainPanel({ symbol, expiry, atTs, requested }: { symbol: string; expir
         <>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-9">
             <Stat label="Spot" value={isNum(chain.spot) ? formatIndian(chain.spot) : null} reason={chain.gaps?.spot} sub={isNum(chain.spot) ? <span><Chg value={chain.spotChangePct} pct reason="Needs the previous close" /> <AsOf ts={chain.spotTs} label="" /></span> : undefined} />
-            <Stat label={`Future (${formatExpiry(chain.futureExpiry)})`} value={isNum(chain.future) ? formatIndian(chain.future) : null} reason="No live price for the future" sub={isNum(chain.future) && isNum(chain.spot) ? `Basis ${(chain.future - chain.spot).toFixed(2)}` : undefined} />
+            <Stat label={chain.futureExpiry ? `Future (${formatExpiry(chain.futureExpiry)})` : 'Future'} value={isNum(chain.future) ? formatIndian(chain.future) : null} reason={chain.futureExpiry ? `No ${recorded ? 'recorded' : 'live'} price for the future` : 'No listed future'}sub={isNum(chain.future) && isNum(chain.spot) ? `Basis ${(chain.future - chain.spot).toFixed(2)}` : undefined} />
             <Stat
               label="Forward"
               value={isNum(chain.forward) ? formatIndian(chain.forward) : null}
               reason={chain.gaps?.forward}
-              sub={chain.forwardSource ? `${FORWARD_SOURCE[chain.forwardSource]} · carry ${isNum(chain.carry) ? formatFixed(chain.carry * 100, 2, '%') : '—'}` : undefined}
+              sub={chain.forwardSource ? <span>{FORWARD_SOURCE[chain.forwardSource]} · carry <Val value={isNum(chain.carry) ? chain.carry * 100 : null} format={(x) => formatFixed(x, 2, '%')} reason={chain.gaps?.carry ?? 'No carry implied for this expiry'} /></span> : undefined}
               hint="The forward of this expiry that IV and Greeks are solved against"
             />
             <Stat label="ATM IV" value={isNum(chain.atmIv) ? chain.atmIv.toFixed(2) : null} reason={chain.gaps?.atmIv} sub={<Chg value={chain.ivChange} reason={chain.gaps?.ivChange ?? 'Needs the previous session\'s official option closes'} />} hint="Solved from the live ATM premiums" />
@@ -167,7 +168,7 @@ function ChainPanel({ symbol, expiry, atTs, requested }: { symbol: string; expir
               label="Total OI CE / PE"
               value={isNum(chain.totalCeOi) || isNum(chain.totalPeOi) ? `${formatCompact(chain.totalCeOi)} / ${formatCompact(chain.totalPeOi)}` : null}
               reason={chain.gaps?.oi}
-              sub={<span>Chg <Chg value={isNum(chain.totalCeOiChange) ? chain.totalCeOiChange / 1e5 : null} decimals={1} reason={chain.gaps?.oiChange} />L / <Chg value={isNum(chain.totalPeOiChange) ? chain.totalPeOiChange / 1e5 : null} decimals={1} reason={chain.gaps?.oiChange} />L</span>}
+              sub={<span>Chg <Chg value={isNum(chain.totalCeOiChange) ? chain.totalCeOiChange / 1e5 : null} decimals={1} reason={chain.gaps?.oiChange} />{isNum(chain.totalCeOiChange) && 'L'} / <Chg value={isNum(chain.totalPeOiChange) ? chain.totalPeOiChange / 1e5 : null} decimals={1} reason={chain.gaps?.oiChange} />{isNum(chain.totalPeOiChange) && 'L'}</span>}
             />
             <Stat label="Days to expiry" value={formatFixed(chain.daysToExpiry, 1)} sub={`Lot ${chain.lotSize} · step ${chain.strikeStep}`} />
           </div>

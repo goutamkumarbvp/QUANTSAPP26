@@ -37,7 +37,7 @@ function Detail({ s, onClose }: { s: SavedStrategy; onClose: () => void }) {
     <Modal open onClose={onClose} title={s.name} wide>
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-          <span>MTM <b className={cx('text-sm tabular-nums', tone(live?.mtm))}><Val value={live?.mtm} format={(x) => formatINR(x)} reason={live ? 'A leg has no live price' : 'No live valuation yet'} /></b></span>
+          <span>MTM <b className={cx('text-sm tabular-nums', tone(live?.mtm))}><Val value={live?.mtm} format={(x) => formatINR(x)} reason={live ? Object.values(live.gaps ?? {})[0] ?? 'A leg has no live price' : 'No live valuation yet'} /></b></span>
           <AsOf ts={live?.ts} label="valued" />
         </div>
         <div className="overflow-x-auto">

@@ -3,6 +3,7 @@ import type { ConeResponse } from '@q26/core';
 import { Chart, axis, baseOption, LINE_GAPS, useChartColors } from '../../components/Chart';
 import { SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, Gaps, Loadable, PageHeader, Stat } from '../../components/ui';
+import { isNoLiveData } from '../../lib/api';
 import { formatDate, formatFixed, isNum } from '../../lib/format';
 import { useLive } from '../../lib/hooks';
 import { useApp } from '../../lib/store';
@@ -37,7 +38,8 @@ export default function Cone() {
       ],
     };
   }, [q.data, c]);
-  const d = q.data;
+  // A 503 replaces the cone with its reason: the stats must not keep showing the previous answer.
+  const d = isNoLiveData(q.error) ? undefined : q.data;
   const r20 = d?.rows.find((r) => r.window === 20);
   const rowsWhy = d?.gaps?.rows ?? 'The official history is too short for this window';
   const ivVsMedian = d && r20 && isNum(d.atmIv) && isNum(r20.median) ? d.atmIv - r20.median : null;

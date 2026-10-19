@@ -4,7 +4,7 @@ import { formatIndian, istTs, type MultiStrikeResponse } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, cx, Dash, Gaps, Loadable, PageHeader, Segmented } from '../../components/ui';
-import { errorText, qs } from '../../lib/api';
+import { errorText, isNoLiveData, qs } from '../../lib/api';
 import { formatCompact, formatFixed, formatSessionTime, isNum } from '../../lib/format';
 import { useChain, useLive } from '../../lib/hooks';
 import { useApp, useTicks } from '../../lib/store';
@@ -140,7 +140,7 @@ export default function MultiStrike() {
           )}
         </Loadable>
       </Card>
-      {q.data && (
+      {q.data && !isNoLiveData(q.error) && (
         <Card title="Latest values" pad={false}>
           <div className="overflow-x-auto">
             <table className="tbl">

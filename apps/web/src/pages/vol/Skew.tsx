@@ -3,7 +3,7 @@ import { formatExpiry, type SkewResponse } from '@q26/core';
 import { Chart, axis, baseOption, LINE_GAPS, useChartColors } from '../../components/Chart';
 import { SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, cx, Gaps, Loadable, NoData, PageHeader, Segmented, Toggle, Val } from '../../components/ui';
-import { errorText, qs } from '../../lib/api';
+import { errorText, isNoLiveData, qs } from '../../lib/api';
 import { formatDate, formatFixed, formatIndian } from '../../lib/format';
 import { useExpiries, useLive } from '../../lib/hooks';
 import { useApp } from '../../lib/store';
@@ -93,7 +93,7 @@ export default function Skew() {
           </Loadable>
         )}
       </Card>
-      {q.data && (
+      {q.data && list.length > 0 && !isNoLiveData(q.error) && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
           {q.data.curves.map((cv) => (
             <div key={`${cv.expiry}${cv.source}`} className="card card-pad" title={cv.source === 'eod' ? `Solved from the official closes of ${formatDate(cv.date, true)}` : 'Solved from live premiums'}>

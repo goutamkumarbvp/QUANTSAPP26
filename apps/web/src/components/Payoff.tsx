@@ -251,7 +251,8 @@ export function PayoffChart({ view, height = 340 }: { view: StrategyView; height
     const spot = view.spot;
     const { prices, expiry, target, targetMissing } = view.curve;
     const sd = view.atmIv !== null ? spot * view.atmIv * Math.sqrt(Math.max(0, (view.expiryTs - view.nowTs) / (365 * DAY_MS))) : 0;
-    const showTarget = view.targetTs < view.expiryTs;
+    // T+0 unless the target slider moved time forward from the valuation time.
+    const showTarget = view.targetTs > view.nowTs;
     const base = showTarget ? 'On target date' : 'Today (T+0)';
     const targetName = view.targetBlank ? `${base} — not available` : targetMissing.length ? `${base} — excl. ${targetMissing.length} leg${targetMissing.length > 1 ? 's' : ''}` : base;
     return {
@@ -298,7 +299,21 @@ export function PayoffChart({ view, height = 340 }: { view: StrategyView; height
     };
   }, [view, c]);
   if (!view.curve) return <NoPayoff view={view} height={height} />;
-  return <Chart option={option} height={height} />;
+  const missing = view.curve.targetMissing;
+  const base = view.targetTs !== null && view.nowTs !== null && view.targetTs > view.nowTs ? 'On target date' : 'Today (T+0)';
+  return (
+    <>
+      <Chart option={option} height={height} />
+      {/* The legend is drawn on the canvas: say in text what the dashed line leaves out. */}
+      {view.targetBlank ? (
+        <div className="mt-1 text-2xs text-warn" role="note">{base} — not available: no open leg has a live IV / carry to value it with.</div>
+      ) : missing.length > 0 ? (
+        <div className="mt-1 text-2xs text-warn" role="note">
+          {base} — excl. {plural(missing.length, 'leg')}: {missing.map((g) => `${g.label} (${g.reason})`).join('; ')}
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 const money = (x: number | null) => (x === null ? 'Unlimited' : formatINR(x));
@@ -318,7 +333,7 @@ export function StrategyNotes({ view }: { view: StrategyView }) {
     <div className="space-y-0.5 text-2xs text-muted" role="note">
       <div>
         IV and Greeks are solved from live premiums; <AsOf ts={view.nowTs} label="valued at" />
-        {view.targetTs !== null && view.expiryTs !== null && view.targetTs < view.expiryTs ? ' · the target-date curve moves time forward from there' : ''}
+        {view.targetTs !== null && view.nowTs !== null && view.targetTs > view.nowTs ? ' · the target-date curve moves time forward from there' : ''}
       </div>
       {a.missingNow.length > 0 && <div className="text-warn">Left out of today's (T+0) curve, Greeks and margin — {list(a.missingNow)}</div>}
       {a.missingAtExpiry.length > 0 && <div className="text-warn">Left out of the at-expiry figures — {list(a.missingAtExpiry)}</div>}

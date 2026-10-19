@@ -143,7 +143,7 @@ const clk = (k: string) => [k];
 /* ------------------------------------------------------------------ option chain */
 
 describe('Option chain', () => {
-  const seeds = (c: OptionChain | ApiError, at = 'live'): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', at], expiries], [['chain', 'NIFTY', '', at], c]];
+  const seeds = (c: OptionChain | ApiError, at: number | 'live' = 'live'): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', at], expiries], [['chain', 'NIFTY', '', at], c]];
 
   it('live chain: spot line, ATM strike and ITM shading, IV source marker, bid/ask', () => {
     const html = render(<OptionChainPage />, seeds(chainOf({ coverage: 'PCR over 5 strikes' })));
@@ -179,12 +179,12 @@ describe('Option chain', () => {
 
   it('?at= opens a recorded chain: the recorded time is shown and trading is off', () => {
     const at = ts - 3_600_000;
-    const html = render(<OptionChainPage />, seeds(chainOf({ ts: at, valuationTs: at, spotTs: at }), String(at)), `/option-chain?at=${at}`);
+    const html = render(<OptionChainPage />, seeds(chainOf({ ts: at, valuationTs: at, spotTs: at }), at), `/option-chain?at=${at}`);
     expect(html).toContain('Recorded chain as of');
     expect(html).toContain('not live');
     expect(html).not.toContain('Place a paper order');
     expect(html).not.toContain('Add BUY leg to strategy builder');
-    const refused = render(<OptionChainPage />, seeds(noLive('Nothing recorded for NIFTY at 09:30 (last recorded minute 09:15): the recorder was not running'), String(at)), `/option-chain?at=${at}`);
+    const refused = render(<OptionChainPage />, seeds(noLive('Nothing recorded for NIFTY at 09:30 (last recorded minute 09:15): the recorder was not running'), at), `/option-chain?at=${at}`);
     expect(refused).toContain('the recorder was not running');
   });
 });
@@ -393,7 +393,9 @@ describe('Strategy Builder and payoff', () => {
 
   it('adding a leg needs a live premium: without one the button is off with the reason', () => {
     seed('open', []);
-    const html = render(<Builder />, seeds(chainOf({}, STRIKES.map((strike) => ({ strike, ce: blankLeg(), pe: blankLeg() })))));
+    // The add-leg form starts on the nearest listed expiry (20 Oct): seed that chain.
+    const blank = chainOf({ expiry: '2026-10-20' }, STRIKES.map((strike) => ({ strike, ce: blankLeg(), pe: blankLeg() })));
+    const html = render(<Builder />, [...seeds(chainOf()), [['chain', 'NIFTY', '2026-10-20', 'live'], blank]]);
     expect(html).toMatch(/<button class="[^"]*btn-buy"[^>]*disabled=""/);
     expect(html).toContain('Not traded in the live session');
     expect(html).not.toMatch(BAD);

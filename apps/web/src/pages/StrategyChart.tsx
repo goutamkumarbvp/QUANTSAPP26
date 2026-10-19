@@ -4,7 +4,7 @@ import { describeStrategy, type StrategyChartPoint } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { IntervalSelect, SessionDate } from '../components/pickers';
 import { Card, Coverage, Empty, Loadable, PageHeader, Segmented, Stat } from '../components/ui';
-import { api } from '../lib/api';
+import { api, isNoLiveData } from '../lib/api';
 import { formatFixed, formatINR, formatIndian, formatSessionTime, isNum } from '../lib/format';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useBuilder, useTicks } from '../lib/store';
@@ -61,7 +61,8 @@ export default function StrategyChart() {
     };
   }, [q.data, metric, interval, c]);
   // The latest window in which every leg traded (a window with a missing leg has no premium / P&L).
-  const priced = (q.data ?? []).filter((p) => isNum(p.premium));
+  // A 503 (lot size unknown, nothing recorded) replaces the chart with its reason: no stale stats above it.
+  const priced = (isNoLiveData(q.error) ? [] : q.data ?? []).filter((p) => isNum(p.premium));
   const last = priced[priced.length - 1];
   const field = metric === 'greeks' ? (['delta', 'theta', 'vega'] as const) : metric === 'pnl' ? (['pnl'] as const) : (['premium'] as const);
   const blank = q.data && !q.data.some((p) => field.some((f) => isNum(p[f]))) ? 'No window has this value: a leg did not trade in it, or an IV could not be solved from its premium' : undefined;
@@ -78,7 +79,7 @@ export default function StrategyChart() {
         <>
           {last && (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <Stat label="P&L" value={isNum(last.pnl) ? formatINR(last.pnl) : null} reason="A leg did not trade in this window" tone={isNum(last.pnl) ? (last.pnl >= 0 ? 'up' : 'down') : undefined} sub={`${date ? 'vs first traded price' : 'vs your entry prices'} · ${formatSessionTime(last.ts)}`} />
+              <Stat label="P&L" value={isNum(last.pnl) ? formatINR(last.pnl) : null} reason="A leg did not trade in this window" tone={isNum(last.pnl) ? (last.pnl >= 0 ? 'up' : 'down') : undefined} sub={`${date ? 'vs first traded price' : legs.every((l) => l.price > 0) ? 'vs your entry prices' : 'vs your entry prices (first traded price where a leg has none)'} · ${formatSessionTime(last.ts)}`} />
               <Stat label="Net premium" value={isNum(last.premium) ? formatFixed(last.premium, 2) : null} sub="+ = net long, − = net short" />
               <Stat label="Delta" value={isNum(last.delta) ? formatFixed(last.delta, 1) : null} reason="An IV could not be solved from a leg’s traded premium" sub="solved from traded premiums" />
               <Stat label="Theta / Vega" value={isNum(last.theta) && isNum(last.vega) ? `${formatINR(last.theta)} / ${formatINR(last.vega)}` : null} reason="An IV could not be solved from a leg’s traded premium" />

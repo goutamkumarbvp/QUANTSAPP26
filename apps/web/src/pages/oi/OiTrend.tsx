@@ -3,7 +3,7 @@ import type { OiTrendPoint, OiTrendResponse } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Chg, Coverage, Gaps, Loadable, PageHeader, Segmented, Stat } from '../../components/ui';
-import { qs } from '../../lib/api';
+import { isNoLiveData, qs } from '../../lib/api';
 import { formatCompact, formatFixed, formatIndian, isNum } from '../../lib/format';
 import { useLive } from '../../lib/hooks';
 import { useApp, useTicks } from '../../lib/store';
@@ -56,7 +56,8 @@ export default function OiTrend() {
   }, [pts, view, interval, c]);
   // The change view with no OI change at all (previous-close OI missing): blank with the reason, not a spot-only chart.
   const blank = view === 'change' && q.data && !q.data.points.some((p) => isNum(p.ceChange) || isNum(p.peChange)) ? q.data.gaps?.change ?? 'OI change needs the previous session’s official OI' : undefined;
-  const last = q.data?.points[q.data.points.length - 1];
+  // A 503 replaces the page with its reason: the stats must not keep showing the previous answer.
+  const last = isNoLiveData(q.error) ? undefined : q.data?.points[q.data.points.length - 1];
   const changeWhy = q.data?.gaps?.change ?? 'OI change needs the previous session’s official OI';
   const netAdd = last && isNum(last.peChange) && isNum(last.ceChange) ? last.peChange - last.ceChange : null;
   return (
@@ -69,8 +70,8 @@ export default function OiTrend() {
       </PageHeader>
       {last && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Stat label="Call OI (streamed strikes ±8 %)" value={isNum(last.ceOi) ? formatCompact(last.ceOi) : null} reason="No recorded call OI" sub={<span>Chg <Chg value={isNum(last.ceChange) ? last.ceChange / 1e5 : null} reason={changeWhy} /> L</span>} />
-          <Stat label="Put OI (streamed strikes ±8 %)" value={isNum(last.peOi) ? formatCompact(last.peOi) : null} reason="No recorded put OI" sub={<span>Chg <Chg value={isNum(last.peChange) ? last.peChange / 1e5 : null} reason={changeWhy} /> L</span>} />
+          <Stat label="Call OI (streamed strikes ±8 %)" value={isNum(last.ceOi) ? formatCompact(last.ceOi) : null} reason="No recorded call OI" sub={<span>Chg <Chg value={isNum(last.ceChange) ? last.ceChange / 1e5 : null} reason={changeWhy} />{isNum(last.ceChange) && ' L'}</span>} />
+          <Stat label="Put OI (streamed strikes ±8 %)" value={isNum(last.peOi) ? formatCompact(last.peOi) : null} reason="No recorded put OI" sub={<span>Chg <Chg value={isNum(last.peChange) ? last.peChange / 1e5 : null} reason={changeWhy} />{isNum(last.peChange) && ' L'}</span>} />
           <Stat label="PCR (streamed strikes ±8 %)" value={isNum(last.pcr) ? formatFixed(last.pcr, 2) : null} reason="No recorded OI on both sides" tone={isNum(last.pcr) ? (last.pcr >= 1 ? 'up' : 'down') : undefined} />
           <Stat
             label="Net put − call addition"
