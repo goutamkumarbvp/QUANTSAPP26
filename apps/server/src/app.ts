@@ -5,12 +5,13 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { z, ZodError } from 'zod';
-import { expiryTs, type ClientMessage, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type ServerMessage, type SymbolInfo } from '@q26/core';
+import { expiryTs, type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type ServerMessage, type SymbolInfo } from '@q26/core';
 import { profile } from './auth';
 import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
-import { SCANNERS } from './services/market-tools';
+import { SCANNERS, type ToolViewOptions } from './services/market-tools';
 import type { Services } from './services';
+import { buildDashboard } from './services/dashboard';
 import {
   buildOptionChain,
   candles,
@@ -56,6 +57,14 @@ const legSchema = z.object({
   exitPrice: z.coerce.number().nullable().optional(),
   active: z.boolean().optional(),
 });
+
+/**
+ * Legs of the strategy chart and recap: the lot size is resolved by Analytics (instrument master,
+ * else the official file of the contract's last day); a lot size sent by the client is used only for
+ * a contract neither knows, and is never defaulted.
+ */
+const chartLegSchema = legSchema.extend({ lotSize: z.coerce.number().positive().optional() });
+const chartLeg = (l: z.infer<typeof chartLegSchema>): Leg => ({ ...l, lotSize: l.lotSize ?? 0 });
 
 const strategySchema = z.object({
   name: z.string().max(80).optional(),
@@ -158,8 +167,9 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     if (!Number.isFinite(t)) throw httpError(400, 'at must be a timestamp in epoch milliseconds');
     return t < now() ? t : undefined;
   };
-  const e = svc.engine;
   const an = svc.analytics;
+  /** Live views (order book, order flow) stream their contract in the provider's 'user' tier (ad-hoc watches, rule h). */
+  const userTier: ToolViewOptions = { touch: (key, level) => svc.userWatches.touch([key], level) };
 
   /** Index underlyings from the instrument master (by name while it is not loaded). */
   const indexSymbols = (): string[] => (md.ref.ready() ? md.ref.underlyings().filter((u) => u.kind === 'index').map((u) => u.symbol) : INDEX_SYMBOLS);
@@ -246,44 +256,15 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
     return candles(md, target, q.interval ?? '5', num(q.days, q.interval === 'D' ? 120 : 1), { at: at(req) });
   });
 
-  app.get('/api/dashboard', async () => {
-    const ts = now();
-    const indices = INDEX_SYMBOLS.map((s) => e.quote(s, ts));
-    const fut = an.futuresBuildUp(ts);
-    const stocks = fut.filter((r) => r.kind === 'stock').map((r) => ({ ...r, spot: e.quote(r.symbol, ts) }));
-    const byChange = [...stocks].sort((a, b) => b.spot.changePct - a.spot.changePct);
-    const counts = { 'Long Build-up': 0, 'Short Build-up': 0, 'Short Covering': 0, 'Long Unwinding': 0, Neutral: 0 };
-    for (const r of stocks) counts[r.buildUp]++;
-    const chains = ['NIFTY', 'BANKNIFTY', 'SENSEX'].map((s) => {
-      const c = e.chain(s, undefined, ts);
-      const o = an.orb(s, ts);
-      const flow = svc.tools.lastMinuteFlow(s, ts);
-      return {
-        symbol: s, expiry: c.expiry, pcr: c.pcr, maxPain: c.maxPain, atmIv: c.atmIv, ivChange: c.ivChange, support: c.support, resistance: c.resistance, spot: c.spot, daysToExpiry: c.daysToExpiry,
-        orb: { high: o.evaluation.high, low: o.evaluation.low, trend: o.evaluation.trend, whipsaw: o.evaluation.whipsaw, reentered: o.evaluation.reentered, summary: o.summary },
-        flow: flow ? { buyPct: flow.buyPct, delta: flow.delta, sentiment: flow.sentiment, ts: flow.ts } : null,
-      };
-    });
-    const p = e.parts(ts);
-    const flows = svc.flows.fiiDii.slice(Math.max(0, p.dayIdx - 5), p.dayIdx);
-    const toRow = (r: (typeof stocks)[number]) => ({ symbol: r.symbol, ltp: r.spot.ltp, changePct: r.spot.changePct, oiChangePct: r.oiChangePct, buildUp: r.buildUp });
-    return {
-      clock: svc.clock.info(),
-      indices,
-      gainers: byChange.slice(0, 6).map(toRow),
-      losers: byChange.slice(-6).reverse().map(toRow),
-      oiGainers: [...stocks].sort((a, b) => b.oiChangePct - a.oiChangePct).slice(0, 6).map(toRow),
-      buildUpCounts: counts,
-      chains,
-      fiiDii: flows,
-    };
-  });
+  // Home: every card filled on its own (index quotes, stock movers, build-up, 3 chain cards with
+  // opening range and last-minute flow, official FII/DII); a card without data is blank with its gap.
+  app.get('/api/dashboard', async () => buildDashboard(md, an, svc.tools, { indices: indexSymbols(), onError: (where, err) => app.log.error({ err, where }, 'dashboard card failed') }));
 
   /* ---------------------------- trend: opening range & order flow ---------------------------- */
 
   const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD');
   const notFuture = (d: string | undefined) => {
-    if (d && d > svc.clock.info().date) throw Object.assign(new Error(`${d} is in the future`), { statusCode: 400 });
+    if (d && d > md.clock.info().date) throw httpError(400, `${d} is in the future`);
     return d || undefined;
   };
   const orbQuery = z.object({
@@ -314,7 +295,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   });
   app.get<{ Params: { symbol: string } }>('/api/order-flow/:symbol', async (req) => {
     const q = flowQuery.parse(qs(req));
-    return svc.tools.orderFlow(req.params.symbol, { type: q.type, strike: q.strike, expiry: q.expiry || undefined }, now(), { date: notFuture(q.date), limit: q.limit });
+    return svc.tools.orderFlow(req.params.symbol, { type: q.type, strike: q.strike, expiry: q.expiry || undefined }, now(), { date: notFuture(q.date), limit: q.limit, ...userTier });
   });
 
   /* ---------------------------- open interest ---------------------------- */
@@ -337,8 +318,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   app.get<{ Params: { symbol: string } }>('/api/oi/pcr/:symbol', async (req) => {
     const q = qs(req);
-    const trend = an.oiTrend(req.params.symbol, q.expiry, q.date, num(q.interval, 5), now());
-    return { expiry: trend.expiry, intraday: trend.points.map((p) => ({ ts: p.ts, pcr: p.pcr, spot: p.spot, ceOi: p.ceOi, peOi: p.peOi })), daily: an.dailyPcr(req.params.symbol, Math.min(120, num(q.days, 30)), now()) };
+    return an.pcr(req.params.symbol, q.expiry, q.date, num(q.interval, 5), Math.min(120, num(q.days, 30)));
   });
 
   app.get<{ Params: { symbol: string } }>('/api/oi/max-pain/:symbol', async (req) => an.maxPainDetail(req.params.symbol, qs(req).expiry, now()));
@@ -347,19 +327,15 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
 
   app.get('/api/oi/breadth', async () => an.breadth(now()));
 
+  // Official files only (published after the close): the sessions of the last `days` that are loaded.
   app.get('/api/participants', async (req) => {
-    const p = e.parts(now());
-    const days = Math.min(250, num(qs(req).days, 30));
-    // Participant data is published after the close: today's row appears only once the session ends.
-    const last = p.m >= 375 ? p.dayIdx : p.dayIdx - 1;
-    return svc.flows.participants.slice(Math.max(0, last - days + 1), last + 1);
+    const { from, to } = an.rangeOf(Math.min(250, num(qs(req).days, 30)));
+    return an.participants(from, to);
   });
 
   app.get('/api/fii-dii', async (req) => {
-    const p = e.parts(now());
-    const days = Math.min(250, num(qs(req).days, 30));
-    const last = p.m >= 375 ? p.dayIdx : p.dayIdx - 1;
-    return svc.flows.fiiDii.slice(Math.max(0, last - days + 1), last + 1);
+    const { from, to } = an.rangeOf(Math.min(250, num(qs(req).days, 30)));
+    return an.fiiDii(from, to);
   });
 
   /* ---------------------------- volatility ---------------------------- */
@@ -385,10 +361,8 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   });
 
   app.post('/api/strategy-chart', async (req) => {
-    const body = z.object({ symbol: z.string(), legs: z.array(legSchema).min(1).max(12), date: z.string().optional(), interval: z.coerce.number().optional() }).parse(req.body);
-    const inst = e.inst(body.symbol);
-    const legs = body.legs.map((l) => ({ ...l, lotSize: inst.lotSize }));
-    return an.strategyChart(body.symbol, legs, body.date, body.interval ?? 5, now());
+    const body = z.object({ symbol: z.string(), legs: z.array(chartLegSchema).min(1).max(12), date: z.string().optional(), interval: z.coerce.number().optional() }).parse(req.body);
+    return an.strategyChart(body.symbol, body.legs.map(chartLeg), body.date, body.interval ?? 5, now());
   });
 
   app.post('/api/optimizer', async (req) => {
@@ -409,9 +383,8 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   });
 
   app.post('/api/recap', async (req) => {
-    const body = z.object({ symbol: z.string(), legs: z.array(legSchema).min(1).max(12), fromTs: z.coerce.number(), toTs: z.coerce.number().optional(), intervalMin: z.coerce.number().optional() }).parse(req.body);
-    const inst = e.inst(body.symbol);
-    return an.recap({ ...body, legs: body.legs.map((l) => ({ ...l, lotSize: inst.lotSize })) }, now());
+    const body = z.object({ symbol: z.string(), legs: z.array(chartLegSchema).min(1).max(12), fromTs: z.coerce.number(), toTs: z.coerce.number().optional(), intervalMin: z.coerce.number().optional() }).parse(req.body);
+    return an.recap({ ...body, legs: body.legs.map(chartLeg) }, now());
   });
 
   /* ---------------------------- scanners & market-wide ---------------------------- */
@@ -423,7 +396,7 @@ export async function buildApp(svc: Services, opts: { logger?: boolean; serveWeb
   app.get<{ Params: { symbol: string } }>('/api/order-book/:symbol', async (req) => {
     const q = qs(req);
     const type = q.type === 'CE' || q.type === 'PE' ? q.type : 'FUT';
-    return svc.tools.orderBook(req.params.symbol, { type, strike: q.strike ? num(q.strike, 0) : undefined, expiry: q.expiry }, now());
+    return svc.tools.orderBook(req.params.symbol, { type, strike: q.strike ? num(q.strike, 0) : undefined, expiry: q.expiry || undefined }, now(), userTier);
   });
 
   /* ============================== user ============================== */

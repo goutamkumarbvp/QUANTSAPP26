@@ -11,7 +11,6 @@ import {
   findBreakevens,
   formatCompact,
   formatIndian,
-  generateExpiries,
   historicalVol,
   impliedVol,
   INDEX_MARGIN,
@@ -26,7 +25,6 @@ import {
   optimizeStrategies,
   pcr,
   prevTradingDay,
-  Rng,
   STRATEGY_TEMPLATES,
   strategyPnl,
   tradingDaysBetween,
@@ -95,24 +93,6 @@ describe('calendar & expiries', () => {
   it('knows the weekday', () => {
     expect(weekday('2026-10-11')).toBe(0); // Sunday
     expect(weekday('2026-10-13')).toBe(2); // Tuesday
-  });
-
-  it('generates NIFTY weekly Tuesday + monthly expiries', () => {
-    const e = generateExpiries('weekly-tue', '2026-10-11');
-    expect(e.slice(0, 4)).toEqual(['2026-10-13', '2026-10-20', '2026-10-27', '2026-11-03']);
-    expect(e).toContain('2026-11-24');
-    expect(e).toContain('2026-12-29');
-    for (const d of e) expect(weekday(d)).toBe(2);
-  });
-
-  it('generates monthly last-Tuesday expiries for stocks', () => {
-    expect(generateExpiries('monthly-tue', '2026-10-11')).toEqual(['2026-10-27', '2026-11-24', '2026-12-29']);
-  });
-
-  it('generates SENSEX Thursday expiries and shifts holidays back', () => {
-    const e = generateExpiries('weekly-thu', '2026-10-11', { holidays: new Set(['2026-10-15']) });
-    expect(e[0]).toBe('2026-10-14');
-    expect(e[1]).toBe('2026-10-22');
   });
 
   it('round-trips IST timestamps', () => {
@@ -237,9 +217,9 @@ describe('templates & naming', () => {
 
 describe('volatility', () => {
   it('computes HV, IV rank and percentile', () => {
-    const rng = new Rng(7);
+    // Test closes: log returns alternating ±1 % (daily σ = 1 % → annualised ≈ 15.9 %).
     const closes = [100];
-    for (let i = 0; i < 400; i++) closes.push(closes[i] * Math.exp(0.01 * rng.normal()));
+    for (let i = 0; i < 400; i++) closes.push(closes[i] * Math.exp(i % 2 ? -0.01 : 0.01));
     const hv = historicalVol(closes, 252);
     expect(hv).toBeGreaterThan(0.12);
     expect(hv).toBeLessThan(0.2);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeOrb, evaluateOpeningRange, summariseFlow, type MinuteBar } from '../src';
+import { describeOrb, evaluateOpeningRange, type MinuteBar } from '../src';
 
 const T0 = 1_000_000;
 /** Build 1-minute bars from a list of minute-boundary prices (n prices → n-1 bars). */
@@ -101,24 +101,5 @@ describe('opening range breakout', () => {
     const e = evaluateOpeningRange(barsFrom([...RANGE, 103]), { rangeMinutes: 15, lastIsPartial: true });
     expect(e.trend).toBe('sideways');
     expect(evaluateOpeningRange(barsFrom([...RANGE, 103]), { rangeMinutes: 15, rule: 'touch', lastIsPartial: true }).trend).toBe('up');
-  });
-});
-
-describe('order flow summary', () => {
-  it('aggregates buy and sell volume', () => {
-    const s = summariseFlow([
-      { ts: 0, volume: 100, buyVolume: 70, sellVolume: 30 },
-      { ts: 60_000, volume: 50, buyVolume: 20, sellVolume: 30 },
-    ]);
-    expect(s.buyVolume).toBe(90);
-    expect(s.sellVolume).toBe(60);
-    expect(s.delta).toBe(30);
-    expect(s.buyPct).toBeCloseTo(60, 10);
-    expect(s.sentiment).toBe('Buyers dominant');
-    expect(summariseFlow([{ ts: 0, volume: 100, buyVolume: 52, sellVolume: 48 }]).sentiment).toBe('Balanced');
-    expect(summariseFlow([{ ts: 0, volume: 100, buyVolume: 40, sellVolume: 60 }]).sentiment).toBe('Sellers dominant');
-    expect(summariseFlow([]).buyPct).toBe(50);
-    expect(summariseFlow([]).sentiment).toBe('No trades');
-    expect(summariseFlow([{ ts: 0, volume: 0, buyVolume: 0, sellVolume: 0 }]).sentiment).toBe('No trades');
   });
 });

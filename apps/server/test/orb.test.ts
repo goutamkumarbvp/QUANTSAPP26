@@ -179,6 +179,31 @@ describe('opening range from recorded minutes', () => {
     expect(() => an.orbConfirmed('NIFTY', undefined, 15)).toThrow(/starts at 09:40/);
   });
 
+  it('a recorder live bar of another session is never taken as the minute in progress', async () => {
+    const { p, an, book } = setup('09:20');
+    // nothing recorded today (and no Kotak history); the store still reports a bar of the previous session
+    p.intraday.setLiveBar(NIFTY, { ts: p.calendar.ts(book.recordedDate, 374), open: 26000, high: 26000, low: 26000, close: 26000, traded: true });
+    p.candles = async () => {
+      throw new NoLiveData('not served');
+    };
+    await expect(an.orb('NIFTY')).rejects.toThrow(/No recorded NIFTY minutes for 2026-10-12 — recording started 2026-10-09; Kotak 1-minute history: not served/);
+    expect(() => an.orbScan()).toThrow(NoLiveData);
+    record(p, DAY, 0, 5);
+    const o = await an.orb('NIFTY');
+    expect(o.bars).toHaveLength(5);
+    expect(o.bars.every((b) => b.high < 26000)).toBe(true);
+  });
+
+  it('history with no break on any day has no average follow-through (null, not 0)', async () => {
+    const { p, an } = setup('11:30');
+    // 2026-10-08 recorded flat: closes never leave the opening range
+    for (let m = 0; m < 375; m++) p.intraday.addMinutes(NIFTY, [{ ts: p.calendar.ts('2026-10-08', m), open: 25000, high: 25001, low: 24999, close: 25000, traded: true }]);
+    p.setNow(at('2026-10-09', '11:00')); // the next session is live: 2026-10-08 is the last completed one
+    const h = await an.orbHistory('NIFTY', 1);
+    expect(h.rows.map((r) => [r.date, r.trend, r.firstBreak, r.followThroughPct])).toEqual([['2026-10-08', 'sideways', null, null]]);
+    expect(h.stats).toMatchObject({ days: 1, sideways: 1, brokeUp: 0, brokeDown: 0, trendDays: 0, avgFollowThroughPct: null });
+  });
+
   it('is NoLiveData before any trade exists', async () => {
     const { p, an } = setup('09:15');
     p.advance(30_000);
@@ -262,6 +287,8 @@ describe('opening range from recorded minutes', () => {
     expect(r8).toMatchObject({ high: 25012, low: 24988, whipsaw: true, close: close(374), closeVsRange: 'below' });
     expect(r8.firstBreak).toEqual({ direction: 'up', ts: p.calendar.ts('2026-10-08', 20) });
     expect(r8.followThroughPct).toBeCloseTo(((close(374) - 25012) / 25012) * 100, 2);
+    const broke = h.rows.filter((r) => r.firstBreak);
+    expect(h.stats.avgFollowThroughPct).toBe(+(broke.reduce((a, r) => a + r.followThroughPct!, 0) / broke.length).toFixed(2));
 
     const none = setup('11:30');
     await expect(none.an.orbHistory('BANKNIFTY', 3)).rejects.toThrow(NoLiveData);

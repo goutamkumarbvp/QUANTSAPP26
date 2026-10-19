@@ -7,6 +7,7 @@ import {
   ladderRules,
   isOtm,
   ladderLevel,
+  openPnl,
   premiumLadder,
   selectStrike,
   totalCharges,
@@ -63,7 +64,7 @@ describe('strike selection', () => {
     expect(isOtm('PE', pe.pick.strike, snap.spot)).toBe(true);
     // brute force: no other eligible strike is closer to ₹20
     for (const k of snap.strikes) {
-      if (k % 100 || k <= snap.spot) continue;
+      if (k % 100 || k <= snap.spot!) continue;
       expect(Math.abs(snap.premium('CE', k)! - 20)).toBeGreaterThanOrEqual(Math.abs(ce.pick.premium - 20) - 1e-9);
     }
   });
@@ -216,6 +217,63 @@ describe('premium ladder (Strategy 2)', () => {
     expect(premiumLadder.validate({ ...P, lots: 0 })).toMatch(/Lots/);
     expect(algoById('premium-ladder')).toBe(premiumLadder);
     expect(totalCharges([{ side: 'SELL', price: 20, lots: 1 }], 65)).toBeGreaterThan(20);
+  });
+});
+
+describe('live data: missing prices', () => {
+  it('a strike without a premium is not eligible; without the underlying price nothing is OTM', () => {
+    const snap = market(25010, 560);
+    const gapped: AlgoSnapshot = { ...snap, premium: (type, k) => (type === 'PE' ? null : snap.premium(type, k)) };
+    const pe = selectStrike(gapped, 'PE', 20, { multiple: 100, maxGapPct: 50 });
+    expect(pe.ok).toBe(false);
+    if (!pe.ok) expect(pe.reason).toMatch(/No OTM PE strike \(multiple of 100\) has a traded premium/);
+    expect(isOtm('CE', 25100, null)).toBe(false);
+    const blind = selectStrike({ ...snap, spot: null }, 'CE', 20, { multiple: 100, maxGapPct: 50 });
+    expect(blind.ok).toBe(false);
+    if (!blind.ok) expect(blind.reason).toMatch(/No underlying price/);
+  });
+
+  it('waits at the entry while the underlying price is missing, then enters when it is back', () => {
+    const r = runner();
+    expect(r.at({ ...market(25000, 560), spot: null })).toEqual([]);
+    expect(r.s.phase).toBe('waiting');
+    expect(r.orders).toHaveLength(0);
+    const ev = r.at(market(25000, 563));
+    expect(ev[0].kind).toBe('ENTRY');
+  });
+
+  it('without late entry, a day whose entry window passed without data is skipped', () => {
+    const r = runner({ ...P, lateEntry: false });
+    r.at(market(25000, 556));
+    expect(r.at({ ...market(25000, 562), spot: null })[0].message).toMatch(/No NIFTY price at the 09:20 entry/);
+    expect(r.s.phase).toBe('exited');
+    const r2 = runner({ ...P, lateEntry: false });
+    r2.at(market(25000, 556));
+    expect(r2.at(market(25000, 570))[0].message).toMatch(/No market data at the 09:20 entry \(first data at 09:30\)/);
+    expect(r2.orders).toHaveLength(0);
+  });
+
+  it('an adjustment waits for the underlying price (the new leg must be OTM), the time exit does not', () => {
+    const r = runner();
+    r.at(market(25000, 560));
+    const ce = r.s.legs.CE!.strike;
+    const n = r.orders.length;
+    expect(r.at({ ...market(25000, 600, { [`CE${ce}`]: 40 }), spot: null })).toEqual([]);
+    expect(r.orders).toHaveLength(n);
+    expect(r.s.level).toBe(20);
+    const exit = r.at({ ...market(25000, 925), spot: null });
+    expect(exit[0].kind).toBe('EXIT');
+    expect(exit[0].data?.spot).toBeNull();
+    expect(r.s.legs.CE).toBeNull();
+  });
+
+  it('open P&L is unknown when an open leg has no premium', () => {
+    const r = runner();
+    r.at(market(25000, 560));
+    const legs = premiumLadder.openLegs(r.s);
+    const snap = market(25000, 600);
+    expect(openPnl(legs, snap)).not.toBeNull();
+    expect(openPnl(legs, { ...snap, premium: (type, k) => (type === 'CE' ? null : snap.premium(type, k)) })).toBeNull();
   });
 });
 

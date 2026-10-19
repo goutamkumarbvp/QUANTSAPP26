@@ -165,33 +165,16 @@ export function describeOrb(e: OrbEvaluation): string {
 /* Order flow                                                            */
 /* ------------------------------------------------------------------ */
 
-export interface FlowMinute {
-  ts: number;
-  volume: number;
-  buyVolume: number;
-  sellVolume: number;
-}
-
+/**
+ * @deprecated The server sends `OrderFlowSummary` (api.ts: nullable buy share, unclassified volume,
+ * estimate label). Kept only while the web still imports it (Phase D).
+ */
 export interface FlowSummary {
   buyVolume: number;
   sellVolume: number;
   volume: number;
   delta: number;
-  /** Buy share of volume (%); 50 when nothing traded — check `volume` / sentiment 'No trades'. */
+  /** Buy share of volume (%). */
   buyPct: number;
   sentiment: 'Buyers dominant' | 'Sellers dominant' | 'Balanced' | 'No trades';
-}
-
-/** Aggregate aggressive buy vs sell volume. Balanced band is ±5 percentage points around 50%. */
-export function summariseFlow(minutes: readonly FlowMinute[], balancedBand = 5): FlowSummary {
-  let buy = 0;
-  let sell = 0;
-  for (const m of minutes) {
-    buy += m.buyVolume;
-    sell += m.sellVolume;
-  }
-  const volume = buy + sell;
-  const buyPct = volume > 0 ? (buy / volume) * 100 : 50;
-  const sentiment = volume === 0 ? 'No trades' : buyPct >= 50 + balancedBand ? 'Buyers dominant' : buyPct <= 50 - balancedBand ? 'Sellers dominant' : 'Balanced';
-  return { buyVolume: buy, sellVolume: sell, volume, delta: buy - sell, buyPct, sentiment };
 }

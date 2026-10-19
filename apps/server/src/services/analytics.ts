@@ -239,6 +239,17 @@ interface DayBars {
   source: 'recorded' | 'kotak';
 }
 
+/** IVs solved from one session's official option closes (Analytics.eodCurve). */
+interface EodCurve {
+  /** Official close of the underlying that session. */
+  spot: number | null;
+  forward: number | null;
+  /** Decimal IV per `${type}|${strike}` (traded rows only). */
+  iv: Map<string, number>;
+  /** Every official row of the expiry (OI usable; close only when it traded). */
+  rows: Map<string, DailyOption>;
+}
+
 /** A small time-bucketed cache (a few keys, newest kept). */
 class BucketCache<V> {
   private readonly map = new Map<string, V>();
@@ -258,6 +269,7 @@ export class Analytics {
   private readonly futCache = new BucketCache<FuturesBuildUpRow[]>(4);
   private readonly ivCache = new BucketCache<IvTableRow[]>(4);
   private readonly orbScanCache = new BucketCache<OrbScanRow[]>(8);
+  private readonly eodCurves = new Map<string, EodCurve>();
 
   constructor(
     readonly md: MarketDataProvider,
@@ -423,7 +435,21 @@ export class Analytics {
    * closes of `expiry`, forward from its traded future (settle, else close), else put-call parity at
    * the strike nearest the underlying close, else that close carried at r (pricing.impliedForward).
    */
-  private eodCurve(symbol: string, expiry: string, date: string): { spot: number | null; forward: number | null; iv: Map<string, number>; rows: Map<string, DailyOption> } {
+  private eodCurve(symbol: string, expiry: string, date: string): EodCurve {
+    const id = `${symbol}|${expiry}|${date}`;
+    const hit = this.eodCurves.get(id);
+    if (hit) return hit;
+    const curve = this.solveEodCurve(symbol, expiry, date);
+    // Official files of a past session do not change once loaded: cache only complete inputs (the
+    // F&O rows and the underlying close), so a file that loads later is still picked up.
+    if (curve.rows.size && curve.spot !== null) {
+      this.eodCurves.set(id, curve);
+      while (this.eodCurves.size > 512) this.eodCurves.delete(this.eodCurves.keys().next().value as string);
+    }
+    return curve;
+  }
+
+  private solveEodCurve(symbol: string, expiry: string, date: string): EodCurve {
     const rows = this.eodOptions(symbol, expiry, date);
     const iv = new Map<string, number>();
     const byStrike = new Map<number, PremiumRow>();
@@ -509,9 +535,10 @@ export class Analytics {
     const md = this.md;
     const key = spotKey(symbol);
     const recs = byTs(md.intraday.bars(key, date));
-    const lb = live && withLive ? md.intraday.liveBar(key) : null;
-    if (!recs.length && !lb) return null;
     const open = md.calendar.ts(date, 0);
+    let lb = live && withLive ? md.intraday.liveBar(key) : null;
+    if (lb && (lb.ts < open || md.calendar.session(lb.ts).date !== date)) lb = null; // a bar of another session
+    if (!recs.length && !lb) return null;
     const first = recs.length ? recs[0].ts : (lb as MinuteRecord).ts;
     if (first > open + ORB_OPEN_SLACK_MIN * MINUTE) throw new NoLiveData(`Recording of ${symbol} on ${date} starts at ${formatTimeIST(first)}: the opening range from 09:15 was not recorded`);
     const bars = recs.filter(traded).map(toBar);
@@ -773,7 +800,7 @@ export class Analytics {
         sideways: rows.filter((r) => !r.firstBreak).length,
         whipsaw: rows.filter((r) => r.whipsaw).length,
         trendDays,
-        avgFollowThroughPct: broke.length ? +(broke.reduce((a, r) => a + (r.followThroughPct ?? 0), 0) / broke.length).toFixed(2) : 0,
+        avgFollowThroughPct: rn(avg(broke.map((r) => r.followThroughPct).filter(isNum)), 2),
       },
       ...gaps.out(),
     };
@@ -1154,6 +1181,12 @@ export class Analytics {
   /* Official FII/DII and participant-wise OI                                                     */
   /* ------------------------------------------------------------------------------------------ */
 
+  /** The last `days` trading sessions up to the current one, as a [from, to] range (for ?days= routes). */
+  rangeOf(days: number): { from: string; to: string } {
+    const to = currentSession(this.md);
+    return { from: sessionsBack(this.md, to, clampInt(days, 1, 250, 30))[0], to };
+  }
+
   private checkRange(from: string, to: string): void {
     if (!isIsoDate(from) || !isIsoDate(to)) throw httpError(400, `from/to must be YYYY-MM-DD (got '${from}', '${to}')`);
     if (from > to) throw httpError(400, `from (${from}) is after to (${to})`);
@@ -1482,8 +1515,9 @@ export class Analytics {
     const listed = current ? this.orElse(() => liveOptionExpiries(md, s), [] as string[]) : [];
     const choices = [...new Set([...this.recordedOptionExpiries(s, day), ...listed])].sort();
     const expiry = want ?? choices[0];
-    if (!expiry) throw new NoLiveData(`No ${s} option expiry recorded or listed for ${day} (${notRecordedReason(md, day)})`);
-    if (!choices.includes(expiry)) throw new NoLiveData(`No recorded or listed ${s} ${expiry} options for ${day}`);
+    const why = md.intraday.sessions().includes(day) ? '' : ` (${notRecordedReason(md, day)})`;
+    if (!expiry) throw new NoLiveData(`No ${s} option expiry recorded or listed for ${day}${why}`);
+    if (!choices.includes(expiry)) throw new NoLiveData(`No recorded or listed ${s} ${expiry} options for ${day}${why}`);
     const strikes = this.strikesFor(s, expiry, day, current);
     if (!strikes.length) throw new NoLiveData(`No ${s} ${expiry} strikes recorded or listed for ${day}`);
     const nearest = (x: number) => strikes.reduce((a, k) => (Math.abs(k - x) < Math.abs(a - x) ? k : a));
@@ -1548,14 +1582,18 @@ export class Analytics {
     return this.md.intraday.recordedKeys(date).some((k) => keyId(k) === id);
   }
 
-  /** Lot size of a leg: the request's, else the listing's, else the official file of the contract's last day. */
+  /**
+   * Lot size of a leg: the instrument master's (active contracts), else the official file of the
+   * contract's last day (expired ones), else the lot size the leg was saved with (taken from a listing
+   * when it was built).
+   */
   private lotOf(symbol: string, leg: Leg, key: InstrumentKey): number {
-    if (isPos(leg.lotSize)) return leg.lotSize;
     const l = this.orElse(() => this.md.ref.listing(key), undefined);
     if (l) return l.lotSize;
     const d = leg.expiry;
     const eod = leg.type === 'FUT' ? this.md.history.dailyFutures(symbol, d, d).find((f) => f.expiry === d)?.lotSize : this.md.history.dailyOptions(symbol, d, d).find((o) => o.type === leg.type && o.strike === leg.strike)?.lotSize;
     if (isPos(eod)) return eod;
+    if (isPos(leg.lotSize)) return leg.lotSize;
     throw new NoLiveData(`Lot size of ${keyLabel(key)} is unknown (not listed and no official file of its last day)`);
   }
 
@@ -1662,7 +1700,9 @@ export class Analytics {
 
   /**
    * Replay of a strategy over recorded sessions only, from `fromTs` to `toTs` (or now / the first
-   * expiry). A leg's price at a point is the close of its last traded minute in the window.
+   * expiry). A leg's price at a point is the close of its last traded minute in the window. A leg
+   * sent without an entry price (≤ 0) enters at its first traded price of the replay (as the strategy
+   * chart); its P&L is blank until then — a missing entry is never taken as ₹0.
    */
   recap(req: RecapRequest, _nowTs?: number): RecapResponse {
     const md = this.md;
@@ -1683,6 +1723,7 @@ export class Analytics {
     const points: RecapResponse['points'] = [];
     const used: string[] = [];
     const skipped: string[] = [];
+    const entry: (number | null)[] = legs.map((l) => (isPos(l.price) ? l.price : null));
     for (const d of dates) {
       if (!recorded.has(d)) {
         skipped.push(d);
@@ -1707,11 +1748,15 @@ export class Analytics {
         const legLtp = px.map((p) => p[k]);
         if (legLtp.every((p) => p === null) && spot[k] === null) return;
         any = true;
+        legLtp.forEach((p, i) => {
+          if (entry[i] === null && p !== null) entry[i] = p;
+        });
         let pnl: number | null = 0;
         legs.forEach((leg, i) => {
           const exit = leg.exitPrice ?? legLtp[i];
-          if (pnl === null || exit === null || exit === undefined) pnl = null;
-          else pnl += leg.lots * lots[i] * sideSign(leg.side) * (exit - leg.price);
+          const e = entry[i];
+          if (pnl === null || exit === null || exit === undefined || e === null) pnl = null;
+          else pnl += leg.lots * lots[i] * sideSign(leg.side) * (exit - e);
         });
         points.push({ ts: x, spot: spot[k], pnl: pnl === null ? null : r2(pnl), legLtp });
       });

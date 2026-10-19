@@ -11,6 +11,11 @@
  *  3. Every newly sold option must be OTM at that moment. If no eligible OTM strike exists for
  *     a required entry or adjustment, everything is squared off and the algo stops for the day.
  *  4. Whatever is open at the exit time (15:25) is squared off.
+ *
+ * Live data: premiums are real traded prices (live session / recorded minutes) or null. A strike
+ * without a premium is not eligible. While the underlying price is not available the algo cannot
+ * tell which strikes are OTM, so it waits (it never sells blind); a run that may not enter late
+ * (`lateEntry` off) then skips the day once the entry window has passed.
  */
 import {
   hhmmToMinutes,
@@ -81,8 +86,9 @@ export function isStrikeMultiple(strike: number, multiple: number): boolean {
   return Math.abs(q - Math.round(q)) < 1e-6;
 }
 
-/** Strictly out of the money: CE above spot, PE below spot. */
-export function isOtm(type: OptionSide, strike: number, spot: number): boolean {
+/** Strictly out of the money: CE above spot, PE below spot. Unknown spot → not provably OTM. */
+export function isOtm(type: OptionSide, strike: number, spot: number | null): boolean {
+  if (spot == null || !Number.isFinite(spot)) return false;
   return type === 'CE' ? strike > spot : strike < spot;
 }
 
@@ -105,19 +111,20 @@ export function selectStrike(
   target: number,
   opts: { multiple: number; maxGapPct: number },
 ): StrikeSelection {
+  const mult = opts.multiple > 0 ? ` (multiple of ${opts.multiple})` : '';
+  if (snap.spot == null || !Number.isFinite(snap.spot)) return { ok: false, reason: `No underlying price: OTM ${type} strikes cannot be identified`, nearest: null };
   let best: StrikePick | null = null;
-  let eligible = 0;
+  let otm = 0;
   for (const k of snap.strikes) {
     if (!isStrikeMultiple(k, opts.multiple) || !isOtm(type, k, snap.spot)) continue;
+    otm++;
     const prem = snap.premium(type, k);
     if (prem == null || !(prem > 0.05)) continue;
-    eligible++;
     const gapPct = (Math.abs(prem - target) / target) * 100;
     const furtherOtm = best != null && (type === 'CE' ? k > best.strike : k < best.strike);
     if (!best || gapPct < best.gapPct - EPS || (Math.abs(gapPct - best.gapPct) <= EPS && furtherOtm)) best = { strike: k, premium: prem, gapPct };
   }
-  const mult = opts.multiple > 0 ? ` (multiple of ${opts.multiple})` : '';
-  if (!best) return { ok: false, reason: eligible === 0 ? `No OTM ${type} strike${mult} is listed` : `No tradable OTM ${type} strike${mult}`, nearest: null };
+  if (!best) return { ok: false, reason: otm === 0 ? `No OTM ${type} strike${mult} is listed` : `No OTM ${type} strike${mult} has a traded premium (${otm} listed)`, nearest: null };
   if (best.gapPct > opts.maxGapPct + EPS) {
     return {
       ok: false,
@@ -196,7 +203,7 @@ function legText(l: AlgoLeg | null): string {
 
 function eventData(s: PremiumLadderState, snap: AlgoSnapshot): Record<string, number | string | null> {
   return {
-    spot: r2(snap.spot),
+    spot: snap.spot == null ? null : r2(snap.spot),
     level: r2(s.level),
     ce: s.legs.CE ? s.legs.CE.strike : null,
     ceLtp: s.legs.CE ? snap.premium('CE', s.legs.CE.strike) : null,
@@ -236,8 +243,9 @@ export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
       ? 'When a leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. After the first adjustment only the leg that triggered last can trigger the next level. A jump through several levels goes straight to the highest one reached.'
       : 'When either leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
     'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
-    `If no eligible OTM strike is available for a required entry or adjustment (one whose premium is within ±${gap}% of the target), square off all positions and stop trading for the day.`,
+    `If no eligible OTM strike is available for a required entry or adjustment (one with a traded premium within ±${gap}% of the target), square off all positions and stop trading for the day.`,
     `Exit: square off everything at ${exit} regardless of profit or loss.`,
+    'Live data only: premiums are traded prices of the live session (backtests: the recorded prices of the session). Without a live underlying price the algo waits and never sells blind.',
   ];
 }
 
@@ -330,6 +338,19 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
         s.stopReason = `Deployed at ${mmToHhmm(s.firstSeenMinute)}, after the ${p.entryTime} entry — no trade today`;
         return [ev('INFO', s.stopReason)];
       }
+      // Market data missed the entry window (no prices at the entry time): same rule as a late deployment.
+      const missed = !p.lateEntry && snap.minuteOfDay > entryMin + 1;
+      if (snap.spot == null) {
+        if (!missed) return []; // wait for the underlying price: strikes cannot be checked for OTM without it
+        s.phase = 'exited';
+        s.stopReason = `No ${snap.symbol} price at the ${p.entryTime} entry — no trade today`;
+        return [ev('INFO', s.stopReason)];
+      }
+      if (missed) {
+        s.phase = 'exited';
+        s.stopReason = `No market data at the ${p.entryTime} entry (first data at ${mmToHhmm(snap.minuteOfDay)}) — no trade today`;
+        return [ev('INFO', s.stopReason)];
+      }
       s.lotSize = snap.lotSize;
       const opts = { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct };
       const ce = selectStrike(snap, 'CE', p.startPremium, opts);
@@ -364,6 +385,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       if (ltp + EPS >= s.level * (1 + p.stepPct / 100) && (!trig || ratio > trig.ratio)) trig = { side, ltp, ratio };
     }
     if (!trig) return [];
+    // The new leg must be OTM: without the underlying price, wait (nothing changes until it is back).
+    if (snap.spot == null) return [];
     const next = ladderLevel(s.level, trig.ltp, p.stepPct);
     const opp = other(trig.side);
     const from = s.level;

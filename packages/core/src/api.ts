@@ -954,7 +954,8 @@ export interface OrbHistoryResponse extends DataGaps {
   /** Sessions asked for. */
   sessions: number;
   rows: OrbHistoryRow[];
-  stats: { days: number; brokeUp: number; brokeDown: number; sideways: number; whipsaw: number; trendDays: number; avgFollowThroughPct: number };
+  /** avgFollowThroughPct: over the days that broke; null when none did. */
+  stats: { days: number; brokeUp: number; brokeDown: number; sideways: number; whipsaw: number; trendDays: number; avgFollowThroughPct: number | null };
 }
 
 /**
@@ -1027,6 +1028,62 @@ export interface OrderFlowResponse extends DataGaps {
   /** Contracts listed (today) or recorded (a past session), for pickers. */
   expiries: string[];
   strikes: number[];
+}
+
+/* ------------------------------- dashboard ------------------------------- */
+
+/** A stock on the dashboard: live spot price/change, its near future's OI change and build-up. */
+export interface DashboardMover {
+  symbol: string;
+  /** Live-session spot price; null when the spot has no trade this session. */
+  ltp: number | null;
+  /** Spot change vs the previous close; null when either is unknown. */
+  changePct: number | null;
+  /** Near-month future OI change vs the previous session's OI; null when either is unknown. */
+  oiChangePct: number | null;
+  buildUp: BuildUp | null;
+}
+
+/** One index card: live chain aggregates, the opening range and the last recorded minute's flow; each part blank (with `gaps`) on its own. */
+export interface DashboardChain extends DataGaps {
+  symbol: string;
+  expiry: string | null;
+  spot: number | null;
+  pcr: number | null;
+  maxPain: number | null;
+  atmIv: number | null;
+  ivChange: number | null;
+  support: number | null;
+  resistance: number | null;
+  daysToExpiry: number | null;
+  /** Strikes the OI aggregates (PCR, max pain, support/resistance) cover. */
+  coverage: string | null;
+  orb: { high: number; low: number; trend: OrbTrend; whipsaw: boolean; reentered: boolean; summary: string } | null;
+  /** Near future's last completed recorded minute (quote-rule estimate, see `method`). */
+  flow: { buyPct: number | null; unclassifiedPct: number | null; delta: number; sentiment: OrderFlowSummary['sentiment']; method: typeof ORDER_FLOW_METHOD; ts: number } | null;
+}
+
+/**
+ * Home page. Every card is filled on its own from live/official data; a card that cannot be filled
+ * is empty/null with its reason in `gaps` (indices, movers, oiGainers, buildUpCounts, fiiDii) — one
+ * missing card never fails the whole response.
+ */
+export interface DashboardResponse extends DataGaps {
+  clock: MarketClockInfo;
+  /** Index quotes with a live-session price (indices without one are listed in `gaps.indices`). */
+  indices: Quote[];
+  /** Stocks up the most / down the most today (live spot change; only stocks with one). */
+  gainers: DashboardMover[];
+  losers: DashboardMover[];
+  /** Stocks whose near future added the most OI vs the previous session. */
+  oiGainers: DashboardMover[];
+  /** Live build-up of the stock near futures that have one (`buildUpClassified` of `buildUpTotal`); null when none has. */
+  buildUpCounts: BuildUpCounts | null;
+  buildUpClassified: number;
+  buildUpTotal: number;
+  chains: DashboardChain[];
+  /** The latest official FII/DII days (up to 5), oldest first. */
+  fiiDii: FiiDiiDay[];
 }
 
 /* ------------------------------- websocket ------------------------------- */

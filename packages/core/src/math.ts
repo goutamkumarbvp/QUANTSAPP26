@@ -1,7 +1,6 @@
 /**
- * Numerical primitives: normal distribution, seeded random numbers, small stats helpers.
- * Everything here is pure and deterministic so the market simulator and the analytics
- * produce identical results on server and client.
+ * Numerical primitives: normal distribution and small stats helpers. Everything here is pure and
+ * deterministic so the analytics produce identical results on server and client.
  */
 
 const SQRT_2PI = Math.sqrt(2 * Math.PI);
@@ -74,95 +73,6 @@ export function invNormCdf(p: number): number {
   const e = normCdf(x) - p;
   const u = e * SQRT_2PI * Math.exp((x * x) / 2);
   return x - u / (1 + (x * u) / 2);
-}
-
-/* ------------------------------------------------------------------ */
-/* Seeded randomness                                                    */
-/* ------------------------------------------------------------------ */
-
-/** 32-bit string/number hash (cyrb53 folded to 32 bits). */
-export function hash32(...parts: Array<string | number>): number {
-  const str = parts.join('|');
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (h1 ^ h2) >>> 0;
-}
-
-/** Mulberry32 PRNG. Returns a function yielding floats in [0, 1). */
-export function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return function () {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export class Rng {
-  private next: () => number;
-  private spare: number | null = null;
-  constructor(seed: number | string) {
-    this.next = mulberry32(typeof seed === 'number' ? seed : hash32(seed));
-  }
-  static of(...parts: Array<string | number>): Rng {
-    return new Rng(hash32(...parts));
-  }
-  uniform(): number {
-    return this.next();
-  }
-  range(lo: number, hi: number): number {
-    return lo + (hi - lo) * this.next();
-  }
-  int(lo: number, hiInclusive: number): number {
-    return lo + Math.floor(this.next() * (hiInclusive - lo + 1));
-  }
-  /** Standard normal via Box–Muller (polar). */
-  normal(): number {
-    if (this.spare !== null) {
-      const s = this.spare;
-      this.spare = null;
-      return s;
-    }
-    let u: number, v: number, s: number;
-    do {
-      u = this.next() * 2 - 1;
-      v = this.next() * 2 - 1;
-      s = u * u + v * v;
-    } while (s >= 1 || s === 0);
-    const m = Math.sqrt((-2 * Math.log(s)) / s);
-    this.spare = v * m;
-    return u * m;
-  }
-  /** Fat-tailed shock: Student-t like mixture, unit variance-ish. */
-  fatNormal(tailProb = 0.04, tailScale = 2.6): number {
-    const z = this.normal();
-    return this.next() < tailProb ? z * tailScale : z;
-  }
-  pick<T>(arr: readonly T[]): T {
-    return arr[Math.floor(this.next() * arr.length)];
-  }
-}
-
-/** Deterministic uniform in [0,1) for a key, without allocating an Rng. */
-export function hashUniform(...parts: Array<string | number>): number {
-  return mulberry32(hash32(...parts))();
-}
-
-/** Deterministic standard normal for a key. */
-export function hashNormal(...parts: Array<string | number>): number {
-  const r = mulberry32(hash32(...parts));
-  const u1 = Math.max(r(), 1e-12);
-  const u2 = r();
-  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
 /* ------------------------------------------------------------------ */

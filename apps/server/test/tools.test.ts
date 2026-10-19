@@ -9,9 +9,10 @@ import { istTs, ORDER_FLOW_METHOD } from '@q26/core';
 import { Recorder } from '../src/live/recorder';
 import { NoLiveData } from '../src/live/types';
 import type { InstrumentKey, MinuteRecord, WatchLevel } from '../src/live/types';
-import type { Analytics } from '../src/services/analytics';
+import { Analytics } from '../src/services/analytics';
 import { BOOK_MAX_AGE_MS, futKey, optKey, spotKey } from '../src/services/live';
 import { MarketTools, SCANNERS, summariseOrderFlow } from '../src/services/market-tools';
+import { Pricer } from '../src/services/pricer';
 import { FakeProvider, loadSampleBook, type SampleBook } from './support/fake-provider';
 
 const providers: FakeProvider[] = [];
@@ -395,5 +396,48 @@ describe('unusual activity and synopsis', () => {
     expect(b.rows[0].turnover).toBe(Math.round(3_200_000 * 1_398.5));
     p.live.clearQuote(spotKey('RELIANCE'));
     await rejects503(() => tools.synopsis(p.now()), /No live F&O stock prices/);
+  });
+});
+
+describe('with the real Analytics (sample book)', () => {
+  it('every scanner, unusual and synopsis answer from live rows or 503 with the reason (no placeholder rows)', async () => {
+    const p = new FakeProvider();
+    providers.push(p);
+    const book = loadSampleBook(p);
+    const tools = new MarketTools(p, new Analytics(p, new Pricer(p)));
+    for (const s of SCANNERS) {
+      let res: Awaited<ReturnType<MarketTools['scanner']>>;
+      try {
+        res = await tools.scanner(s.id, p.now());
+      } catch (e) {
+        expect(e, s.id).toBeInstanceOf(NoLiveData);
+        expect((e as Error).message.length, s.id).toBeGreaterThan(20);
+        continue;
+      }
+      expect(res.coverage, s.id).toMatch(/\d+ of \d+/);
+      for (const r of res.rows) {
+        expect(Number.isFinite(r.metric), s.id).toBe(true);
+        if (r.type === 'EQ') expect([r.oi === null || r.oi > 0, r.volume === null || r.volume > 0], s.id).toEqual([true, true]);
+      }
+    }
+    // Real OI of the live snapshot, calls only.
+    const oi = await tools.scanner('highest-call-oi', p.now());
+    expect(oi.rows.length).toBeGreaterThan(0);
+    expect(oi.rows.every((r) => r.type === 'CE' && (r.oi as number) > 0)).toBe(true);
+    // The sample book's option quotes carry no ATP: no turnover, so no "most active" rows (gap reported) …
+    const calls = await tools.scanner('most-active-calls', p.now());
+    expect(calls.rows).toEqual([]);
+    expect(calls.gaps?.turnover).toMatch(/no average traded price from the feed/);
+    // … until the feed sends one for a traded contract.
+    const w1 = book.expiries.NIFTY[0];
+    const atm = optKey('NIFTY', w1, 'CE', 25_000);
+    const q = p.live.quote(atm)!;
+    p.setQuote(atm, { ltp: q.ltp, atp: q.ltp - 1 });
+    const again = await tools.scanner('most-active-calls', p.now());
+    expect(again.rows[0]).toMatchObject({ symbol: 'NIFTY', type: 'CE', strike: 25_000, metric: Math.round((q.volume as number) * (q.ltp - 1)) });
+    // Unusual needs the previous session's OI (none in the sample book): 503 with the reason.
+    await rejects503(() => tools.unusual(p.now()), /none has the previous session's OI/);
+    const syn = await tools.synopsis(p.now());
+    expect(syn.rows.map((r) => r.symbol)).toEqual(['RELIANCE']);
   });
 });
