@@ -13,7 +13,10 @@ import {
   VisualMapComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
+import { LegacyGridContainLabel } from 'echarts/features';
 import type { EChartsCoreOption } from 'echarts/core';
+// ECharts 6 ships a new default theme; the bundled 'v5' theme keeps the defaults the charts were designed on.
+import 'echarts/theme/v5.js';
 import { formatSessionTime } from '../lib/format';
 import { useApp } from '../lib/store';
 import { cx, NoData } from './ui';
@@ -22,7 +25,12 @@ echarts.use([
   LineChart, BarChart, HeatmapChart, TreemapChart, CandlestickChart, ScatterChart,
   GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, MarkAreaComponent, MarkPointComponent, VisualMapComponent, TitleComponent,
   CanvasRenderer,
+  // Every chart sets `grid.containLabel`; ECharts 6 honours it (v5 layout) only with this feature installed.
+  LegacyGridContainLabel,
 ]);
+
+/** Theme registered by 'echarts/theme/v5.js' (ECharts 5 defaults). */
+export const CHART_THEME = 'v5';
 
 export interface ChartColors {
   ink: string;
@@ -150,7 +158,7 @@ export function Chart({ option, height = 320, className, onEvents, blank }: { op
 
   useEffect(() => {
     if (!ref.current) return;
-    const chart = echarts.init(ref.current, undefined, { renderer: 'canvas' });
+    const chart = echarts.init(ref.current, CHART_THEME, { renderer: 'canvas' });
     inst.current = chart;
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(ref.current);

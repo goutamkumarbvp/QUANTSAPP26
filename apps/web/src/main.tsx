@@ -11,7 +11,9 @@ const queryClient = createQueryClient();
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      {/* No startTransition (React Router 7's default): a page whose code is still loading shows the
+          spinner, as in v6, instead of leaving the previous page on screen under the new URL. */}
+      <BrowserRouter useTransitions={false}>
         <App />
       </BrowserRouter>
     </QueryClientProvider>

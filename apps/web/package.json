@@ -14,10 +14,10 @@
   "dependencies": {
     "@q26/core": "*",
     "@tanstack/react-query": "^5.62.0",
-    "echarts": "^5.5.1",
+    "echarts": "^6.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
+    "react-router-dom": "^7.18.4",
     "zustand": "^5.0.1"
   },
   "devDependencies": {
