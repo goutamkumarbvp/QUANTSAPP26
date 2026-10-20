@@ -177,7 +177,8 @@ const RATE_LIMITS: Readonly<Record<string, number>> = {
 const OPS_ACTIONS_PER_MINUTE = 10;
 
 /** The rate-limit key of a client address: an IPv6 client by its /64 (one host owns the whole prefix). */
-export function clientKey(ip: string): string {
+export function clientKey(ip: string | undefined): string {
+  if (!ip) return 'unknown';
   const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
   if (!v4.includes(':')) return v4;
   const [head] = v4.split('%');

@@ -358,7 +358,7 @@ export class LiveProvider implements MarketDataProvider {
         sleep,
         limiter,
         logger: this.log,
-        loginStateStore: deps.loginStateStore ?? fileLoginStateStore(path.join(config.dataDir, 'ops', 'login-state.json')),
+        loginStateStore: this.guardedStore(deps.loginStateStore ?? fileLoginStateStore(path.join(config.dataDir, 'ops', 'login-state.json'))),
       });
       this.rest = new KotakRest(this.session);
     } else {
@@ -488,6 +488,11 @@ export class LiveProvider implements MarketDataProvider {
     }
     this.intraday.setLiveSource(null);
     await this.live.close();
+  }
+
+  /** No writes after stop(): a login attempt that finishes during shutdown must not touch DATA_DIR. */
+  private guardedStore(store: LoginStateStore): LoginStateStore {
+    return { load: () => store.load(), save: (s) => (this.stopped ? undefined : store.save(s)) };
   }
 
   /** Phase C hook: contracts the user holds or watches (streamed in the 'user' tier). */

@@ -9,7 +9,7 @@ was not verified, because the audit environment blocks the Kotak and NSE/BSE hos
 | Gate | Status | Evidence |
 |---|---|---|
 | A. Build verified | **PASS** | `npm run typecheck` and `npm run build` exit 0 (`evidence/final/typecheck.log`, `build.log`). The Docker image builds (`evidence/final/docker.log`) |
-| B. Test verified | **PASS** | 938 unit tests: core 82, server 685, web 171. Browser e2e results are in TEST_EXECUTION_REPORT.md. Broker and exchange tests use fakes and are not live proof |
+| B. Test verified | **PASS** | 944 unit tests: core 82, server 691, web 171. Browser e2e results are in TEST_EXECUTION_REPORT.md. Broker and exchange tests use fakes and are not live proof |
 | C. Broker connectivity verified | **BLOCKED** | Kotak hosts are denied by this environment (`fetch failed`). Run BROKER_INTEGRATION_STATUS.md §4 on your own machine |
 | D. Live data verified | **BLOCKED** | Same reason. Stale, missing and disconnected states are verified with fakes (FEED STALE, DATA UNAVAILABLE, DISCONNECTED) |
 | E. Manual order path verified | **NOT APPLICABLE / NOT READY** | Paper trading only, by design (`safety.ts`, runtime check SAFE-1). There is no broker order code |

@@ -1,4 +1,4 @@
-start 2026-10-20T02:29:34Z
+start 2026-10-20T02:43:44Z
 
 > q26-options@1.0.0 build
 > npm run build -w @q26/web && npm run build -w @q26/server
@@ -65,14 +65,14 @@ dist/assets/Home-CFbd6Ix5.js            28.39 kB │ gzip:   8.98 kB
 dist/assets/index-CloUE1yJ.js           57.86 kB │ gzip:  20.44 kB
 dist/assets/react-B4ubrkdj.js          227.08 kB │ gzip:  72.67 kB
 dist/assets/echarts-BHj1wzLg.js        718.67 kB │ gzip: 242.30 kB
-✓ built in 6.44s
+✓ built in 6.88s
 
 > @q26/server@1.0.0 build
 > node build.mjs
 
 
-  dist/server.mjs      728.2kb
+  dist/server.mjs      736.7kb
   dist/server.mjs.map    1.7mb
 
-⚡ Done in 71ms
+⚡ Done in 84ms
 EXIT build 0
