@@ -15,6 +15,7 @@ baseline (`ea1be96`) results are in Q26_BASELINE_TEST_REPORT.md.
 | 6 | `npm audit` (including dev tools) | 13 (5 moderate, 6 high, 2 critical), all in the dev toolchain: vitest, vite, tailwind 3. Not in the runtime image | `npm-audit-all.log` |
 | 7 | Docker build + run (q26-options:final) | Builds. Runs as `node` (supervisor PID 1), health 200, an old root-owned volume is handed to `node`, clean stop with exit 0 | `docker.log` |
 | 8 | Supervised terminal runs: crash (`kill -9`) and hang (`SIGSTOP`) | Crash → restarted in 1 s. Hang → 3 failed health checks → SIGKILL → restarted | `terminal-run3-crash-hang.log`, `terminal-run3-steps.log` |
+| 10 | Backup / restore drill: back up `db.json` + `.auth-secret`, wipe DATA_DIR, restore, start | Login works, data back, a token issued before the backup still valid | `restore-drill.log` |
 | 9 | Terminal output before and after | Baseline 2,073 lines (68 % per-request JSON); release about 20 readable IST lines at start-up | `terminal-run1-baseline-summary.log`, `terminal-run2.log` |
 
 Baseline → release: 867 → 944 unit tests and 96 → 98 e2e tests. No existing test was removed or weakened.
@@ -23,7 +24,6 @@ Baseline → release: 867 → 944 unit tests and 96 → 98 e2e tests. No existin
 
 - **Kotak and NSE/BSE:** every broker and exchange test uses a fake `fetch` or fake websocket (mocked). They are **not proof of live connectivity**. Live runs here end in `fetch failed`, because the environment's network policy blocks the hosts.
 - **Live orders:** none exist (paper only), so no order-placement test exists or was run.
-- **Restore:** a backup restore drill was not exercised.
 - **Inbound TLS:** the reverse-proxy TLS setup was not exercised.
 
 ## 3. New tests in this release (highlights)
