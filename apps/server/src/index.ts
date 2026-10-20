@@ -94,6 +94,15 @@ const ops = createOperations({
     void shutdown(75);
   },
   log: { info: (m) => log.info(m), warn: (m) => log.warn(m), error: (m) => log.error(m) },
+  alerts: {
+    // The operator accounts: OPS_ADMIN_EMAILS, else the server's owner (see operatorCheck in app.ts).
+    notifyOperators: (title, body) => {
+      const users = Object.values(services.db.data.users).filter((u) => !u.guest && u.passwordHash);
+      const ops = config.opsAdmins.length ? users.filter((u) => config.opsAdmins.includes(u.email.trim().toLowerCase())) : users.filter((u) => u.id === services.db.data.ownerId);
+      for (const u of ops) services.notifier.push(u.id, { kind: 'system', title, body });
+    },
+    ...(process.env.ALERT_WEBHOOK_URL?.trim() ? { webhookUrl: process.env.ALERT_WEBHOOK_URL.trim() } : {}),
+  },
 });
 
 const app = await buildApp(services, { logger: serverLoggerOptions(), ops });

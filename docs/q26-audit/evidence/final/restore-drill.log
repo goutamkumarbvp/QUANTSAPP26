@@ -1,0 +1,5 @@
+1. created user drill@example.com + watchlist 'Drill list'
+2. backup: db.json .auth-secret 
+3. DATA_DIR wiped
+4. restored from backup
+5. after restore: login ok=yes; watchlists=['My Watchlist', 'Drill list']; token issued before the backup still valid: HTTP 200 (sign-in secret restored)

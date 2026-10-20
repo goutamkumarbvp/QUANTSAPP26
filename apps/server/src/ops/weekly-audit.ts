@@ -211,6 +211,7 @@ export class WeeklyAudit {
     await step('OPS-2', 'Operations', 'Watchdog incidents during the week', () => this.watchdogWeek(from, to));
     await step('OPS-3', 'Operations', 'Server restarts during the week', () => this.restarts(from, to));
     await step('OPS-4', 'Operations', 'Operations journal written', () => this.journalWrites(from, to));
+    await step('OPS-5', 'Operations', 'Operations journal not altered (hash chain)', () => this.journalChain(from, to));
     await step('RUN-1', 'Runtime', 'Node.js runtime', () => this.runtime());
     await step('HOUSE-1', 'Housekeeping', 'Old journals, quarantine, reports and caches', () => this.housekeeping());
     await step('DEP-1', 'Dependencies', 'Known vulnerabilities in dependencies', () => ({
@@ -279,7 +280,11 @@ export class WeeklyAudit {
       const rel = path.relative(root, f);
       if (rel.startsWith(`ops${path.sep}`) && scan.redacted !== undefined) {
         fs.writeFileSync(f, scan.redacted);
-        redacted.push(rel);
+        // An authorised rewrite: the journal's hash chain is rebuilt (and the fix says so).
+        if (f.endsWith('.jsonl') && f.startsWith(path.join(ops, 'journal'))) {
+          this.t.journal.rechain(f);
+          redacted.push(`${rel} (hash chain rebuilt)`);
+        } else redacted.push(rel);
       } else leaked.push(rel);
     }
     if (leaked.length) return { status: 'FAIL', detail: `a credential value is stored in: ${leaked.join(', ')} (not changed automatically: remove it and rotate that credential)`, ...(redacted.length ? { fix: `redacted ${redacted.join(', ')}` } : {}) };
@@ -547,6 +552,14 @@ export class WeeklyAudit {
     const lost = this.t.journal.unpersisted(from, to);
     if (!lost) return { status: 'PASS', detail: 'every operations event of the week was written to DATA_DIR/ops/journal' };
     return { status: 'WARN', detail: `${lost} operations event(s) of the week could not be written (${this.t.journal.lastWriteError() ?? 'write failed'}); they are counted from memory but are lost at restart` };
+  }
+
+  private journalChain(from: number, to: number): Omit<AuditItem, 'id' | 'area' | 'title'> {
+    if (!this.t.journal.dir) return { status: 'SKIPPED', detail: 'persistence off: no journal files' };
+    const v = this.t.journal.verify(from, to);
+    if (v.broken.length) return { status: 'FAIL', detail: `the journal was altered after it was written: the chain breaks at ${v.broken.slice(0, 5).join(', ')}${v.broken.length > 5 ? ` and ${v.broken.length - 5} more` : ''} (not repaired automatically: find out who changed it)` };
+    if (v.torn) return { status: 'WARN', detail: `${v.lines} line(s) in ${v.files} file(s) chain correctly; ${v.torn} unreadable line(s) (a write cut off by a crash)` };
+    return { status: 'PASS', detail: `${v.lines} line(s) in ${v.files} file(s): hash chain intact` };
   }
 
   private runtime(): Omit<AuditItem, 'id' | 'area' | 'title'> {

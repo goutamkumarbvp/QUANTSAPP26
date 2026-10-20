@@ -12,10 +12,10 @@
 
 | Result | Count |
 |---|---|
-| PASS | 25 |
-| FAIL | 6 |
+| PASS | 29 |
+| FAIL | 3 |
 | BLOCKED | 4 |
-| NOT TESTED | 10 |
+| NOT TESTED | 9 |
 
 **Production readiness for live trading: NOT READY** (control 45). Q26 is a paper-trading program: no live-order path exists, and live broker connectivity could not be verified here.
 
@@ -32,7 +32,7 @@
 | 7 | Backend authorization | Per-user ownership on every user route; operator check on operations | `test/routes-smoke.test.ts` "one user cannot reach another user's items"; `test/ops.test.ts` operator tests | No cross-user access; actions need an operator | As expected | PASS | — |
 | 8 | Privilege separation | Guest / registered / operator roles; container runs as `node` | `test/ops.test.ts`; `final/docker.log` | Least privilege | As expected | PASS | — |
 | 9 | API input validation | zod schemas on every body and query | routes-smoke "bad input is a 400/404 with the reason" | Invalid input → 4xx, never 5xx | As expected | PASS | — |
-| 10 | WebSocket authorization | Read `/ws` | `app.ts` `/ws` route | Authenticated and capped | Anonymous sockets accepted; market data only (no orders, no personal data); no per-IP connection cap | FAIL | Medium: add a per-address connection cap and an Origin check before exposing the port publicly |
+| 10 | WebSocket authorization | Origin check before the upgrade (same host name, or WS_ALLOWED_ORIGINS); open sockets capped per client address (20, IPv6 by /64) and in total (1,000) | `test/ops.test.ts` "/ws guard" (another site's origin refused; 21st socket refused) | Cross-site sockets refused; connection flooding capped | As expected. Sockets carry public market data and the caller's own notifications only after an auth message | PASS | — |
 | 11 | Rate limiting | Per-address limits (sign-in, guest, heavy calculations); per-operator limits for operations; IPv6 /64; bounded store; TRUST_PROXY | `test/ops.test.ts` rate-limit tests | Abuse throttled | As expected (WebSocket: see 10) | PASS | — |
 | 12 | TLS and secure communication | grep for TLS bypasses; outbound calls are `https://` / `wss://` | no `rejectUnauthorized` / `NODE_TLS_REJECT_UNAUTHORIZED` in `apps/server/src` | Certificate checks never disabled | Outbound TLS verified by Node defaults. Inbound TLS is a deployment step (reverse proxy) and was not exercised | NOT TESTED | Medium: terminate TLS at the proxy (DEPLOYMENT_GUIDE.md §4.3) |
 | 13 | Broker authentication | TOTP → MPIN login against Kotak | BROKER_INTEGRATION_STATUS.md; terminal runs show `fetch failed` (host blocked) | Real login | Mocked tests pass; live login impossible from this environment | BLOCKED | Run the checklist in BROKER_INTEGRATION_STATUS.md §4 |
@@ -60,11 +60,11 @@
 | 35 | Database transaction integrity | JSON document store with atomic file writes | `store/db.ts` | Transactions | Atomic whole-file writes, no multi-record transactions. Write failures are reported (watchdog) and retried | FAIL | Medium: move to SQLite before multi-user or live use |
 | 36 | Restart recovery | Supervisor crash/hang tests; login pause, sign-in secret and owner persist across restarts | `final/terminal-run3-crash-hang.log`; session persistence tests | Clean recovery without unsafe resets | kill -9 → restarted in 1 s; SIGSTOP hang → SIGKILL and restart; the lock-out protection survives restarts | PASS | — |
 | 37 | Emergency order blocking | — | — | Kill switch | No live orders. Paper algos can be stopped per run | NOT TESTED | Required before any live trading |
-| 38 | Audit-log integrity | Append-only JSONL journal, credentials redacted, failed writes counted (OPS-4) | `ops.test.ts` journal tests | Tamper-evident log | Append-only and scrubbed, but not tamper-evident (no hash chain or signature) | FAIL | Low: add a hash chain if logs are used as evidence |
+| 38 | Audit-log integrity | Journal lines are hash-chained (`prev` = SHA-256 of the line before); `verify()`; weekly check OPS-5; authorised redaction rebuilds the chain | `test/ops.test.ts` "journal hash chain" (edited and removed lines detected; OPS-5 FAIL) | Tamper-evident log | Edits and deletions inside a file are detected. Truncating the last lines of a file is not detectable (no outside anchor), as documented | PASS | Low: ship the journal to an outside store for full non-repudiation |
 | 39 | Dependency and vulnerability assessment | `npm audit --omit=dev` and `npm audit` | `final/npm-audit-prod.log`, `final/npm-audit-all.log` | No runtime advisories | Runtime: 0 vulnerabilities (after @fastify/static 10, react-router 7, echarts 6). Dev-only toolchain advisories remain (vitest, vite, tailwind 3); not shipped in the image | PASS | Low: upgrade the dev toolchain |
 | 40 | Resource limits and failure handling | bodyLimit, rate limits, watchdog (memory, event loop, disk), bounded caches | `ops.test.ts` watchdog tests | Graceful degradation | As expected | PASS | — |
 | 41 | Regression and integration test coverage | Full suite | `final/unit-tests.log` (938 tests), `final/e2e.log` | All pass | See TEST_EXECUTION_REPORT.md | PASS | Mocked broker tests are not live proof (13–16) |
 | 42 | Deployment and configuration security | Docker non-root, healthcheck, `.env` never in images; entrypoint fixes old root-owned volumes | `final/docker.log` | Secure defaults | Verified on the earlier image; the entrypoint rebuild result is in TEST_EXECUTION_REPORT.md §5 | PASS | — |
-| 43 | Monitoring and alerting | Watchdog, login monitor, weekly audit, dashboard, terminal, journal | `ops.test.ts`; terminal runs | Problems reach a person | Visible on the dashboard and in the terminal; no push alert (email/SMS) | FAIL | Low: add a notification channel for CRITICAL and PAUSED |
-| 44 | Backup and recovery verification | Procedures in ROLLBACK_AND_RECOVERY.md | — | Restore exercised | Documented, not exercised | NOT TESTED | Medium: run a restore drill |
+| 43 | Monitoring and alerting | Error-level events (watchdog CRITICAL, login PAUSED, audit FAIL, restart loop) → in-app notification to the operator accounts, plus optional ALERT_WEBHOOK_URL (Slack/Discord/ntfy JSON); de-duplicated per 15 min, at most 30 per hour | `test/ops.test.ts` "alerts" | Problems reach a person | As expected. The webhook was tested with a fake endpoint (no outbound network here) | PASS | — |
+| 44 | Backup and recovery verification | Restore drill: create user + watchlist → stop → back up (`db.json`, `.auth-secret`) → wipe DATA_DIR → restore → start | `evidence/final/restore-drill.log` | Data and sign-ins restored | Login works, the watchlist is back, and a token issued before the backup is still valid (HTTP 200) | PASS | — |
 | 45 | Independent production-readiness decision | Gates A–G in PRODUCTION_READINESS_REPORT.md | — | Every mandatory gate passes | Gates C/D BLOCKED; gate E not applicable (no live orders) | FAIL | **NOT READY for live trading** |

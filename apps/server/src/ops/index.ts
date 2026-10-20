@@ -8,6 +8,7 @@ import { KotakRest } from '../live/kotak/rest';
 import type { LiveProvider } from '../live/provider';
 import { SAFETY } from '../safety';
 import type { Db } from '../store/db';
+import { AlertSink, type AlertSinkOptions } from './alerts';
 import { OpsJournal } from './journal';
 import { LoginMonitor } from './login-monitor';
 import { Watchdog } from './watchdog';
@@ -47,6 +48,8 @@ export interface CreateOperationsOptions {
   requestRestart?: (reason: string) => void;
   /** The supervisor saw a restart loop: the watchdog must not request restarts. */
   restartsSuppressed?: boolean;
+  /** Where 'error' events go (operators' in-app notifications, optional webhook). */
+  alerts?: AlertSinkOptions;
   log: OperationsLogger;
 }
 
@@ -65,6 +68,10 @@ export function restrict(s: OpsStatusResponse): OpsStatusResponse {
 export function createOperations(o: CreateOperationsOptions): Operations {
   const p = o.provider;
   const journal = new OpsJournal({ dataDir: o.dataDir, scrub: o.scrub, now: () => p.clock.now() });
+  if (o.alerts) {
+    const sink = new AlertSink({ now: () => p.clock.now(), log: o.log, ...o.alerts });
+    journal.onEvent((e) => sink.handle(e));
+  }
   const login = new LoginMonitor(
     {
       credentials: () => p.credentials(),
@@ -155,6 +162,9 @@ export function createOperations(o: CreateOperationsOptions): Operations {
     },
     start: () => {
       journal.add({ source: 'server', level: 'info', type: 'SERVER_START', message: `Server started (pid ${process.pid}${o.supervised ? ', supervised' : ''})` });
+      if (o.restartsSuppressed) {
+        journal.add({ source: 'server', level: 'error', type: 'RESTART_LOOP', message: 'The supervisor saw 3 watchdog restarts within an hour: restarts are suspended; look at the watchdog incidents' });
+      }
       login.start();
       watchdog.start();
       audit.start();

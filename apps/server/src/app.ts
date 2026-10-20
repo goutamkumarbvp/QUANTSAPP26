@@ -41,6 +41,27 @@ const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX',
 const WS_BATCH_MS = 1000;
 const WS_HEARTBEAT_MS = 5000;
 const WS_MAX_SYMBOLS = 40;
+/** Open market-data sockets per client address (an IPv6 client: per /64), and in total. */
+const WS_MAX_PER_CLIENT = 20;
+const WS_MAX_TOTAL = 1000;
+
+/**
+ * A browser socket from another site is refused: its Origin must be this server's own host name
+ * (any port: the Vite dev server proxies from :5173), or listed in WS_ALLOWED_ORIGINS. Clients that
+ * send no Origin (scripts, tests) are not browsers acting for a page and are allowed.
+ */
+export function wsOriginAllowed(origin: string | undefined, host: string | undefined, allowed: readonly string[]): boolean {
+  if (!origin) return true;
+  let o: URL;
+  try {
+    o = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (allowed.includes(o.origin)) return true;
+  const hostName = (host ?? '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return o.hostname.replace(/^\[|\]$/g, '').toLowerCase() === hostName;
+}
 const SYMBOL_RE = /^[A-Z0-9&_-]{1,32}$/;
 /**
  * Routes that answer `?at=` (as of a past time) from the recorder's minutes. Every other route serves
@@ -787,62 +808,83 @@ export async function buildApp(
     return known.slice(0, WS_MAX_SYMBOLS);
   };
 
+  const wsOpen = new Map<string, number>();
+  let wsTotal = 0;
   app.register(async (scope) => {
-    scope.get('/ws', { websocket: true }, (socket) => {
-      let uid: string | null = null;
-      const client: WsClient = { symbols: new Set(indexSymbols()), dirty: new Set() };
-      client.dirty = new Set(client.symbols); // the first batch is a snapshot
-      clients.add(client);
-      let lastSent = Date.now();
-      const send = (m: ServerMessage) => {
-        if (socket.readyState === 1) socket.send(JSON.stringify(m));
-      };
-      try {
-        send({ type: 'hello', clock: cachedClock() });
-      } catch {
-        /* the next batch carries the clock */
-      }
-      const timer = setInterval(() => {
+    scope.get(
+      '/ws',
+      {
+        websocket: true,
+        // Checked before the upgrade: a refused socket never opens.
+        preValidation: async (req, reply) => {
+          if (!wsOriginAllowed(req.headers.origin, req.headers.host, svc.config.wsAllowedOrigins)) return reply.code(403).send({ error: 'WebSocket origin not allowed' });
+          const key = clientKey(req.ip);
+          if ((wsOpen.get(key) ?? 0) >= WS_MAX_PER_CLIENT || wsTotal >= WS_MAX_TOTAL) return reply.code(429).send({ error: 'Too many open market-data connections' });
+        },
+      },
+      (socket, req) => {
+        const key = clientKey(req.ip);
+        wsOpen.set(key, (wsOpen.get(key) ?? 0) + 1);
+        wsTotal++;
+        let uid: string | null = null;
+        const client: WsClient = { symbols: new Set(indexSymbols()), dirty: new Set() };
+        client.dirty = new Set(client.symbols); // the first batch is a snapshot
+        clients.add(client);
+        let lastSent = Date.now();
+        const send = (m: ServerMessage) => {
+          if (socket.readyState === 1) socket.send(JSON.stringify(m));
+        };
         try {
-          const batch = [...client.dirty].filter((s) => client.symbols.has(s));
-          client.dirty.clear();
-          const quotes = batch.map(cachedQuote).filter((x): x is Quote => x !== null);
-          const t = Date.now();
-          if (quotes.length || t - lastSent >= WS_HEARTBEAT_MS) {
-            send({ type: 'ticks', clock: cachedClock(), quotes });
-            lastSent = t;
-          }
+          send({ type: 'hello', clock: cachedClock() });
         } catch {
-          /* keep the socket; the next batch retries */
+          /* the next batch carries the clock */
         }
-      }, WS_BATCH_MS);
-      const offNotify = svc.notifier.onPush((target, notification) => {
-        if (target === uid) send({ type: 'notification', notification });
-      });
-      const onOrder = (target: string, order: import('@q26/core').Order) => {
-        if (target === uid) send({ type: 'order', order });
-      };
-      svc.orderListeners.add(onOrder);
-      socket.on('message', (raw: Buffer) => {
-        try {
-          const msg = JSON.parse(raw.toString()) as ClientMessage;
-          if (msg.type === 'auth') uid = svc.auth.verify(msg.token)?.id ?? null;
-          if (msg.type === 'subscribe') {
-            const next = new Set([...indexSymbols(), ...subscription(msg.symbols)]);
-            for (const s of next) if (!client.symbols.has(s)) client.dirty.add(s);
-            client.symbols = next;
+        const timer = setInterval(() => {
+          try {
+            const batch = [...client.dirty].filter((s) => client.symbols.has(s));
+            client.dirty.clear();
+            const quotes = batch.map(cachedQuote).filter((x): x is Quote => x !== null);
+            const t = Date.now();
+            if (quotes.length || t - lastSent >= WS_HEARTBEAT_MS) {
+              send({ type: 'ticks', clock: cachedClock(), quotes });
+              lastSent = t;
+            }
+          } catch {
+            /* keep the socket; the next batch retries */
           }
-        } catch {
-          /* ignore malformed */
-        }
-      });
-      socket.on('close', () => {
-        clearInterval(timer);
-        clients.delete(client);
-        offNotify();
-        svc.orderListeners.delete(onOrder);
-      });
-    });
+        }, WS_BATCH_MS);
+        const offNotify = svc.notifier.onPush((target, notification) => {
+          if (target === uid) send({ type: 'notification', notification });
+        });
+        const onOrder = (target: string, order: import('@q26/core').Order) => {
+          if (target === uid) send({ type: 'order', order });
+        };
+        svc.orderListeners.add(onOrder);
+        socket.on('message', (raw: Buffer) => {
+          try {
+            const msg = JSON.parse(raw.toString()) as ClientMessage;
+            if (msg.type === 'auth') uid = svc.auth.verify(msg.token)?.id ?? null;
+            if (msg.type === 'subscribe') {
+              const next = new Set([...indexSymbols(), ...subscription(msg.symbols)]);
+              for (const s of next) if (!client.symbols.has(s)) client.dirty.add(s);
+              client.symbols = next;
+            }
+          } catch {
+            /* ignore malformed */
+          }
+        });
+        socket.on('close', () => {
+          clearInterval(timer);
+          clients.delete(client);
+          offNotify();
+          svc.orderListeners.delete(onOrder);
+          const n = (wsOpen.get(key) ?? 1) - 1;
+          if (n > 0) wsOpen.set(key, n);
+          else wsOpen.delete(key);
+          wsTotal = Math.max(0, wsTotal - 1);
+        });
+      },
+    );
   });
 
   /* ============================== web app ============================== */

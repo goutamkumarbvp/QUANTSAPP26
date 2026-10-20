@@ -28,6 +28,8 @@ export interface AppConfig {
   opsAdmins: string[];
   /** TRUST_PROXY: the reverse proxy address(es) whose X-Forwarded-For is trusted ('true': any). */
   trustProxy?: string | boolean;
+  /** WS_ALLOWED_ORIGINS: extra browser origins (e.g. https://q26.example.com) allowed to open /ws. */
+  wsAllowedOrigins: string[];
   /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
   persist: boolean;
@@ -86,6 +88,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ...authSecretFrom(process.env.AUTH_SECRET),
     opsAdmins: (process.env.OPS_ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
     ...trustProxyFrom(process.env.TRUST_PROXY),
+    wsAllowedOrigins: (process.env.WS_ALLOWED_ORIGINS ?? '')
+      .split(',')
+      .map((o) => o.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),

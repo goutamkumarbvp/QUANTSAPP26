@@ -34,6 +34,15 @@ Every material change, why it was made, the files it touches, the tests that cov
 | C-22 | **Dashboard:**<br>• buttons follow the server's `operator.canOperate` and reason;<br>• the restricted view;<br>• grey STATUS UNKNOWN when refreshes fail or hang (10 s abort, browser clock);<br>• only a 404 means "not running";<br>• amber result lines when the health check found problems;<br>• contract labels with decimal strikes are no longer split;<br>• "loading the strikes…" while a new chain loads. | `apps/web/src/components/Operations.tsx`, `ui.tsx`, `lib/api.ts`, `lib/feed.ts`, `pages/Positions.tsx` | web unit tests (171), e2e |
 | C-23 | **Dependencies:** react-router-dom 7.18.4 and echarts 6.1.0 (v5 look kept). Runtime `npm audit` now reports 0 | `apps/web/package.json`, `Chart.tsx`, `main.tsx`, lockfile | web tests, e2e |
 
+## Final hardening
+
+| # | Change | Files | Tests |
+|---|---|---|---|
+| C-24 | **WebSocket guard:**<br>• the browser Origin must be this host (any port) or listed in WS_ALLOWED_ORIGINS;<br>• at most 20 open sockets per client address (IPv6 by /64), 1,000 in total. | `app.ts`, `config.ts` | `ops.test.ts` "/ws guard" |
+| C-25 | **Tamper-evident operations journal:**<br>• SHA-256 hash chain per file;<br>• `verify()`;<br>• weekly check OPS-5;<br>• the secret redaction rebuilds the chain. | `ops/journal.ts`, `ops/weekly-audit.ts` | `ops.test.ts` "journal hash chain" |
+| C-26 | **Alerts:**<br>• error-level operations events (watchdog CRITICAL, login PAUSED, audit FAIL, restart loop) reach the operator accounts as in-app notifications;<br>• an optional ALERT_WEBHOOK_URL (Slack/Discord/ntfy);<br>• de-duplicated, rate-capped. | `ops/alerts.ts`, `ops/index.ts`, `ops/login-monitor.ts`, `index.ts` | `ops.test.ts` "alerts" |
+| C-27 | Backup / restore drill run; the backup now includes `.auth-secret` | ROLLBACK_AND_RECOVERY.md | `evidence/final/restore-drill.log` |
+
 ## Explicitly not changed
 
 These were preserved:

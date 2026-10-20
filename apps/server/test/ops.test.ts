@@ -8,12 +8,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { istTs, type LoginMonitorStatus, type OpsStatusResponse } from '@q26/core';
-import { buildApp, clientKey } from '../src/app';
+import { buildApp, clientKey, wsOriginAllowed } from '../src/app';
 import { authSecretFrom, loadConfig, trustProxyFrom } from '../src/config';
 import type { KotakSessionStatus } from '../src/live/kotak/session';
 import type { FeedHealth } from '../src/live/types';
 import { formatLogLine, istWhen, serverLoggerOptions } from '../src/log';
 import { restrict, type Operations } from '../src/ops';
+import { AlertSink } from '../src/ops/alerts';
 import { OpsJournal } from '../src/ops/journal';
 import { LoginMonitor, MANUAL_SLOW_AFTER_REJECTIONS, type LoginTarget } from '../src/ops/login-monitor';
 import { Watchdog, type WatchdogTarget } from '../src/ops/watchdog';
@@ -698,5 +699,125 @@ describe('/api/ops routes', () => {
     expect(r.statusCode).toBe(404);
     expect(r.json().error).toContain('not running');
     expect((await press(a, undefined)).statusCode).toBe(401);
+  });
+});
+
+/* ------------------------------------------------------------------------------------------ */
+
+describe('journal hash chain (tamper evidence)', () => {
+  it('detects an edited or removed line; accepts lines from before the chain; rebuilds after an authorised redaction', () => {
+    const dir = tmpDir();
+    let now = istTs('2026-10-19', 600);
+    const jdir = path.join(dir, 'ops', 'journal');
+    fs.mkdirSync(jdir, { recursive: true });
+    const file = path.join(jdir, '2026-10-19.jsonl');
+    fs.writeFileSync(file, `${JSON.stringify({ ts: now - 1000, source: 'login', level: 'info', type: 'LEGACY', message: 'before the chain' })}\n`);
+    const j = new OpsJournal({ dataDir: dir, now: () => now });
+    for (const t of ['A', 'B', 'C']) {
+      now += 1000;
+      j.add({ source: 'watchdog', level: 'info', type: t, message: t });
+    }
+    expect(j.verify()).toEqual({ files: 1, lines: 4, broken: [], torn: 0 });
+    // Edit line 3 (B): the chain breaks at line 4.
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    lines[2] = lines[2].replace('"message":"B"', '"message":"b (edited)"');
+    fs.writeFileSync(file, lines.join('\n'));
+    expect(j.verify().broken).toEqual(['2026-10-19.jsonl:4']);
+    // Rebuild after an authorised rewrite: intact again, and new lines continue the chain.
+    j.rechain(file);
+    now += 1000;
+    j.add({ source: 'watchdog', level: 'info', type: 'D', message: 'D' });
+    expect(j.verify()).toMatchObject({ lines: 5, broken: [] });
+    // Remove a middle line.
+    const l2 = fs.readFileSync(file, 'utf8').split('\n');
+    l2.splice(2, 1);
+    fs.writeFileSync(file, l2.join('\n'));
+    expect(j.verify().broken.length).toBe(1);
+    // A fresh journal object (a restart) continues the chain of an intact file.
+    const j2 = new OpsJournal({ dataDir: dir, now: () => now });
+    j2.rechain(file);
+    const j3 = new OpsJournal({ dataDir: dir, now: () => now });
+    j3.add({ source: 'server', level: 'info', type: 'E', message: 'E' });
+    expect(j3.verify().broken).toEqual([]);
+  });
+
+  it('the weekly audit fails OPS-5 when the journal was altered', async () => {
+    const { audit, dir, journal } = auditSetup();
+    journal.add({ ts: istTs('2026-10-16', 600), source: 'watchdog', level: 'info', type: 'X', message: 'one' });
+    journal.add({ ts: istTs('2026-10-16', 601), source: 'watchdog', level: 'info', type: 'Y', message: 'two' });
+    const f = path.join(dir, 'ops', 'journal', '2026-10-16.jsonl');
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('"message":"one"', '"message":"ONE"'));
+    const r = await audit.run('manual');
+    const o5 = r.items.find((i) => i.id === 'OPS-5')!;
+    expect(o5.status).toBe('FAIL');
+    expect(o5.detail).toContain('2026-10-16.jsonl:2');
+  });
+});
+
+describe('alerts', () => {
+  it('turns error events into operator notifications and webhook posts, once per kind per 15 min', async () => {
+    let now = MON_11;
+    const notes: string[] = [];
+    const posts: { url: string; body: unknown }[] = [];
+    const sink = new AlertSink({
+      notifyOperators: (title, body) => notes.push(`${title} | ${body}`),
+      webhookUrl: 'https://hooks.example.test/T/abc',
+      fetch: async (url, init) => (posts.push({ url, body: JSON.parse(String(init.body)) }), new Response('ok')),
+      now: () => now,
+    });
+    const journal = new OpsJournal({ dataDir: null, now: () => now });
+    journal.onEvent((e) => sink.handle(e));
+    journal.add({ source: 'watchdog', level: 'warn', type: 'FEED_WARN', message: 'stale for 70 s' });
+    journal.add({ source: 'watchdog', level: 'error', type: 'MEMORY_FAIL', message: 'Memory: heap at 95% of its limit' });
+    journal.add({ source: 'watchdog', level: 'error', type: 'MEMORY_FAIL', message: 'again' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(notes).toEqual(['Q26 watchdog: needs attention | Memory: heap at 95% of its limit']);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toMatchObject({ text: 'Q26 watchdog: needs attention — Memory: heap at 95% of its limit', content: expect.any(String), type: 'MEMORY_FAIL' });
+    now += 16 * 60_000;
+    journal.add({ source: 'watchdog', level: 'error', type: 'MEMORY_FAIL', message: 'still' });
+    expect(notes).toHaveLength(2);
+  });
+
+  it('a login pause is an error-level event (it alerts the operator)', () => {
+    const journal = new OpsJournal({ dataDir: null, now: () => MON_11 });
+    const f = fakeLoginTarget({ loggedIn: false, error: 'x' });
+    const m = new LoginMonitor(f.target, journal, { now: () => MON_11, timers: manualTimers() });
+    m.start();
+    f.emit({ loggedIn: false, error: 'Invalid MPIN', loginFailures: { rejected: 5, transient: 0, lastError: 'Invalid MPIN' }, loginPaused: 'Kotak refused 5 logins in a row' });
+    expect(journal.list({ minLevel: 'error' }).map((e) => e.type)).toEqual(['LOGIN_FAILED']);
+  });
+});
+
+describe('/ws guard', () => {
+  it('refuses another site\'s browser origin; allows the same host on any port, listed origins and non-browser clients', () => {
+    expect(wsOriginAllowed(undefined, 'localhost:8787', [])).toBe(true);
+    expect(wsOriginAllowed('http://localhost:5173', 'localhost:8787', [])).toBe(true);
+    expect(wsOriginAllowed('https://q26.example.com', 'q26.example.com', [])).toBe(true);
+    expect(wsOriginAllowed('https://evil.example', 'localhost:8787', [])).toBe(false);
+    expect(wsOriginAllowed('https://app.example.com', '10.0.0.5:8787', ['https://app.example.com'])).toBe(true);
+    expect(wsOriginAllowed('not a url', 'localhost:8787', [])).toBe(false);
+  });
+
+  it('caps open sockets per client address', async () => {
+    const p = new FakeProvider();
+    loadSampleBook(p);
+    const svc = createServices(loadConfig({ persist: false, authSecret: 'test-secret' }), { provider: p });
+    const a = await buildApp(svc, { serveWeb: false });
+    await a.listen({ port: 0, host: '127.0.0.1' });
+    const port = (a.server.address() as { port: number }).port;
+    const sockets: WebSocket[] = [];
+    cleanup.push(() => p.dispose(), () => svc.stop(), () => a.close(), () => sockets.forEach((s) => s.close()));
+    const open = () =>
+      new Promise<'open' | 'refused'>((resolve) => {
+        const s = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+        sockets.push(s);
+        s.addEventListener('open', () => resolve('open'));
+        s.addEventListener('error', () => resolve('refused'));
+      });
+    const results: string[] = [];
+    for (let i = 0; i < 21; i++) results.push(await open());
+    expect(results.slice(0, 20).every((r) => r === 'open')).toBe(true);
+    expect(results[20]).toBe('refused');
   });
 });

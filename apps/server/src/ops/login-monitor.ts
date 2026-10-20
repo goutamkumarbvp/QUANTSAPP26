@@ -234,7 +234,8 @@ export class LoginMonitor {
       this.lastFailure = { at: this.now(), reason };
       const next = st.loginBlockedUntil;
       const what = st.loginPaused ? '; automatic login PAUSED' : next ? `; next automatic attempt ${istWhen(next, this.now())}` : '';
-      this.event('warn', st.loggedIn ? 'RELOGIN_FAILED' : 'LOGIN_FAILED', `${reason}${st.loggedIn ? ' (the current session is still valid)' : ''}${what}`);
+      // A pause needs a person: level 'error' (an alert to the operator).
+      this.event(st.loginPaused ? 'error' : 'warn', st.loggedIn ? 'RELOGIN_FAILED' : 'LOGIN_FAILED', `${reason}${st.loggedIn ? ' (the current session is still valid)' : ''}${what}`);
     }
     this.seenFailures = failures;
     if (st.loggedIn) {

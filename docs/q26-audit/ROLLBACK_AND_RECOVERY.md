@@ -45,7 +45,7 @@ Back up daily, outside market hours. Copying a running server's files is safe be
 (temp file + rename):
 
 ```bash
-tar -C "$DATA_DIR" -czf q26-data-$(date +%F).tgz db.json market
+tar -C "$DATA_DIR" -czf q26-data-$(date +%F).tgz db.json market .auth-secret ops/login-state.json
 ```
 
 Keep several generations offsite. Test a restore at least monthly (§3.1 on a spare machine).
