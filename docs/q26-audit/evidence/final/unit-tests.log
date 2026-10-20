@@ -1,0 +1,111 @@
+start 2026-10-20T02:29:06Z
+
+> q26-options@1.0.0 test
+> npm run test -w @q26/core && npm run test -w @q26/server && npm run test -w @q26/web
+
+
+> @q26/core@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /home/user/QUANTSAPP26/packages/core
+
+ ✓ test/algo.test.ts (22 tests) 24ms
+ ✓ test/payoff-margin.test.ts (26 tests) 74ms
+ ✓ test/core.test.ts (24 tests) 256ms
+ ✓ test/orb.test.ts (10 tests) 8ms
+
+ Test Files  4 passed (4)
+      Tests  82 passed (82)
+   Start at  02:29:07
+   Duration  887ms (transform 391ms, setup 0ms, collect 856ms, tests 363ms, environment 1ms, prepare 266ms)
+
+
+> @q26/server@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /home/user/QUANTSAPP26/apps/server
+
+ ✓ test/algo-live.test.ts (21 tests) 2438ms
+ ✓ test/analytics.test.ts (27 tests) 3151ms
+   ✓ volatility > a year of official history: daily ATM IV, IV rank/percentile, HV 20D and the realised-vol cone 525ms
+   ✓ optimizer and the market-wide option snapshot > optimizer ranks strategies on live premiums only and skips strikes without one 821ms
+ ✓ test/live/sfeed-client.test.ts (55 tests) 104ms
+ ✓ test/live/kotak-session.test.ts (40 tests) 87ms
+ ✓ test/ops.test.ts (30 tests) 1372ms
+ ✓ test/tools.test.ts (22 tests) 1490ms
+ ✓ test/verify-adversarial.test.ts (20 tests) 1684ms
+ ✓ test/live/pricing.test.ts (28 tests) 33ms
+ ✓ test/live/recorder.test.ts (25 tests) 36ms
+ ✓ test/routes.test.ts (15 tests) 1822ms
+   ✓ market routes never answer 500 > every route answers 200, or 503 with code NO_LIVE_DATA and the reason (sample book) 456ms
+ ✓ test/live/live-market.test.ts (27 tests) 88ms
+ ✓ test/paper-trading.test.ts (24 tests) 1548ms
+ ✓ test/live/kotak-scripmaster.test.ts (16 tests) 124ms
+ ✓ test/live/sfeed-protocol.test.ts (29 tests) 170ms
+ ✓ test/foundation.test.ts (29 tests) 1593ms
+ ✓ test/live/kotak-rest.test.ts (19 tests) 28ms
+ ✓ test/orb.test.ts (16 tests) 1190ms
+ ✓ test/alerts.test.ts (11 tests) 803ms
+ ✓ test/live/store-intraday.test.ts (16 tests) 77ms
+ ✓ test/live/provider.test.ts (10 tests) 353ms
+ ✓ test/live/eod.test.ts (9 tests) 183ms
+ ✓ test/routes-smoke.test.ts (16 tests) 13503ms
+   ✓ every route in every data state > full: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 914ms
+   ✓ every route in every data state > partial: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 646ms
+   ✓ every route in every data state > closed: 2xx/4xx or 503 NO_LIVE_DATA with the reason — never 500 624ms
+   ✓ websocket fan-out > every socket ends on the latest price (a quote cached before a tick is never sent for it) 5384ms
+   ✓ websocket fan-out > a burst of ticks is one batch a second per socket; closing sockets and the app releases every listener 4427ms
+ ✓ test/live/nse-bhavcopy.test.ts (25 tests) 51ms
+ ✓ test/live/provider-robustness.test.ts (9 tests) 1883ms
+   ✓ LiveProvider feed refusals > re-dials with the old sid while the re-login is in flight do not use up the hourly re-login cap 385ms
+   ✓ LiveProvider combined Kotak REST load (worst case) > sweep + its spot/future quotes + index spots + feed re-logins stay inside 10/s, 300/min and 5,000/h 649ms
+   ✓ LiveProvider forced login ("Re-login now", review fix) > a failed forced login is retried as a normal login: while paused, no further login reaches Kotak 606ms
+ ✓ test/live/store-history.test.ts (9 tests) 58ms
+ ✓ test/review-no-synthetic.test.ts (10 tests) 886ms
+ ✓ test/live/nse-http.test.ts (28 tests) 46ms
+ ✓ test/support/fake-provider.test.ts (11 tests) 556ms
+ ✓ test/live/recorder-gaps-adversarial.test.ts (7 tests) 16ms
+ ✓ test/live/nse-fiidii-holidays.test.ts (11 tests) 18ms
+ ✓ test/valuation-time.test.ts (7 tests) 1451ms
+   ✓ valuation time outside the session > surface days to expiry, the optimizer and the margin estimate are valued at the same time as the IVs 864ms
+ ✓ test/live/universe.test.ts (7 tests) 55ms
+ ✓ test/live/kotak-ratelimit.test.ts (7 tests) 17ms
+ ✓ test/live/nse-participants.test.ts (9 tests) 20ms
+ ✓ test/live/kotak-env-totp.test.ts (9 tests) 7ms
+ ✓ test/live/calendar.test.ts (8 tests) 8ms
+ ✓ test/live/nse-indices.test.ts (6 tests) 14ms
+ ✓ test/live/config-env.test.ts (3 tests) 5ms
+ ✓ test/live/clock.test.ts (4 tests) 5ms
+ ✓ test/market-routes.test.ts (10 tests) 6159ms
+   ✓ websocket > hello with the clock and feed status, then a snapshot batch of the index quotes 1093ms
+   ✓ websocket > fans live ticks out at most once a second, only for subscribed symbols, never an older session 4091ms
+
+ Test Files  40 passed (40)
+      Tests  685 passed (685)
+   Start at  02:29:08
+   Duration  21.70s (transform 1.77s, setup 0ms, collect 7.19s, tests 43.13s, environment 8ms, prepare 2.39s)
+
+
+> @q26/web@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /home/user/QUANTSAPP26/apps/web
+
+ ✓ test/operations.test.tsx (21 tests) 128ms
+ ✓ test/ui.test.tsx (21 tests) 21ms
+ ✓ test/lib.test.ts (18 tests) 49ms
+ ✓ test/trading-pages.test.tsx (30 tests) 618ms
+ ✓ test/analysis-pages.test.tsx (60 tests) 784ms
+ ✓ test/order-ticket.test.tsx (8 tests) 28ms
+ ✓ test/home.test.tsx (6 tests) 78ms
+ ✓ test/layout.test.tsx (7 tests) 71ms
+
+ Test Files  8 passed (8)
+      Tests  171 passed (171)
+   Start at  02:29:31
+   Duration  3.74s (transform 1.78s, setup 0ms, collect 6.23s, tests 1.78s, environment 2ms, prepare 811ms)
+
+EXIT test 0

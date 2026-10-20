@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
 import v8 from 'node:v8';
-import { istParts, type LoginMonitorStatus, type OpsEvent, type WatchdogCheck, type WatchdogStatus } from '@q26/core';
+import { FEED_STALE_MS, istParts, type LoginMonitorStatus, type OpsEvent, type WatchdogCheck, type WatchdogStatus } from '@q26/core';
 import type { JobStatus } from '../live/provider';
 import type { FeedHealth } from '../live/types';
 import { istWhen } from '../log';
@@ -43,6 +43,8 @@ export interface WatchdogTarget {
   refreshInstrumentMaster(): Promise<void>;
   /** Delete operations journals older than N days; returns files removed. */
   pruneJournal(days: number): number;
+  /** The last failed write of db.json (users, paper trades), if the latest one failed. */
+  dbWriteError?(): string | undefined;
 }
 
 export interface WatchdogOptions {
@@ -54,6 +56,8 @@ export interface WatchdogOptions {
   supervised?: boolean;
   /** Clean restart (exit for the supervisor); only called when supervised. */
   requestRestart?: (reason: string) => void;
+  /** The supervisor saw a restart loop (Q26_RESTART_LOOP=1): restarts are not requested again. */
+  restartsSuppressed?: boolean;
   /** Record unhandled promise rejections (index.ts: true; tests: false). */
   captureRejections?: boolean;
   log?: { info(m: string): void; warn(m: string): void; error(m: string): void };
@@ -65,7 +69,8 @@ export interface WatchdogOptions {
 const MB = 1024 * 1024;
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
-const FEED_STALE_MS = 90 * SECOND;
+/** FEED STALE is shown after FEED_STALE_MS (@q26/core, 60 s); the socket is restarted after this. */
+const FEED_RESTART_AFTER_MS = 90 * SECOND;
 const FEED_DOWN_MS = 2 * MINUTE;
 const FEED_RESTART_COOLDOWN_MS = 5 * MINUTE;
 const REFDATA_RETRY_MS = 15 * MINUTE;
@@ -154,7 +159,8 @@ export class Watchdog {
   status(): WatchdogStatus {
     const m = this.memory();
     const failed = this.checks.some((c) => c.result === 'fail');
-    const warned = this.checks.some((c) => c.result === 'warn');
+    // 'fixed' means a repair was just attempted: DEGRADED until a later round finds it ok.
+    const warned = this.checks.some((c) => c.result === 'warn' || c.result === 'fixed');
     return {
       state: this.lastRunAt === null ? 'STARTING' : failed ? 'CRITICAL' : warned ? 'DEGRADED' : 'HEALTHY',
       intervalMs: this.intervalMs,
@@ -214,23 +220,23 @@ export class Watchdog {
 
   private checkMemory(): WatchdogCheck {
     const base = { id: 'memory', title: 'Memory' };
-    let m = this.memory();
+    const m = this.memory();
     const pct = (x: { heapUsed: number; heapLimit: number }) => Math.round((100 * x.heapUsed) / x.heapLimit);
     const before = pct(m);
     if (before < 75) {
       this.memoryStrikes = 0;
       return { ...base, result: 'ok', detail: `heap ${Math.round(m.heapUsed / MB)} MB of ${Math.round(m.heapLimit / MB)} MB (${before}%), RSS ${Math.round(m.rss / MB)} MB` };
     }
+    // Dropped answers free memory only at the next garbage collection: the effect is judged at the next round.
     const dropped = this.target.clearCaches({ all: before >= 85 });
-    m = this.memory();
-    const after = pct(m);
-    if (after < 90) {
+    const freed = `dropped ${dropped} cached answers (re-fetched on demand); checked again at the next round`;
+    if (before < 90) {
       this.memoryStrikes = 0;
-      return { ...base, result: 'fixed', detail: `heap was ${before}% of its limit`, action: `dropped ${dropped} cached answers (re-fetched on demand); heap now ${after}%` };
+      return { ...base, result: 'warn', detail: `heap at ${before}% of its limit`, action: freed };
     }
     this.memoryStrikes++;
-    const action = this.restartIfSupervised(this.memoryStrikes >= 3, `heap above 90% for ${this.memoryStrikes} checks`);
-    return { ...base, result: 'fail', detail: `heap ${after}% of its limit after dropping ${dropped} cached answers`, ...(action ? { action } : {}) };
+    const restart = this.restartIfSupervised(this.memoryStrikes >= 3, `heap above 90% for ${this.memoryStrikes} checks`);
+    return { ...base, result: 'fail', detail: `heap at ${before}% of its limit (${this.memoryStrikes} check(s) in a row)`, action: restart ? `${freed}; ${restart}` : freed };
   }
 
   private checkEventLoop(): WatchdogCheck {
@@ -267,8 +273,9 @@ export class Watchdog {
       case 'NO_CREDENTIALS':
         return { ...base, result: 'warn', detail: s.detail };
       case 'PAUSED':
-        // Needs a person: retrying wrong credentials automatically could lock the account.
-        return { ...base, result: 'fail', detail: s.detail };
+        // Needs a person: retrying wrong credentials automatically could lock the account. While the
+        // current session is still valid it is a warning (data still flows until the token runs out).
+        return { ...base, result: s.sessionValid ? 'warn' : 'fail', detail: s.detail };
       case 'DISCONNECTED':
         this.target.checkLogin();
         return { ...base, result: 'fixed', detail: 'not logged in and no login armed', action: 'login monitor armed a login' };
@@ -299,6 +306,7 @@ export class Watchdog {
     if (f.subscribed === 0) return { ...base, result: 'warn', detail: 'connected but nothing subscribed (instrument master not loaded?)' };
     const age = f.lastTickTs === null ? Infinity : t - f.lastTickTs;
     if (age <= FEED_STALE_MS) return { ...base, result: 'ok', detail: `LIVE: ${f.subscribed} subscribed, last tick ${Math.round(age / 1000)} s ago` };
+    if (age <= FEED_RESTART_AFTER_MS) return { ...base, result: 'warn', detail: `FEED STALE: no tick for ${Math.round(age / 1000)} s (the socket is restarted after ${FEED_RESTART_AFTER_MS / 1000} s)` };
     return this.restartFeed(base, `FEED STALE: no tick for ${age === Infinity ? 'the whole connection' : `${Math.round(age / 1000)} s`} during market hours`);
   }
 
@@ -320,17 +328,22 @@ export class Watchdog {
     const current = r.ready && r.date === p.date;
     if (current) return { ...base, result: 'ok', detail: `loaded for ${r.date} (${r.underlyings} underlyings, ${r.listings} listings)` };
     if (r.ready && p.minuteOfDay < REFDATA_DUE_MIN) return { ...base, result: 'ok', detail: `loaded for ${r.date}; today's is due at 08:45 IST` };
-    if (this.target.login().state !== 'LOGGED_IN') {
+    const was = r.ready ? `loaded for ${r.date}, not today` : `not loaded${r.error ? ` (${r.error})` : ''}`;
+    if (!this.target.login().sessionValid) {
       // A consequence of the login problem (reported by the login check), not a failure of its own.
-      return { ...base, result: 'warn', detail: `${r.ready ? `loaded for ${r.date}, not today` : `not loaded${r.error ? ` (${r.error})` : ''}`}; needs a Kotak login to download` };
+      return { ...base, result: 'warn', detail: `${was}; needs a Kotak login to download` };
     }
-    if (this.now() - this.lastRefdataTry < REFDATA_RETRY_MS) return { ...base, result: 'warn', detail: `${r.ready ? `loaded for ${r.date}` : 'not loaded'}; download retried recently` };
+    const job = this.target.jobs().refdata;
+    if (job?.running) return { ...base, result: 'warn', detail: `${was}; download in progress` };
+    if (this.now() - this.lastRefdataTry < REFDATA_RETRY_MS) {
+      return job?.lastError
+        ? { ...base, result: 'fail', detail: `${was}; the last download failed: ${job.lastError}`, action: 'the provider keeps retrying with back-off' }
+        : { ...base, result: 'warn', detail: `${was}; download started recently` };
+    }
+    // Started, not awaited: a download can take minutes and must not hold up the other checks.
     this.lastRefdataTry = this.now();
-    await this.target.refreshInstrumentMaster();
-    const after = this.target.refdata();
-    return after.ready && after.date === p.date
-      ? { ...base, result: 'fixed', detail: 'was not today\'s', action: `downloaded again: ${after.underlyings} underlyings, ${after.listings} listings` }
-      : { ...base, result: 'fail', detail: `download failed${after.error ? `: ${after.error}` : ''}`, action: 'retried; the provider keeps retrying with back-off' };
+    void this.target.refreshInstrumentMaster().catch(() => undefined);
+    return { ...base, result: 'warn', detail: was, action: 'download started; checked again at the next round' };
   }
 
   private checkJobs(): WatchdogCheck {
@@ -355,6 +368,8 @@ export class Watchdog {
 
   private checkStorage(): WatchdogCheck {
     const base = { id: 'storage', title: 'Disk and storage' };
+    const dbErr = this.target.dbWriteError?.();
+    if (dbErr) return { ...base, result: 'fail', detail: `db.json (users, paper trades) could not be written: ${dbErr}`, action: 'the write is retried; check DATA_DIR ownership and free space' };
     const dir = this.opts.dataDir;
     if (!dir) return { ...base, result: 'skipped', detail: 'persistence off (PERSIST=false)' };
     // Write probe every 10th run (and the first).
@@ -385,6 +400,7 @@ export class Watchdog {
   private restartIfSupervised(due: boolean, why: string): string | undefined {
     if (!due) return undefined;
     if (!this.supervised || !this.opts.requestRestart) return 'restart needed: run the server with npm run start:supervised so the watchdog can restart it';
+    if (this.opts.restartsSuppressed) return 'restart NOT requested: the supervisor saw a restart loop (3 watchdog restarts within an hour); a person must investigate';
     this.opts.requestRestart(why);
     return 'clean restart requested (supervisor starts the server again)';
   }

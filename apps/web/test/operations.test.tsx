@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuditReport, MarketClockInfo, OpsActionResponse, OpsStatusResponse, UserProfile } from '@q26/core';
-import { AuditReportView, formatUptime, OperationsPanel, OperationsView, runOpsAction, type OpsActionResult } from '../src/components/Operations';
-import { ApiError } from '../src/lib/api';
+import { AuditReportView, fetchOpsStatus, formatUptime, OPS_TIMEOUT_MS, OPS_UNKNOWN_AFTER_MS, OperationsPanel, OperationsView, runOpsAction, type OpsActionResult } from '../src/components/Operations';
+import { ApiError, RequestTimeoutError } from '../src/lib/api';
 import { useApp, useTicks } from '../src/lib/store';
 
 beforeAll(() => {
@@ -51,6 +51,7 @@ const older = { id: 'audit-20261010', trigger: 'schedule' as const, finishedAt: 
 const status = (over: Partial<OpsStatusResponse> = {}): OpsStatusResponse => ({
   login: {
     state: 'WAITING',
+    sessionValid: false,
     detail: 'Not logged in: Kotak refused the TOTP. Next automatic attempt 10:45:00',
     checkEveryMs: 30_000,
     lastCheckAt: ts - 5000,
@@ -86,8 +87,26 @@ const status = (over: Partial<OpsStatusResponse> = {}): OpsStatusResponse => ({
   feed: 'FEED STALE',
   safety: { mode: 'paper', autoExecutionToBroker: false, liveOrderAuthority: false, brokerSubmission: false },
   liveTrading: 'NOT READY',
+  operator: { canOperate: true },
+  restricted: false,
   ...over,
 });
+
+const GUEST_REASON = 'Sign in with a registered account to run operations';
+const NOT_OPERATOR = 'Not an operator account: operations are limited to the accounts in OPS_ADMIN_EMAILS';
+/** GET /api/ops as a non-operator gets it: the states, nothing of what is withheld. */
+const restrictedStatus = (reason = GUEST_REASON): OpsStatusResponse => {
+  const s = status();
+  const { process: _withheld, ...watchdog } = s.watchdog;
+  return {
+    ...s,
+    login: { ...s.login, events: [] },
+    watchdog: { ...watchdog, checks: s.watchdog.checks.map(({ action: _a, ...c }) => ({ ...c, detail: '' })), incidents: [] },
+    audit: { ...s.audit, last: s.audit.last && { ...s.audit.last, items: [] } },
+    operator: { canOperate: false, reason },
+    restricted: true,
+  };
+};
 
 const decode = (html: string) => html.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&gt;/g, '>').replace(/&lt;/g, '<');
 const wrap = (node: React.ReactElement, qc = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } })) =>
@@ -99,11 +118,16 @@ const wrap = (node: React.ReactElement, qc = new QueryClient({ defaultOptions: {
     ),
   );
 
-/** The panel as the dashboard renders it, from a cached GET /api/ops answer (or its error). */
-function panel(answer: OpsStatusResponse | ApiError): string {
+/**
+ * The panel as the dashboard renders it, from a cached GET /api/ops answer (or its error), fetched
+ * `ageMs` ago on the browser clock. `refreshError`: the last answer stays, the refresh after it failed.
+ */
+function panel(answer: OpsStatusResponse | ApiError, opts: { ageMs?: number; refreshError?: ApiError | Error } = {}): string {
   const qc = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
+  const updatedAt = Date.now() - (opts.ageMs ?? 0);
   if (answer instanceof ApiError) qc.getQueryCache().build(qc, { queryKey: ['ops'] }).setState({ status: 'error', error: answer, fetchStatus: 'idle', errorUpdateCount: 1, errorUpdatedAt: 1 });
-  else qc.setQueryData(['ops'], answer);
+  else if (opts.refreshError) qc.getQueryCache().build(qc, { queryKey: ['ops'] }).setState({ status: 'error', data: answer, dataUpdatedAt: updatedAt, dataUpdateCount: 1, error: opts.refreshError, fetchStatus: 'idle', errorUpdateCount: 1, errorUpdatedAt: Date.now() });
+  else qc.setQueryData(['ops'], answer, { updatedAt });
   return wrap(<OperationsPanel />, qc);
 }
 
@@ -117,6 +141,22 @@ const card = (html: string, title: string) => {
 };
 const chip = (tone: string, text: string) => `<span class="chip ${tone === 'muted' ? 'bg-line text-muted' : `bg-${tone}/15 text-${tone}`}">${text}</span>`;
 const BAD = /NaN|undefined|Infinity|>null<|\bnull\b/;
+
+/** Broker, market data and the three card states are grey STATUS UNKNOWN chips (last state as tooltip); no check is green. */
+function expectUnknown(html: string) {
+  expect(html).toContain(`<span title="Last reported: CONNECTED">${chip('muted', 'STATUS UNKNOWN')}</span>`);
+  expect(html).toContain(`<span title="Last reported: LIVE">${chip('muted', 'STATUS UNKNOWN')}</span>`);
+  expect(card(html, 'Login Monitor')).toContain(`<span title="Last reported: LOGGED_IN">${chip('muted', 'STATUS UNKNOWN')}</span>`);
+  expect(card(html, '24×7 Watchdog')).toContain(`<span title="Last reported: HEALTHY">${chip('muted', 'STATUS UNKNOWN')}</span>`);
+  expect(card(html, 'Weekly Audit')).toContain(`<span title="Last reported: ATTENTION">${chip('muted', 'STATUS UNKNOWN')}</span>`);
+  // (A past audit report keeps its dated verdict: that is a fact of the report, not a live state.)
+  const live = html.slice(0, html.indexOf('aria-label="Weekly Audit"'));
+  expect(live).not.toMatch(/class="chip bg-(up|accent)\/15 text-(up|accent)">(LIVE|CONNECTED|LOGGED_IN|HEALTHY|ok)</);
+  expect(card(html, '24×7 Watchdog')).toContain(chip('muted', 'ok'));
+  // Paper trading and NOT READY are facts of the program, not of the status.
+  expect(html).toContain(chip('accent', 'PAPER TRADING'));
+  expect(html).toContain(chip('muted', 'NOT READY'));
+}
 
 describe('Operations panel', () => {
   it('renders the status chips and the three cards from GET /api/ops', () => {
@@ -160,9 +200,14 @@ describe('Operations panel', () => {
     expect(audit).toContain(chip('up', 'HEALTHY')); // the older report in the history
     expect(audit).not.toContain('Audit running');
 
-    // A registered user can press every button.
+    // The server says this caller is an operator (operator.canOperate): every button can be pressed.
     for (const b of ['Re-login now', 'Run health check', 'Run audit now', 'View report']) expect(button(html, b)).not.toContain('disabled');
     expect(html).not.toContain('Sign in with a registered account');
+    expect(html).not.toContain('Details are shown to the operator account');
+    // Freshness on the browser clock.
+    expect(html).toContain('<div class="mb-2 text-2xs text-muted"');
+    expect(html).toContain('Status last fetched just now');
+    expect(html).not.toContain('STATUS UNKNOWN');
     // Process figures are not prices: no thousands separators.
     expect(html).not.toMatch(/\d,\d{3}/);
   });
@@ -175,28 +220,93 @@ describe('Operations panel', () => {
     expect(panel(status({ feed: 'MARKET CLOSED' }))).toContain(chip('muted', 'MARKET CLOSED'));
   });
 
-  it('a guest sees the buttons disabled with the reason as visible text', () => {
+  it('a guest: the buttons follow operator.canOperate, the server reason is the visible text, with the Settings link', () => {
     setUser(guest);
-    const html = panel(status());
-    for (const b of ['Re-login now', 'Run health check', 'Run audit now']) expect(button(html, b)).toContain('disabled=""');
+    const html = panel(restrictedStatus(GUEST_REASON));
+    for (const b of ['Re-login now', 'Run health check', 'Run audit now']) {
+      const attrs = button(html, b) ?? '';
+      expect(attrs).toContain('disabled=""');
+      // The reason under the button describes it (assistive tech reads it with the button).
+      const id = /aria-describedby="([^"]+)"/.exec(attrs)?.[1];
+      expect(html).toContain(`<p id="${id}" class="text-2xs text-muted">${GUEST_REASON}`);
+    }
     // Shown under each button (not only as a tooltip), with the way to sign in.
-    expect(html.match(/<p class="text-2xs text-muted">Sign in with a registered account to run operations/g)).toHaveLength(3);
+    expect(html.match(new RegExp(`<p id="[^"]+" class="text-2xs text-muted">${GUEST_REASON}`, 'g'))).toHaveLength(3);
     expect(html).toContain('href="/settings"');
     // Reading the status stays available.
     expect(html).toContain(chip('warn', 'WAITING'));
 
     setUser(null);
-    const out = panel(status());
+    const out = panel(restrictedStatus('Please sign in to run operations'));
     expect(button(out, 'Run health check')).toContain('disabled=""');
     expect(out).toContain('Please sign in to run operations');
+    expect(out).toContain('href="/settings"');
   });
 
-  it('PAUSED logins look like a failure and Re-login stays available to a registered user', () => {
+  it('a registered account that is not an operator: buttons disabled with the server reason, no sign-in link', () => {
+    const html = panel(restrictedStatus(NOT_OPERATOR));
+    for (const b of ['Re-login now', 'Run health check', 'Run audit now']) expect(button(html, b)).toContain('disabled=""');
+    expect(html.match(new RegExp(`class="text-2xs text-muted">${NOT_OPERATOR}</p>`, 'g'))).toHaveLength(3);
+    expect(html).not.toContain('href="/settings"');
+    // The server decides, not the client: a guest the server lets operate can press the buttons.
+    setUser(guest);
+    const allowed = panel(status({ operator: { canOperate: true } }));
+    for (const b of ['Re-login now', 'Run health check', 'Run audit now']) expect(button(allowed, b)).not.toContain('disabled');
+  });
+
+  it('a server without operator in its status: the session guess is the fallback', () => {
+    const { operator: _o, ...old } = status();
+    const legacy = old as OpsStatusResponse;
+    expect(button(panel(legacy), 'Run health check')).not.toContain('disabled');
+    setUser(guest);
+    const html = panel(legacy);
+    expect(button(html, 'Run health check')).toContain('disabled=""');
+    expect(html).toContain(GUEST_REASON);
+  });
+
+  it('restricted (non-operator): the states and counts stay; what is withheld is one muted line, no empty lists, no figures, no report', () => {
+    setUser(guest);
+    const html = panel(restrictedStatus());
+    expect(html).not.toMatch(BAD);
+    // States, verdicts and counts.
+    expect(html).toContain(chip('down', 'DISCONNECTED'));
+    expect(html).toContain(chip('warn', 'FEED STALE'));
+    const login = card(html, 'Login Monitor');
+    expect(login).toContain(chip('warn', 'WAITING'));
+    expect(login).toMatch(/Failures <b[^>]*>2<\/b>/);
+    const dog = card(html, '24×7 Watchdog');
+    expect(dog).toContain(chip('warn', 'DEGRADED'));
+    for (const [tone, r] of [['up', 'ok'], ['accent', 'fixed'], ['warn', 'warn'], ['down', 'fail'], ['muted', 'skipped']]) expect(dog).toContain(chip(tone, r));
+    expect(dog).toContain('Market feed');
+    const audit = card(html, 'Weekly Audit');
+    expect(audit).toContain(chip('warn', 'ATTENTION'));
+    for (const c of ['PASS 20', 'FIXED 1', 'WARN 2', 'FAIL 0', 'SKIPPED 3']) expect(audit).toContain(c);
+    // One muted line per card in place of the withheld details.
+    for (const c of [login, dog, audit]) expect(c.match(/<p class="text-muted">Details are shown to the operator account<\/p>/g)).toHaveLength(1);
+    // Nothing that reads as "there were none" or a zero figure.
+    for (const t of ['No login events yet', 'No incidents', 'Recent events', 'Recent incidents', 'Process', ' MB', 'Uptime', '→ ']) expect(html).not.toContain(t);
+    // Audit reports need the operator account: no View controls.
+    expect(button(html, 'View report')).toBeUndefined();
+    expect(button(html, 'View')).toBeUndefined();
+  });
+
+  it('PAUSED logins look like a failure and Re-login stays available to an operator', () => {
     const html = panel(status({ login: { ...status().login, state: 'PAUSED', detail: 'Automatic login paused: Kotak refused 5 logins in a row. Check NEO_* and press Re-login now', nextAttemptAt: undefined } }));
     const login = card(html, 'Login Monitor');
     expect(login).toContain(chip('down', 'PAUSED'));
     expect(login).toContain('Automatic login paused');
+    expect(login).not.toContain('still valid');
     expect(button(html, 'Re-login now')).not.toContain('disabled');
+  });
+
+  it('PAUSED with a still-valid session says so (amber, not a disconnection); the Broker chip is the server\'s', () => {
+    const html = panel(status({ broker: 'CONNECTED', login: { ...status().login, state: 'PAUSED', sessionValid: true, tokenExpiresAt: IST(19, 23, 59), detail: 'Automatic login paused: Kotak refused 5 logins in a row', nextAttemptAt: undefined } }));
+    const login = card(html, 'Login Monitor');
+    expect(login).toContain(chip('warn', 'PAUSED'));
+    expect(login).not.toContain(chip('down', 'PAUSED'));
+    expect(login).toContain('Current session still valid: only the automatic logins are paused');
+    expect(login).toContain('23:59:00'); // the session's expiry, IST
+    expect(html).toContain(chip('accent', 'CONNECTED'));
   });
 
   it('while an audit runs: running indicator, "Run audit now" disabled with the reason', () => {
@@ -213,7 +323,7 @@ describe('Operations panel', () => {
     const s = status();
     const html = panel({
       ...s,
-      watchdog: { ...s.watchdog, state: 'STARTING', lastRunAt: null, checks: [], incidents: [], process: { ...s.watchdog.process, eventLoopP99Ms: null } },
+      watchdog: { ...s.watchdog, state: 'STARTING', lastRunAt: null, checks: [], incidents: [], process: { ...s.watchdog.process!, eventLoopP99Ms: null } },
       audit: { ...s.audit, last: null, history: [], nextRunAt: null },
       login: { ...s.login, events: [], lastFailure: undefined },
     });
@@ -227,10 +337,10 @@ describe('Operations panel', () => {
     expect(button(html, 'View report')).toContain('disabled=""');
   });
 
-  it('404 (and 503) from GET /api/ops: the neutral "not running" state, not an error', () => {
+  it('only a 404 from GET /api/ops is the neutral "not running" state', () => {
     for (const err of [
       new ApiError('Operations (login monitor, watchdog, weekly audit) are not running on this server', 404),
-      new ApiError('Internal error', 503),
+      new ApiError('Route GET:/api/ops not found', 404),
     ]) {
       const html = panel(err);
       expect(html).toContain('Operations are not running on this server');
@@ -241,9 +351,38 @@ describe('Operations panel', () => {
     }
   });
 
-  it('any other failure before a first answer is shown as an error, without crashing', () => {
-    const html = panel(new ApiError('Internal error', 500));
-    expect(html).toContain('Operations status not available: Internal error');
+  it('a 503 (or any other failure) before a first answer is an error, not "not running"', () => {
+    for (const err of [new ApiError('Internal error', 500), new ApiError('Service Unavailable', 503)]) {
+      const html = panel(err);
+      expect(html).toContain(`Operations status not available: ${err.message}`);
+      expect(html).not.toContain('not running');
+    }
+  });
+
+  it('a failed refresh (503, timeout) keeps the last status, marked STATUS UNKNOWN in grey, never in its last green tones', () => {
+    for (const err of [new ApiError('Service Unavailable', 503), new RequestTimeoutError(OPS_TIMEOUT_MS)]) {
+      const html = panel(status({ broker: 'CONNECTED', feed: 'LIVE', watchdog: { ...status().watchdog, state: 'HEALTHY' }, login: { ...status().login, state: 'LOGGED_IN', sessionValid: true } }), { ageMs: 12_000, refreshError: err });
+      expect(html).not.toContain('not running');
+      expect(html).toContain(`STATUS UNKNOWN: could not refresh (${err.message}) — showing the last status`);
+      expect(html).toContain('Status last fetched 12s ago');
+      expectUnknown(html);
+      // The last status stays readable (its details), the buttons too.
+      expect(card(html, 'Login Monitor')).toContain('Checks every 30 s');
+      expect(button(html, 'Run health check')).not.toContain('disabled');
+    }
+  });
+
+  it('a status older than three polls on the browser clock is STATUS UNKNOWN, with the time it was last fetched', () => {
+    expect(OPS_UNKNOWN_AFTER_MS).toBe(30_000);
+    const live = status({ broker: 'CONNECTED', feed: 'LIVE', watchdog: { ...status().watchdog, state: 'HEALTHY' }, login: { ...status().login, state: 'LOGGED_IN', sessionValid: true } });
+    const fresh = panel(live, { ageMs: 25_000 });
+    expect(fresh).toContain(chip('up', 'LIVE'));
+    expect(fresh).toContain(chip('accent', 'CONNECTED'));
+    expect(fresh).toContain('Status last fetched 25s ago');
+    const old = panel(live, { ageMs: 3 * 60_000 });
+    expect(old).toContain('Status last fetched 3m ago · STATUS UNKNOWN: no answer from the server since — showing the last status');
+    expect(old).toContain('<div class="mb-2 text-2xs text-warn"');
+    expectUnknown(old);
   });
 
   it('the full audit report lists every item (ID, area, check, status, detail, automatic fix)', () => {
@@ -273,7 +412,7 @@ describe('Operations buttons', () => {
 
   /** The view as the panel renders it after a press: the status and message the server returned. */
   const after = (action: 'login' | 'watchdog' | 'audit', r: OpsActionResult, s = status()) =>
-    wrap(<OperationsView status={r.status ?? s} blocked={null} results={{ [action]: r }} onRun={() => undefined} />);
+    wrap(<OperationsView status={r.status ?? s} user={registered} results={{ [action]: r }} onRun={() => undefined} />);
 
   it('a press POSTs the action with the bearer token and shows the returned message next to the button', async () => {
     stubStorage();
@@ -297,24 +436,62 @@ describe('Operations buttons', () => {
     expect(card(html, 'Login Monitor')).not.toContain('Health check done');
   });
 
-  it('a refused press shows the server error text (403 for a guest, 401 signed out) in red', async () => {
+  it('a refused press shows the server error text (403 not an operator, 401 signed out) in red', async () => {
     stubStorage();
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'Sign in with a registered account to run operations' }), { status: 403 })));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: NOT_OPERATOR }), { status: 403 })));
     const r = await runOpsAction('audit');
-    expect(r).toEqual({ ok: false, message: 'Sign in with a registered account to run operations' });
+    expect(r).toEqual({ ok: false, failed: true, message: NOT_OPERATOR });
     const audit = card(after('audit', r), 'Weekly Audit');
-    expect(audit).toContain('class="break-words text-2xs text-down">Sign in with a registered account to run operations</p>');
+    expect(audit).toContain(`class="break-words text-2xs text-down">${NOT_OPERATOR}</p>`);
 
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'Please sign in' }), { status: 401 })));
-    expect(await runOpsAction('login')).toEqual({ ok: false, message: 'Please sign in' });
+    expect(await runOpsAction('login')).toEqual({ ok: false, failed: true, message: 'Please sign in' });
   });
 
-  it('an answer with ok=false (e.g. no credentials) is shown as a failure with its message', async () => {
+  it('an answer with ok=false (e.g. no credentials) is shown in amber with its message, never green', async () => {
     stubStorage();
     const body: OpsActionResponse = { ok: false, message: 'Kotak credentials missing in .env: NEO_CONSUMER_KEY. Add them to .env and restart the server.', status: status() };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
     const r = await runOpsAction('login');
+    expect(r.failed).toBeUndefined();
     const login = card(after('login', r), 'Login Monitor');
-    expect(login).toMatch(/Re-login now<\/button>[\s\S]*text-down">Kotak credentials missing in \.env: NEO_CONSUMER_KEY/);
+    expect(login).toMatch(/Re-login now<\/button>[\s\S]*text-warn">Kotak credentials missing in \.env: NEO_CONSUMER_KEY/);
+  });
+
+  it('a health check that found problems answers ok=false: its line is amber, not green', async () => {
+    stubStorage();
+    const body: OpsActionResponse = { ok: false, message: 'Health check done: 9 checks, 1 fixed, 2 need attention', status: status() };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+    const r = await runOpsAction('watchdog');
+    expect(r.ok).toBe(false);
+    const dog = card(after('watchdog', r), '24×7 Watchdog');
+    expect(dog).toContain('class="break-words text-2xs text-warn">Health check done: 9 checks, 1 fixed, 2 need attention</p>');
+    expect(dog).not.toContain('text-up">Health check done');
+  });
+
+  it('GET /api/ops passes the query signal and is aborted after 10 s', async () => {
+    stubStorage();
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))));
+      vi.stubGlobal('fetch', fetch);
+      const hung = expect(fetchOpsStatus()).rejects.toBeInstanceOf(RequestTimeoutError);
+      vi.advanceTimersByTime(OPS_TIMEOUT_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      await hung;
+      expect(OPS_TIMEOUT_MS).toBe(10_000);
+
+      // React Query's cancellation (unmount, a newer request) aborts the request too: not a timeout.
+      const ctl = new AbortController();
+      const cancelled = fetchOpsStatus(ctl.signal).then(() => 'answered', (e: unknown) => e);
+      ctl.abort();
+      const e = await cancelled;
+      expect(e).toBeInstanceOf(DOMException);
+      expect(e).not.toBeInstanceOf(RequestTimeoutError);
+      expect((fetch.mock.calls[1][1] as RequestInit).signal!.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

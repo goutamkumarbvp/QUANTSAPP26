@@ -126,9 +126,13 @@ test('home: the Operations panel shows no broker, no data, paper trading only, a
   for (const name of ['Re-login now', 'Run health check', 'Run audit now']) {
     const button = ops.getByRole('button', { name, exact: true });
     await expect(button).toBeVisible();
-    await expect(button).toBeDisabled(); // the e2e session is a guest: the reason is on the page
+    // The e2e session is a guest: the server answers operator.canOperate=false, and its reason is the
+    // visible text under the button (the button's description).
+    await expect(button).toBeDisabled();
+    const reason = ops.locator(`[id="${await button.getAttribute('aria-describedby')}"]`);
+    await expect(reason).toBeVisible();
+    await expect(reason).toContainText(/registered account|operator/i);
   }
-  await expect(ops.getByText('Sign in with a registered account to run operations').first()).toBeVisible();
   expect(await watch.check()).toEqual([]);
 });
 

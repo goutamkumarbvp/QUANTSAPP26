@@ -210,6 +210,7 @@ export class WeeklyAudit {
     await step('OPS-1', 'Operations', 'Broker login during the week', () => this.loginWeek(from, to));
     await step('OPS-2', 'Operations', 'Watchdog incidents during the week', () => this.watchdogWeek(from, to));
     await step('OPS-3', 'Operations', 'Server restarts during the week', () => this.restarts(from, to));
+    await step('OPS-4', 'Operations', 'Operations journal written', () => this.journalWrites(from, to));
     await step('RUN-1', 'Runtime', 'Node.js runtime', () => this.runtime());
     await step('HOUSE-1', 'Housekeeping', 'Old journals, quarantine, reports and caches', () => this.housekeeping());
     await step('DEP-1', 'Dependencies', 'Known vulnerabilities in dependencies', () => ({
@@ -250,7 +251,16 @@ export class WeeklyAudit {
     if (!secrets.length) return { status: 'SKIPPED', detail: 'no Kotak credentials configured: nothing to look for' };
     const root = this.t.dataDir;
     if (!root) return { status: 'SKIPPED', detail: 'persistence off: nothing stored' };
-    const files = [...walk(path.join(root, 'ops')), path.join(root, 'db.json'), ...listFiles(root).filter((f) => f.endsWith('.log'))].filter((f) => fs.existsSync(f));
+    const res = secretPatterns(secrets);
+    // Text the app writes: the journal, the reports, db.json, logs. Not the quarantined EOD data (numbers only).
+    const ops = path.join(root, 'ops');
+    const files = [
+      ...walk(path.join(ops, 'journal')),
+      ...walk(path.join(ops, 'audits')),
+      ...listFiles(ops),
+      path.join(root, 'db.json'),
+      ...listFiles(root).filter((f) => f.endsWith('.log')),
+    ].filter((f) => fs.existsSync(f));
     const redacted: string[] = [];
     const leaked: string[] = [];
     let scanned = 0;
@@ -263,12 +273,12 @@ export class WeeklyAudit {
         continue;
       }
       scanned++;
-      if (!secrets.some((s) => text.includes(s))) continue;
+      // Only inside text values: a credential made of digits must not "match" inside a timestamp or price.
+      const scan = scanText(f, text, res);
+      if (!scan.hit) continue;
       const rel = path.relative(root, f);
-      if (rel.startsWith(`ops${path.sep}`)) {
-        let out = text;
-        for (const s of secrets) out = out.split(s).join('[redacted]');
-        fs.writeFileSync(f, out);
+      if (rel.startsWith(`ops${path.sep}`) && scan.redacted !== undefined) {
+        fs.writeFileSync(f, scan.redacted);
         redacted.push(rel);
       } else leaked.push(rel);
     }
@@ -330,7 +340,8 @@ export class WeeklyAudit {
     const offline = eod.status().backfill.stoppedOffline;
     if (offline) return { status: 'FAIL', detail: `${missing.size} session(s) missing files (${[...missing.keys()].join(', ')}); NSE/BSE were unreachable at the last backfill (${offline}): retried by the daily EOD job` };
     const failed: string[] = [];
-    let fixed = 0;
+    const unpublished: string[] = [];
+    const completed: string[] = [];
     for (const [d, need] of missing) {
       const got = await eod.loadDateQueued(d, need);
       // NSE/BSE not reachable at all: the other dates would fail the same way.
@@ -339,12 +350,22 @@ export class WeeklyAudit {
         failed.push(`NSE/BSE unreachable (${offline}); not retried for the other dates`);
         break;
       }
-      const bad = got.filter((r) => r.outcome === 'failed' || r.outcome === 'waiting');
-      if (bad.length) failed.push(`${d}: ${bad.map((r) => `${r.source} (${r.reason ?? r.outcome})`).join(', ')}`);
-      else fixed++;
+      // Fixed only when every needed source now reads as loaded (a 404 downloads nothing).
+      const still = need.filter((s) => !eod.isLoaded(s, d));
+      if (!still.length) {
+        completed.push(d);
+        continue;
+      }
+      const why = (s: EodSource) => got.find((r) => r.source === s);
+      const notPublished = still.filter((s) => ['not-published', 'unavailable'].includes(why(s)?.outcome ?? ''));
+      const other = still.filter((s) => !notPublished.includes(s));
+      if (notPublished.length) unpublished.push(`${d}: ${notPublished.join(', ')}`);
+      if (other.length) failed.push(`${d}: ${other.map((s) => `${s} (${why(s)?.reason ?? why(s)?.outcome ?? 'not loaded'})`).join(', ')}`);
     }
-    if (failed.length) return { status: 'FAIL', detail: `${missing.size} session(s) were missing files; still missing: ${failed.slice(0, 5).join('; ')}`, fix: `download attempted; ${fixed} session(s) complete now` };
-    return { status: 'FIXED', detail: `${missing.size} session(s) were missing files`, fix: `downloaded the missing files from NSE/BSE for ${[...missing.keys()].join(', ')}` };
+    const fix = completed.length ? { fix: `downloaded the missing files from NSE/BSE for ${completed.join(', ')}` } : {};
+    if (failed.length) return { status: 'FAIL', detail: `${missing.size} session(s) were missing files; still missing: ${[...failed, ...unpublished].slice(0, 6).join('; ')}`, ...fix };
+    if (unpublished.length) return { status: 'WARN', detail: `${missing.size} session(s) were missing files; not published by the exchange (yet): ${unpublished.slice(0, 6).join('; ')}`, ...fix };
+    return { status: 'FIXED', detail: `${missing.size} session(s) were missing files`, ...fix };
   }
 
   private async eodIntegrity(from: number, to: number, runId: string): Promise<Omit<AuditItem, 'id' | 'area' | 'title'>> {
@@ -388,12 +409,23 @@ export class WeeklyAudit {
     }
     const still: string[] = [];
     for (const [d, sources] of redo) {
-      const got = (await this.t.eod?.loadDateQueued(d, [...sources])) ?? [];
-      for (const r of got) if (r.outcome !== 'loaded' && r.outcome !== 'already-loaded') still.push(`${d} ${r.source} (${r.reason ?? r.outcome})`);
+      // Forced: the store's "loaded" markers may still be there although a file of the date was moved.
+      const got = (await this.t.eod?.loadDateQueued(d, [...sources], { force: true })) ?? [];
+      for (const r of got) if (r.outcome !== 'loaded') still.push(`${d} ${r.source} (${r.reason ?? r.outcome})`);
     }
-    const fix = `moved ${corrupt.length} corrupt file(s) to ${path.relative(this.t.dataDir, qdir)}; downloaded again`;
+    // Every quarantined file must be back and readable.
+    const missingAgain = corrupt.filter((c) => {
+      try {
+        JSON.parse(fs.readFileSync(c.file, 'utf8'));
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    for (const c of missingAgain) still.push(`${path.relative(root, c.file)} not restored`);
+    const fix = `moved ${corrupt.length} corrupt file(s) to ${path.relative(this.t.dataDir, qdir)}; downloaded the date(s) again`;
     return still.length
-      ? { status: 'FAIL', detail: `${corrupt.length} corrupt file(s); not downloaded again: ${still.slice(0, 5).join('; ')}`, fix }
+      ? { status: 'FAIL', detail: `${corrupt.length} corrupt file(s); not restored: ${[...new Set(still)].slice(0, 6).join('; ')}`, fix }
       : { status: 'FIXED', detail: `${corrupt.length} corrupt file(s) in ${checked} checked`, fix };
   }
 
@@ -415,7 +447,7 @@ export class WeeklyAudit {
     const recent = this.t.calendar.sessions(istParts(this.now() - 7 * DAY).date, sess.date);
     const lastSession = recent.at(-1);
     if (r.ready && r.date && (r.date === sess.date || r.date === lastSession)) return { status: 'PASS', detail: `loaded for ${r.date}: ${r.underlyings} underlyings, ${r.listings} listings` };
-    if (this.t.login().state !== 'LOGGED_IN') return { status: 'WARN', detail: `${r.ready ? `loaded for ${r.date}` : 'not loaded'}; downloading it needs a Kotak login` };
+    if (!this.t.login().sessionValid) return { status: 'WARN', detail: `${r.ready ? `loaded for ${r.date}` : 'not loaded'}; downloading it needs a Kotak login` };
     await this.t.refreshInstrumentMaster();
     const after = this.t.refdata();
     return after.ready && after.date === sess.date
@@ -482,10 +514,14 @@ export class WeeklyAudit {
     const ev = this.t.journal.read(from, to).filter((e) => e.source === 'login');
     const n = (type: string) => ev.filter((e) => e.type === type).length;
     const ok = n('LOGIN_OK');
-    const failed = n('LOGIN_FAILED');
+    const failed = n('LOGIN_FAILED') + n('RELOGIN_FAILED');
     const lost = n('SESSION_LOST');
     const detail = `${ok} login(s), ${failed} failed attempt(s), ${lost} session loss(es); now ${l.state}`;
+    // The state now counts as much as the week's events: a pause makes no further attempts (no events).
+    if (l.state === 'PAUSED') return { status: 'FAIL', detail: `${detail}; ${l.detail}` };
+    if (!l.sessionValid && !ok) return { status: 'FAIL', detail: `${detail}; not logged in and no successful login this week${l.lastFailure ? ` (last problem: ${l.lastFailure.reason})` : ''}` };
     if (failed && !ok) return { status: 'FAIL', detail: `${detail}; no successful login this week (last problem: ${l.lastFailure?.reason ?? 'unknown'})` };
+    if (!l.sessionValid) return { status: 'WARN', detail: `${detail}; not logged in right now` };
     if (failed > 20 || lost > 10) return { status: 'WARN', detail: `${detail}: unstable broker connection` };
     return { status: 'PASS', detail };
   }
@@ -504,6 +540,13 @@ export class WeeklyAudit {
   private restarts(from: number, to: number): Omit<AuditItem, 'id' | 'area' | 'title'> {
     const starts = this.t.journal.read(from, to).filter((e) => e.type === 'SERVER_START').length;
     return starts > 3 ? { status: 'WARN', detail: `${starts} server starts this week: check the supervisor log for crashes` } : { status: 'PASS', detail: `${starts} server start(s) this week` };
+  }
+
+  private journalWrites(from: number, to: number): Omit<AuditItem, 'id' | 'area' | 'title'> {
+    if (!this.t.journal.dir) return { status: 'SKIPPED', detail: 'persistence off: the journal is kept in memory only' };
+    const lost = this.t.journal.unpersisted(from, to);
+    if (!lost) return { status: 'PASS', detail: 'every operations event of the week was written to DATA_DIR/ops/journal' };
+    return { status: 'WARN', detail: `${lost} operations event(s) of the week could not be written (${this.t.journal.lastWriteError() ?? 'write failed'}); they are counted from memory but are lost at restart` };
   }
 
   private runtime(): Omit<AuditItem, 'id' | 'area' | 'title'> {
@@ -583,6 +626,73 @@ export class WeeklyAudit {
     }
     return out;
   }
+}
+
+/** One pattern per credential: a numeric one only as a whole number (not inside a longer digit run). */
+export function secretPatterns(secrets: readonly string[]): RegExp[] {
+  return secrets.map((s) => (/^\d+$/.test(s) ? new RegExp(`(?<!\\d)${s}(?!\\d)`, 'g') : new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')));
+}
+
+const hasSecret = (text: string, res: readonly RegExp[]): boolean => res.some((r) => text.search(r) >= 0);
+const redactText = (text: string, res: readonly RegExp[]): string => res.reduce((t, r) => t.replace(r, '[redacted]'), text);
+
+/** Redact the string values of a parsed JSON value (numbers, keys and structure are left alone). */
+function redactJson(v: unknown, res: readonly RegExp[]): { value: unknown; hit: boolean } {
+  if (typeof v === 'string') return hasSecret(v, res) ? { value: redactText(v, res), hit: true } : { value: v, hit: false };
+  if (Array.isArray(v)) {
+    let hit = false;
+    const value = v.map((x) => {
+      const r = redactJson(x, res);
+      hit ||= r.hit;
+      return r.value;
+    });
+    return { value, hit };
+  }
+  if (v && typeof v === 'object') {
+    let hit = false;
+    const value: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const r = redactJson(x, res);
+      hit ||= r.hit;
+      value[k] = r.value;
+    }
+    return { value, hit };
+  }
+  return { value: v, hit: false };
+}
+
+/**
+ * Whether a stored file holds a credential value, and the file with it redacted. JSON (.json) and
+ * JSON lines (.jsonl) are parsed and only their string values are looked at and changed, so a
+ * credential made of digits never matches inside a number and the records stay valid JSON.
+ */
+export function scanText(file: string, text: string, res: readonly RegExp[]): { hit: boolean; redacted?: string } {
+  if (file.endsWith('.jsonl')) {
+    let hit = false;
+    const lines = text.split('\n').map((line) => {
+      if (!line.trim()) return line;
+      try {
+        const r = redactJson(JSON.parse(line), res);
+        if (!r.hit) return line;
+        hit = true;
+        return JSON.stringify(r.value);
+      } catch {
+        if (!hasSecret(line, res)) return line;
+        hit = true;
+        return redactText(line, res);
+      }
+    });
+    return hit ? { hit, redacted: lines.join('\n') } : { hit };
+  }
+  if (file.endsWith('.json')) {
+    try {
+      const r = redactJson(JSON.parse(text), res);
+      return r.hit ? { hit: true, redacted: JSON.stringify(r.value, null, 2) } : { hit: false };
+    } catch {
+      /* not valid JSON: treated as text */
+    }
+  }
+  return hasSecret(text, res) ? { hit: true, redacted: redactText(text, res) } : { hit: false };
 }
 
 function summaryOf(r: AuditReport): AuditReportSummary {

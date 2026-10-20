@@ -3,7 +3,7 @@
  * provider, plus the status the dashboard shows. index.ts creates it; buildApp() serves it under
  * /api/ops (status is public like /api/health; the three actions need a registered account).
  */
-import type { FeedState, OpsStatusResponse } from '@q26/core';
+import { FEED_STALE_MS, type FeedState, type OpsStatusResponse } from '@q26/core';
 import { KotakRest } from '../live/kotak/rest';
 import type { LiveProvider } from '../live/provider';
 import { SAFETY } from '../safety';
@@ -26,7 +26,11 @@ export interface Operations {
   readonly login: LoginMonitor;
   readonly watchdog: Watchdog;
   readonly audit: WeeklyAudit;
-  status(): OpsStatusResponse;
+  /**
+   * The status for a caller: operators get everything; anyone else gets the states only (journal
+   * events, check details, process figures and audit items withheld).
+   */
+  status(viewer?: { canOperate: boolean; reason?: string }): OpsStatusResponse;
   start(): void;
   stop(): void;
 }
@@ -41,10 +45,22 @@ export interface CreateOperationsOptions {
   scrub: (text: string) => string;
   supervised: boolean;
   requestRestart?: (reason: string) => void;
+  /** The supervisor saw a restart loop: the watchdog must not request restarts. */
+  restartsSuppressed?: boolean;
   log: OperationsLogger;
 }
 
-const FEED_STALE_MS = 90_000;
+
+/** States only: what a non-operator may see (no journal text, file paths, figures or audit items). */
+export function restrict(s: OpsStatusResponse): OpsStatusResponse {
+  const { process: _process, ...wd } = s.watchdog;
+  return {
+    ...s,
+    login: { ...s.login, events: [] },
+    watchdog: { ...wd, checks: s.watchdog.checks.map((c) => ({ id: c.id, title: c.title, result: c.result, detail: '' })), incidents: [] },
+    audit: { ...s.audit, last: s.audit.last ? { ...s.audit.last, items: [] } : null },
+  };
+}
 
 export function createOperations(o: CreateOperationsOptions): Operations {
   const p = o.provider;
@@ -76,9 +92,18 @@ export function createOperations(o: CreateOperationsOptions): Operations {
       refdata: () => p.ref.status(),
       refreshInstrumentMaster: () => p.refreshInstrumentMaster(),
       pruneJournal: (days) => journal.prune(days),
+      dbWriteError: () => o.db?.writeError(),
     },
     journal,
-    { dataDir: o.dataDir, now: () => p.clock.now(), supervised: o.supervised, requestRestart: o.requestRestart, captureRejections: true, log: o.log },
+    {
+      dataDir: o.dataDir,
+      now: () => p.clock.now(),
+      supervised: o.supervised,
+      requestRestart: o.requestRestart,
+      restartsSuppressed: o.restartsSuppressed,
+      captureRejections: true,
+      log: o.log,
+    },
   );
   const audit = new WeeklyAudit(
     {
@@ -112,17 +137,21 @@ export function createOperations(o: CreateOperationsOptions): Operations {
     login,
     watchdog,
     audit,
-    status: () => {
+    status: (viewer = { canOperate: false, reason: 'Sign in with an operator account to run operations' }) => {
       const l = login.status();
-      return {
+      const full: OpsStatusResponse = {
         login: l,
         watchdog: watchdog.status(),
         audit: audit.status(),
-        broker: l.state === 'LOGGED_IN' ? 'CONNECTED' : 'DISCONNECTED',
+        // The session, not the monitor state: PAUSED with a still-valid token is still connected.
+        broker: l.sessionValid ? 'CONNECTED' : 'DISCONNECTED',
         feed: feedState(),
         safety: { mode: SAFETY.mode, autoExecutionToBroker: SAFETY.autoExecutionToBroker, liveOrderAuthority: SAFETY.liveOrderAuthority, brokerSubmission: SAFETY.brokerSubmission },
         liveTrading: 'NOT READY',
+        operator: viewer,
+        restricted: !viewer.canOperate,
       };
+      return viewer.canOperate ? full : restrict(full);
     },
     start: () => {
       journal.add({ source: 'server', level: 'info', type: 'SERVER_START', message: `Server started (pid ${process.pid}${o.supervised ? ', supervised' : ''})` });

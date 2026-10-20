@@ -140,7 +140,7 @@ const ROUTES: RouteCase[] = [
   G('/api/health', '/api/health', { full200: true }),
   // operations (Model F): not running in this test server (404); the actions need a registered account (403 for the guest)
   G('/api/ops', '/api/ops'),
-  G('/api/ops/audit/reports/:id', '/api/ops/audit/reports/2026-10-10_100000'),
+  G('/api/ops/audit/reports/:id', '/api/ops/audit/reports/2026-10-10_100000', { user: true }),
   { method: 'POST', route: '/api/ops/login/relogin', url: () => '/api/ops/login/relogin', body: () => ({}), user: true },
   { method: 'POST', route: '/api/ops/watchdog/run', url: () => '/api/ops/watchdog/run', body: () => ({}), user: true },
   { method: 'POST', route: '/api/ops/audit/run', url: () => '/api/ops/audit/run', body: () => ({}), user: true },

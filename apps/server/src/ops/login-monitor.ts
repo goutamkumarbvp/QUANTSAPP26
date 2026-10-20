@@ -175,6 +175,7 @@ export class LoginMonitor {
   status(): LoginMonitorStatus {
     this.rollDay();
     const base = {
+      sessionValid: false,
       checkEveryMs: this.intervalMs,
       lastCheckAt: this.lastCheckAt,
       consecutiveFailures: this.consecutiveFailures,
@@ -187,6 +188,7 @@ export class LoginMonitor {
     if (!cred.ok) return { state: 'NO_CREDENTIALS', detail: `${cred.error}: live data and login are off`, ...base };
     const st = this.target.status();
     const t = this.now();
+    base.sessionValid = st.loggedIn;
     if (st.loggedIn) {
       const until = st.tokenExpiresAt ? ` (the current session stays valid until ${istWhen(st.tokenExpiresAt, t)})` : '';
       // A paused re-login is an outage waiting for the token to run out: shown, not hidden behind LOGGED_IN.

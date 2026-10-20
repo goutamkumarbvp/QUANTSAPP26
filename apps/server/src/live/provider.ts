@@ -25,7 +25,9 @@ import { EodJobs, type EodStatus } from './eod';
 import { RateLimiter } from './kotak/ratelimit';
 import { KotakRest } from './kotak/rest';
 import { INDEX_SPECS, REFERENCE_STOCKS, ScripMaster, type ScripMasterStatus } from './kotak/scripmaster';
-import { KotakError, KotakSession, nextIstTime, type FetchLike, type KotakSessionStatus } from './kotak/session';
+import fs from 'node:fs';
+import path from 'node:path';
+import { KotakError, KotakSession, nextIstTime, type FetchLike, type KotakSessionStatus, type LoginStateStore, type SavedLoginState } from './kotak/session';
 import { resolveFeedUrl, type SFeedAuthError, type SFeedSocketFactory } from './kotak/sfeed/client';
 import { KotakLiveMarket, canonicalKey, isIndexSpot, type KotakLiveMarketOptions, type LiveMarketDetails, type SweepStatus } from './live-market';
 import { NseHttp } from './nse/http';
@@ -75,6 +77,8 @@ export interface ProviderLogger {
 export interface LiveProviderDeps {
   /** fetch for Kotak (login, REST, scrip-master downloads). */
   kotakFetch?: FetchLike;
+  /** Where the login refusal count / hold / pause survives restarts (default DATA_DIR/ops/login-state.json). */
+  loginStateStore?: LoginStateStore;
   /** fetch for NSE/BSE public files. */
   nseFetch?: FetchLike;
   /** SFeed socket factory (default: the `ws` package). */
@@ -227,6 +231,29 @@ const HOUR = 60 * MINUTE;
 // when Kotak did not answer) is the real back-off (notBefore); the job adds little on top of it.
 const LOGIN_BACKOFF = { baseMs: 5 * SECOND, maxMs: MINUTE };
 const REFDATA_BACKOFF = { baseMs: MINUTE, maxMs: 30 * MINUTE };
+/** The login safety state in a small JSON file (atomic write; unreadable or missing: nothing saved). */
+export function fileLoginStateStore(file: string): LoginStateStore {
+  return {
+    load: () => {
+      try {
+        return JSON.parse(fs.readFileSync(file, 'utf8')) as SavedLoginState;
+      } catch {
+        return undefined;
+      }
+    },
+    save: (state) => {
+      if (!state) {
+        fs.rmSync(file, { force: true });
+        return;
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    },
+  };
+}
+
 /** Daily instrument-master refresh (after the 08:30 proactive re-login, before pre-open). */
 const REFDATA_DAILY_MIN = 8 * 60 + 45;
 const MAX_FEED_RELOGINS_PER_HOUR = 6;
@@ -325,7 +352,14 @@ export class LiveProvider implements MarketDataProvider {
 
     if (config.neo) {
       const limiter = new RateLimiter({ timers: { now: this.now, setTimeout: this.timers.setTimeout, clearTimeout: this.timers.clearTimeout } });
-      this.session = new KotakSession(config.neo, { fetch: deps.kotakFetch, now: this.now, sleep, limiter, logger: this.log });
+      this.session = new KotakSession(config.neo, {
+        fetch: deps.kotakFetch,
+        now: this.now,
+        sleep,
+        limiter,
+        logger: this.log,
+        loginStateStore: deps.loginStateStore ?? fileLoginStateStore(path.join(config.dataDir, 'ops', 'login-state.json')),
+      });
       this.rest = new KotakRest(this.session);
     } else {
       this.session = null;

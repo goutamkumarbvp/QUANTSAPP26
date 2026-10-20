@@ -1176,6 +1176,12 @@ export type ClientMessage = { type: 'auth'; token: string } | { type: 'subscribe
 
 /* ------------------------- operations (Model F) -------------------------- */
 
+/**
+ * A connected feed whose last tick is older than this during market hours is FEED STALE (never shown
+ * as LIVE). One threshold for the dashboard header, the Operations panel and the watchdog.
+ */
+export const FEED_STALE_MS = 60_000;
+
 /** One entry of the operations journal (login monitor, watchdog, weekly audit). Never carries secrets. */
 export interface OpsEvent {
   ts: number;
@@ -1197,6 +1203,8 @@ export type LoginMonitorState = 'LOGGED_IN' | 'LOGGING_IN' | 'WAITING' | 'PAUSED
 
 export interface LoginMonitorStatus {
   state: LoginMonitorState;
+  /** A Kotak session is live right now (true also while PAUSED with a still-valid token). */
+  sessionValid: boolean;
   /** One plain-language line for the dashboard. */
   detail: string;
   checkEveryMs: number;
@@ -1233,7 +1241,8 @@ export interface WatchdogStatus {
   runs: number;
   /** Started by scripts/supervise.mjs (restarts the server after a crash or hang). */
   supervised: boolean;
-  process: { pid: number; uptimeSec: number; rssMb: number; heapUsedMb: number; heapLimitMb: number; eventLoopP99Ms: number | null };
+  /** Withheld from non-operators (restricted status). */
+  process?: { pid: number; uptimeSec: number; rssMb: number; heapUsedMb: number; heapLimitMb: number; eventLoopP99Ms: number | null };
   checks: WatchdogCheck[];
   /** Recent warnings, failures and fixes, most recent first. */
   incidents: OpsEvent[];
@@ -1293,6 +1302,13 @@ export interface OpsStatusResponse {
   safety: { mode: 'paper'; autoExecutionToBroker: false; liveOrderAuthority: false; brokerSubmission: false };
   /** Live order placement is not part of this program: always NOT READY for live trading. */
   liveTrading: 'NOT READY';
+  /** Whether the CALLER may run the operations actions, and why not. */
+  operator: { canOperate: boolean; reason?: string };
+  /**
+   * true for callers who are not operators: journal events, check details/actions, process figures
+   * and audit items are withheld (empty), only the states are shown.
+   */
+  restricted: boolean;
 }
 
 export interface OpsActionResponse {

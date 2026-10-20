@@ -140,42 +140,79 @@ function requireUser(req: FastifyRequest): StoredUser {
 }
 
 const RATE_WINDOW_MS = 60_000;
-/** POST routes limited per client address per minute. */
+/** Client keys kept by the rate limiter at most (oldest windows are dropped first). */
+const RATE_MAX_KEYS = 20_000;
+/** POST routes limited per client address per minute (operations actions: per operator, below). */
 const RATE_LIMITS: Readonly<Record<string, number>> = {
   '/api/auth/login': 30,
   '/api/auth/register': 20,
   '/api/auth/guest': 60,
-  '/api/ops/login/relogin': 10,
-  '/api/ops/watchdog/run': 20,
-  '/api/ops/audit/run': 10,
   // CPU-heavy calculations anyone can call (R-09)
   '/api/optimizer': 60,
   '/api/recap': 60,
   '/api/algos/:id/backtest-range': 20,
 };
+/** Operations actions per operator account per minute. */
+const OPS_ACTIONS_PER_MINUTE = 10;
 
-/**
- * Operations actions (re-login, health check, audit): an operator account — one listed in
- * OPS_ADMIN_EMAILS, or, when that is empty, the first account registered on this server (its owner).
- * "Re-login now" can make a real Kotak login: a self-registered stranger must not be able to.
- */
-function requireOperator(req: FastifyRequest, svc: Services): StoredUser {
-  const u = requireUser(req);
-  if (u.guest) throw Object.assign(new Error('Sign in with a registered account to run operations'), { statusCode: 403 });
-  const admins = svc.config.opsAdmins;
-  const allowed = admins.length ? admins.includes(u.email.trim().toLowerCase()) : ownerOf(svc)?.id === u.id;
-  if (!allowed) {
-    const why = admins.length ? 'operations are limited to the accounts in OPS_ADMIN_EMAILS' : 'operations are limited to the first account registered on this server (set OPS_ADMIN_EMAILS in .env to choose the operators)';
-    throw Object.assign(new Error(`Not an operator account: ${why}`), { statusCode: 403 });
-  }
-  return u;
+/** The rate-limit key of a client address: an IPv6 client by its /64 (one host owns the whole prefix). */
+export function clientKey(ip: string): string {
+  const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+  if (!v4.includes(':')) return v4;
+  const [head] = v4.split('%');
+  const parts = head.includes('::')
+    ? (() => {
+        const [a, b] = head.split('::');
+        const left = a ? a.split(':') : [];
+        const right = b ? b.split(':') : [];
+        return [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
+      })()
+    : head.split(':');
+  return `${parts.slice(0, 4).map((x) => x.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
-/** The first registered (non-guest) account of this server. */
-function ownerOf(svc: Services): StoredUser | undefined {
+/**
+ * Who may run the operations actions (re-login, health check, audit): an account listed in
+ * OPS_ADMIN_EMAILS, or — when that is empty — the server's owner, the first account given a password
+ * (recorded once in the database; a guest upgraded later cannot take it over). With persistence off
+ * the owner would change at every restart, so OPS_ADMIN_EMAILS is then required. "Re-login now" can
+ * make a real Kotak login: a self-registered stranger must not be able to press it.
+ */
+function operatorCheck(req: FastifyRequest, svc: Services): { canOperate: boolean; reason?: string; status: number } {
+  const u = req.user;
+  if (!u) return { canOperate: false, reason: 'Sign in with the operator account to run operations', status: 401 };
+  if (u.guest) return { canOperate: false, reason: 'Sign in with a registered account to run operations (guests cannot)', status: 403 };
+  const admins = svc.config.opsAdmins;
+  if (admins.length) {
+    return admins.includes(u.email.trim().toLowerCase())
+      ? { canOperate: true, status: 200 }
+      : { canOperate: false, reason: 'Not an operator account: operations are limited to the accounts in OPS_ADMIN_EMAILS', status: 403 };
+  }
+  if (!svc.config.persist) {
+    return { canOperate: false, reason: 'Operations need OPS_ADMIN_EMAILS in .env while persistence is off (PERSIST=false)', status: 403 };
+  }
+  return ownerId(svc) === u.id
+    ? { canOperate: true, status: 200 }
+    : { canOperate: false, reason: "Not an operator account: operations are limited to this server's owner (the first account registered); set OPS_ADMIN_EMAILS in .env to choose the operators", status: 403 };
+}
+
+function requireOperator(req: FastifyRequest, svc: Services): StoredUser {
+  const c = operatorCheck(req, svc);
+  if (!c.canOperate) throw Object.assign(new Error(c.reason), { statusCode: c.status });
+  return req.user!;
+}
+
+/** The owner recorded in the database; a database from before it was recorded: its earliest password account, recorded now. */
+function ownerId(svc: Services): string | undefined {
+  const d = svc.db.data;
+  if (d.ownerId && d.users[d.ownerId]) return d.ownerId;
   let owner: StoredUser | undefined;
-  for (const u of Object.values(svc.db.data.users)) if (!u.guest && u.passwordHash && (!owner || u.createdAt < owner.createdAt)) owner = u;
-  return owner;
+  for (const u of Object.values(d.users)) if (!u.guest && u.passwordHash && (!owner || u.createdAt < owner.createdAt)) owner = u;
+  if (owner) {
+    d.ownerId = owner.id;
+    svc.db.save();
+  }
+  return owner?.id;
 }
 
 export async function buildApp(
@@ -184,7 +221,13 @@ export async function buildApp(
 ): Promise<FastifyInstance> {
   // Fastify's own two lines per request would flood the terminal (the web app polls every few seconds):
   // requests are written at debug only (LOG_LEVEL=debug), errors by the error handler below.
-  const app = Fastify({ logger: opts.logger ?? false, logController: new LogController({ disableRequestLogging: true }), bodyLimit: 1_000_000 });
+  const app = Fastify({
+    logger: opts.logger ?? false,
+    logController: new LogController({ disableRequestLogging: true }),
+    bodyLimit: 1_000_000,
+    // Behind a reverse proxy (TRUST_PROXY): req.ip is the real client, so the limits apply per client.
+    ...(svc.config.trustProxy !== undefined ? { trustProxy: svc.config.trustProxy } : {}),
+  });
   await app.register(cors, { origin: true });
   await app.register(websocket);
 
@@ -195,20 +238,32 @@ export async function buildApp(
   // Sign-in and operations actions: a fixed window per client address and route (password guessing,
   // guest-account flooding, button hammering). Generous enough for people and the test suites.
   const windows = new Map<string, { n: number; start: number }>();
-  app.addHook('onRequest', async (req, reply) => {
-    const url = req.routeOptions.url;
-    const max = req.method === 'POST' && url ? RATE_LIMITS[url] : undefined;
-    if (!max) return;
+  const limit = (key: string, max: number, reply: FastifyReply): void => {
     const t = Date.now();
-    if (windows.size > 10_000) for (const [k, w] of windows) if (t - w.start >= RATE_WINDOW_MS) windows.delete(k);
-    const key = `${req.ip}|${url}`;
     let w = windows.get(key);
-    if (!w || t - w.start >= RATE_WINDOW_MS) windows.set(key, (w = { n: 0, start: t }));
+    if (!w || t - w.start >= RATE_WINDOW_MS) {
+      windows.delete(key);
+      // Bounded: the oldest windows go first (the Map keeps insertion order).
+      while (windows.size >= RATE_MAX_KEYS) windows.delete(windows.keys().next().value as string);
+      windows.set(key, (w = { n: 0, start: t }));
+    }
     if (++w.n > max) {
       const wait = Math.ceil((w.start + RATE_WINDOW_MS - t) / 1000);
       reply.header('retry-after', String(wait));
       throw Object.assign(new Error(`Too many requests: try again in ${wait} s`), { statusCode: 429 });
     }
+  };
+  // Expired windows are dropped once a minute, not in the request path.
+  const pruneTimer = setInterval(() => {
+    const t = Date.now();
+    for (const [k, w] of windows) if (t - w.start >= RATE_WINDOW_MS) windows.delete(k);
+  }, RATE_WINDOW_MS);
+  pruneTimer.unref();
+  app.addHook('onClose', async () => clearInterval(pruneTimer));
+  app.addHook('onRequest', async (req, reply) => {
+    const url = req.routeOptions.url;
+    const max = req.method === 'POST' && url ? RATE_LIMITS[url] : undefined;
+    if (max) limit(`${clientKey(req.ip)}|${url}`, max, reply);
   });
 
   app.decorateRequest('user', null);
@@ -286,26 +341,40 @@ export async function buildApp(
     if (!opts.ops) throw Object.assign(new Error('Operations (login monitor, watchdog, weekly audit) are not running on this server'), { statusCode: 404 });
     return opts.ops;
   };
-  app.get('/api/ops', async () => ops().status());
-  app.post('/api/ops/login/relogin', async (req) => {
-    requireOperator(req, svc);
+  /** The status as this caller may see it (operators: everything; others: the states only). */
+  const opsStatus = (req: FastifyRequest) => {
+    const c = operatorCheck(req, svc);
+    return ops().status({ canOperate: c.canOperate, ...(c.reason ? { reason: c.reason } : {}) });
+  };
+  /** An operator's action: authorised first, then limited per operator account (not per address). */
+  const opsAction = (req: FastifyRequest, reply: FastifyReply, action: string): StoredUser => {
+    const u = requireOperator(req, svc);
+    ops();
+    limit(`op:${u.id}|${action}`, OPS_ACTIONS_PER_MINUTE, reply);
+    return u;
+  };
+  app.get('/api/ops', async (req) => opsStatus(req));
+  app.post('/api/ops/login/relogin', async (req, reply) => {
+    opsAction(req, reply, 'relogin');
     const r = await ops().login.relogin();
-    return { ok: r.ok, message: r.message, status: ops().status() };
+    return { ok: r.ok, message: r.message, status: opsStatus(req) };
   });
-  app.post('/api/ops/watchdog/run', async (req) => {
-    requireOperator(req, svc);
+  app.post('/api/ops/watchdog/run', async (req, reply) => {
+    opsAction(req, reply, 'watchdog');
     const checks = await ops().watchdog.run();
     const fixed = checks.filter((c) => c.result === 'fixed').length;
     const bad = checks.filter((c) => c.result === 'warn' || c.result === 'fail').length;
-    return { ok: true, message: `Health check done: ${checks.length} checks, ${fixed} fixed, ${bad} need attention`, status: ops().status() };
+    // ok is false when the checks found problems (the dashboard shows the line in the warning colour).
+    return { ok: bad === 0, message: `Health check done: ${checks.length} checks, ${fixed} fixed, ${bad} need attention`, status: opsStatus(req) };
   });
-  app.post('/api/ops/audit/run', async (req) => {
-    requireOperator(req, svc);
+  app.post('/api/ops/audit/run', async (req, reply) => {
+    opsAction(req, reply, 'audit');
     const r = ops().audit.runNow();
     r.done?.catch((e) => app.log.warn(`weekly audit failed: ${e instanceof Error ? e.message : String(e)}`));
-    return { ok: r.started, message: r.message, status: ops().status() };
+    return { ok: r.started, message: r.message, status: opsStatus(req) };
   });
   app.get<{ Params: { id: string } }>('/api/ops/audit/reports/:id', async (req) => {
+    requireOperator(req, svc);
     const r = ops().audit.report(req.params.id);
     if (!r) throw Object.assign(new Error('No such audit report'), { statusCode: 404 });
     return r;

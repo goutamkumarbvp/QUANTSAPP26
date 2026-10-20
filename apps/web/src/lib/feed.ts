@@ -1,12 +1,15 @@
 import { useMemo } from 'react';
-import type { MarketClockInfo } from '@q26/core';
+import { FEED_STALE_MS, type MarketClockInfo } from '@q26/core';
 import { formatAge } from './format';
 import { useTicks } from './store';
 
 export type FeedState = 'LIVE' | 'CONNECTING' | 'OFFLINE';
 
-/** A connected feed with no tick for this long while the market is open is flagged as stale. */
-export const STALE_TICK_MS = 60_000;
+/**
+ * A connected feed with no tick for this long while the market is open is flagged as stale: the one
+ * threshold of the server (FEED_STALE_MS in @q26/core), so the header and the Operations panel agree.
+ */
+export const STALE_TICK_MS = FEED_STALE_MS;
 
 export interface FeedView {
   state: FeedState;
@@ -37,7 +40,7 @@ export function feedView(clock: MarketClockInfo | null, appConnected: boolean): 
     return { state: 'CONNECTING', reason: f.loggedIn ? 'Connecting to the Kotak Neo market-data feed…' : 'Logging in to Kotak Neo…', stale: false, lastTickAgeMs };
   }
   const open = clock.status === 'open';
-  const stale = open && (lastTickAgeMs === null || lastTickAgeMs > STALE_TICK_MS);
+  const stale = open && (lastTickAgeMs === null || lastTickAgeMs > FEED_STALE_MS);
   const reason = stale
     ? lastTickAgeMs === null
       ? 'Connected, but no live tick has arrived yet this session'

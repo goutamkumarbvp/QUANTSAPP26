@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { FeedStatus, MarketClockInfo } from '@q26/core';
-import { ApiError, api, errorText, isClientError, isNoLiveData } from '../src/lib/api';
+import { FEED_STALE_MS, type FeedStatus, type MarketClockInfo } from '@q26/core';
+import { ApiError, api, errorText, isClientError, isNoLiveData, RequestTimeoutError } from '../src/lib/api';
 import { feedView, STALE_TICK_MS } from '../src/lib/feed';
 import * as fmt from '../src/lib/format';
 import { shouldRetry } from '../src/lib/query';
@@ -114,6 +114,48 @@ describe('api errors', () => {
     expect(await api('/x')).toBeNull();
   });
 
+  it('timeoutMs aborts a request the server does not answer (RequestTimeoutError); the caller\'s signal still cancels it', async () => {
+    // Like fetch: never answers, rejects with an AbortError once its signal is aborted (or already is).
+    const hang = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
+      const abort = () => reject(new DOMException('aborted', 'AbortError'));
+      if (init.signal!.aborted) abort();
+      else init.signal!.addEventListener('abort', abort);
+    }));
+    vi.stubGlobal('fetch', hang);
+    const e = await failure(api('/ops', { timeoutMs: 20 }));
+    expect(e).toBeInstanceOf(RequestTimeoutError);
+    expect(e.message).toBe('The server did not answer within 0 s');
+    expect(isClientError(e)).toBe(false); // retried like a network failure
+    expect(shouldRetry(0, e)).toBe(true);
+
+    const ctl = new AbortController();
+    const p = failure(api('/ops', { signal: ctl.signal, timeoutMs: 60_000 }));
+    ctl.abort();
+    const cancelled = await p;
+    expect(cancelled).not.toBeInstanceOf(RequestTimeoutError);
+    expect((cancelled as unknown as DOMException).name).toBe('AbortError');
+
+    // Already aborted: no request goes unanswered.
+    const done = new AbortController();
+    done.abort();
+    expect(await failure(api('/ops', { signal: done.signal, timeoutMs: 60_000 }))).not.toBeInstanceOf(RequestTimeoutError);
+  });
+
+  it('without timeoutMs the caller\'s signal is passed as is; an answer in time clears the timer', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    const ctl = new AbortController();
+    await api('/x', { signal: ctl.signal });
+    expect((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].signal).toBe(ctl.signal);
+    vi.useFakeTimers();
+    try {
+      expect(await api('/x', { timeoutMs: 10_000 })).toEqual({ ok: true });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('isNoLiveData is false for anything that is not an ApiError', () => {
     expect(isNoLiveData(new Error('NO_LIVE_DATA'))).toBe(false);
     expect(isNoLiveData(null)).toBe(false);
@@ -159,6 +201,12 @@ describe('feed state (clock chip)', () => {
     expect(v.stale).toBe(false);
     expect(v.lastTickAgeMs).toBe(5000);
     expect(v.reason).toMatch(/receiving live ticks/i);
+  });
+
+  it('uses the server\'s one stale-feed threshold (FEED_STALE_MS)', () => {
+    expect(STALE_TICK_MS).toBe(FEED_STALE_MS);
+    expect(feedView(clock({ ts: 1_000_000 + FEED_STALE_MS }), true).stale).toBe(false);
+    expect(feedView(clock({ ts: 1_000_000 + FEED_STALE_MS + 1 }), true).stale).toBe(true);
   });
 
   it('flags a connected feed without recent ticks while the market is open (not outside the session)', () => {

@@ -30,6 +30,11 @@ export interface DbShape {
   notifications: Record<string, Notification[]>;
   watchlists: Record<string, Watchlist[]>;
   algoRuns: Record<string, StoredAlgoRun[]>;
+  /**
+   * The server's owner: the first account given a password (register, or a guest upgraded), recorded
+   * once. With OPS_ADMIN_EMAILS empty it is the only operations operator.
+   */
+  ownerId?: string;
 }
 
 const empty = (): DbShape => ({
@@ -50,6 +55,7 @@ export class Db {
   /** Set when db.json could not be read at start: the file it was moved to (the app started empty). */
   readonly recoveredFrom: string | undefined;
   private timer: NodeJS.Timeout | null = null;
+  private lastWriteError: string | undefined;
   private readonly file: string | null;
 
   constructor(dir: string | null) {
@@ -67,13 +73,28 @@ export class Db {
     }
   }
 
-  /** Mark dirty; flushes within 300 ms. */
+  /** Mark dirty; flushes within 300 ms. A failed write is kept (writeError) and retried in 30 s, never thrown from the timer. */
   save(): void {
     if (!this.file || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.flush();
+      try {
+        this.flush();
+        this.lastWriteError = undefined;
+      } catch (e) {
+        this.lastWriteError = e instanceof Error ? e.message : String(e);
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          this.save();
+        }, 30_000);
+        this.timer.unref?.();
+      }
     }, 300);
+  }
+
+  /** Why the latest write of db.json failed (cleared by the next successful one). */
+  writeError(): string | undefined {
+    return this.lastWriteError;
   }
 
   flush(): void {
@@ -92,7 +113,7 @@ export class Db {
     this.flush();
   }
 
-  list<K extends Exclude<keyof DbShape, 'version' | 'users' | 'emailIndex'>>(key: K, userId: string): DbShape[K][string] {
+  list<K extends Exclude<keyof DbShape, 'version' | 'users' | 'emailIndex' | 'ownerId'>>(key: K, userId: string): DbShape[K][string] {
     const bucket = this.data[key] as Record<string, unknown[]>;
     if (!bucket[userId]) bucket[userId] = [];
     return bucket[userId] as DbShape[K][string];

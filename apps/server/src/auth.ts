@@ -64,6 +64,7 @@ export class Auth {
     };
     this.db.data.users[user.id] = user;
     this.db.data.emailIndex[key] = user.id;
+    this.db.data.ownerId ??= user.id;
     this.db.save();
     return user;
   }
@@ -104,6 +105,7 @@ export class Auth {
     user.name = name.trim() || user.name;
     user.guest = false;
     this.db.data.emailIndex[key] = user.id;
+    this.db.data.ownerId ??= user.id;
     this.db.save();
     return user;
   }

@@ -189,8 +189,8 @@ export function Val({ value, format, reason, className }: { value: number | stri
   return <span className={cx('tabular-nums', className)}>{format ? format(value) : formatIndian(value)}</span>;
 }
 
-/** Display names of the server's `gaps` sections (internal keys such as `buildUpCounts`). */
-const GAP_LABELS: Record<string, string> = {
+/** Display names of the server's `gaps` sections (internal keys such as `buildUpCounts`). A Map: no prototype keys ('constructor'). */
+const GAP_LABELS = new Map<string, string>(Object.entries({
   atmIv: 'ATM IV',
   available: 'Available funds',
   book: 'Order book',
@@ -224,17 +224,23 @@ const GAP_LABELS: Record<string, string> = {
   staleLegs: 'Stale legs',
   totalNet: 'Total net',
   unrealizedPnl: 'Unrealised P&L',
-};
+}));
+
+/** An internal section key (camelCase, no spaces): `buildUpCounts`, `oi`. */
+const INTERNAL_KEY = /^[a-z][a-zA-Z0-9]*$/;
 
 /**
  * The name shown for a `gaps` section: a known key's label, else a camelCase key split into words
- * ("someSection" → "Some section"); "a.b" sections are labelled part by part ("Intraday · OI"). Keys
- * that are already names (symbols, expiries, contract labels) are shown as they are.
+ * ("someSection" → "Some section"); "a.b" sections whose every part is an internal key are labelled part
+ * by part ("intraday.oi" → "Intraday · OI"). Keys that are already names (symbols, expiries, contract
+ * labels such as "TATAMOTORS 27 Oct 1237.5 CE") are shown as they are.
  */
 export function gapLabel(key: string): string {
-  if (GAP_LABELS[key]) return GAP_LABELS[key];
-  if (key.includes('.')) return key.split('.').map(gapLabel).join(' · ');
-  if (!/^[a-z][a-zA-Z0-9]*$/.test(key)) return key;
+  const known = GAP_LABELS.get(key);
+  if (known !== undefined) return known;
+  const parts = key.split('.');
+  if (parts.length > 1) return parts.every((p) => INTERNAL_KEY.test(p)) ? parts.map(gapLabel).join(' · ') : key;
+  if (!INTERNAL_KEY.test(key)) return key;
   const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }

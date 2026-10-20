@@ -91,6 +91,32 @@ describe('NoData / Gaps / Coverage', () => {
     expect(gapLabel('NIFTY 24000 CE')).toBe('NIFTY 24000 CE');
   });
 
+  it('gapLabel splits a dotted key only when every part is an internal key; contract labels stay intact', () => {
+    expect(gapLabel('intraday.oi')).toBe('Intraday · OI');
+    expect(gapLabel('chain.atmIv')).toBe('Option chain · ATM IV');
+    expect(gapLabel('someSection.nestedKey')).toBe('Some section · Nested key');
+    // A strike with a decimal point is a name, not a path.
+    expect(gapLabel('TATAMOTORS 27 Oct 1237.5 CE')).toBe('TATAMOTORS 27 Oct 1237.5 CE');
+    expect(gapLabel('NIFTY 24000.5 PE')).toBe('NIFTY 24000.5 PE');
+    expect(gapLabel('NIFTY.oi')).toBe('NIFTY.oi');
+    expect(gapLabel('intraday.OI')).toBe('intraday.OI');
+    expect(gapLabel('a..b')).toBe('a..b');
+    expect(gapLabel('.oi')).toBe('.oi');
+    expect(gapLabel('1237.5')).toBe('1237.5');
+    const out = html(<Gaps gaps={{ 'TATAMOTORS 27 Oct 1237.5 CE': 'no live premium' }} />);
+    expect(out).toContain('<span class="font-medium">TATAMOTORS 27 Oct 1237.5 CE</span>');
+  });
+
+  it('gapLabel never reads a label off the object prototype', () => {
+    expect(gapLabel('constructor')).toBe('Constructor');
+    expect(gapLabel('toString')).toBe('To string');
+    expect(gapLabel('hasOwnProperty')).toBe('Has own property');
+    expect(gapLabel('__proto__')).toBe('__proto__');
+    expect(gapLabel('constructor.oi')).toBe('Constructor · OI');
+    for (const k of ['constructor', 'toString', 'valueOf', '__proto__']) expect(typeof gapLabel(k)).toBe('string');
+    expect(html(<Gaps gaps={{ constructor: 'x', valueOf: 'y' }} />)).not.toMatch(/function|\[native code\]/);
+  });
+
   it('Coverage renders nothing without a note', () => {
     expect(html(<Coverage text={null} />)).toBe('');
     expect(html(<Coverage text="PCR over strikes with OI on both sides" label="Coverage" />)).toContain('PCR over strikes with OI on both sides');

@@ -26,6 +26,7 @@
  * credentials can lock the trading account. `force` never skips a 429 hold nor the hold after
  * sessions were rejected again after a fresh login (authHoldUntil).
  */
+import { createHash } from 'node:crypto';
 import type { NeoEnv } from '../env';
 import { scrubSecrets } from '../env';
 import { NoLiveData } from '../types';
@@ -80,6 +81,11 @@ export interface KotakSessionDeps {
   pathCooldownMs?: number;
   /** A 429 whose pause is at most this long is retried once inline (ms). */
   maxInlineRetryWaitMs?: number;
+  /**
+   * Keeps the refusal count, hold and pause across restarts (DATA_DIR/ops/login-state.json): a
+   * restart — automatic ones included — must not reset the account lock-out protection.
+   */
+  loginStateStore?: LoginStateStore;
   /** Refused logins in a row after which automatic logins pause (default MAX_REJECTED_LOGINS). */
   maxRejectedLogins?: number;
 }
@@ -245,6 +251,26 @@ function isErrorBody(body: unknown): boolean {
 /** Refused logins in a row after which automatic logins pause (repeated wrong credentials can lock the account). */
 export const MAX_REJECTED_LOGINS = 5;
 
+/** What survives a restart. `credHash` ties it to the credentials: changed credentials start afresh. */
+export interface SavedLoginState {
+  credHash: string;
+  failures: number;
+  blockedUntil: number;
+  lastLoginError?: string;
+  savedAt: number;
+}
+
+export interface LoginStateStore {
+  load(): SavedLoginState | undefined;
+  /** null: nothing to keep (the last login succeeded). */
+  save(state: SavedLoginState | null): void;
+}
+
+/** One-way hash of the credentials (never stored or logged in clear). */
+export function credentialsHash(c: NeoEnv): string {
+  return createHash('sha256').update([c.consumerKey, c.mobileNumber, c.ucc, c.mpin, c.totpSecret].join('\n')).digest('hex');
+}
+
 export class KotakSession {
   private readonly fetchFn: FetchLike;
   private readonly now: () => number;
@@ -271,6 +297,9 @@ export class KotakSession {
   /** The last login failure was a 429 (its hold cannot be skipped with `force`). */
   private lastWasRateLimited = false;
   private lastError: string | undefined;
+  /** The reason of the last FAILED LOGIN (lastError also tracks session losses). */
+  private lastLoginError: string | undefined;
+  private readonly stateStore: LoginStateStore | undefined;
   private lastAuthRelogin = Number.NEGATIVE_INFINITY;
   /** Requests rejected again after a fresh login since the last one that was served (escalates the hold). */
   private rejectedStreak = 0;
@@ -298,6 +327,8 @@ export class KotakSession {
     this.pathCooldownMs = deps.pathCooldownMs ?? 10 * MINUTE;
     this.maxInlineRetryWaitMs = deps.maxInlineRetryWaitMs ?? 5_000;
     this.maxRejectedLogins = deps.maxRejectedLogins ?? MAX_REJECTED_LOGINS;
+    this.stateStore = deps.loginStateStore;
+    this.restoreLoginState();
   }
 
   /* ---------------------------------------------------------------------------------------- */
@@ -388,6 +419,8 @@ export class KotakSession {
       this.transientFailures = 0;
       this.blockedUntil = 0;
       this.lastError = undefined;
+      this.lastLoginError = undefined;
+      this.saveLoginState();
       this.lastWasRateLimited = false;
       const s = this.session;
       this.log.info(
@@ -408,6 +441,8 @@ export class KotakSession {
       if (this.lastWasRateLimited) hold = Math.max(hold, err.retryAfterMs ?? 5 * MINUTE);
       this.blockedUntil = t + hold;
       this.lastError = err.message;
+      this.lastLoginError = err.message;
+      if (!this.loginTransient) this.saveLoginState();
       if (this.failures >= this.maxRejectedLogins) {
         this.log.warn(`Kotak automatic login paused: ${this.pausedReason()}`);
       } else {
@@ -440,16 +475,30 @@ export class KotakSession {
       throw new KotakError(`Kotak ${label} failed: network error (${this.scrub(e instanceof Error ? e.message : String(e))})`, 'login');
     }
     this.noteRateHeaders(res.headers);
-    const text = await res.text();
-    const parsed = parseJson(text);
     if (res.status === 429) {
       this.loginTransient = true;
       throw new KotakError(`Kotak ${label} rate-limited (HTTP 429)`, 'login', 429, undefined, retryAfterMs(res.headers, this.now()));
     }
-    // Gateway down or under maintenance (5xx, 408, an HTML page instead of JSON): no account check.
-    if (res.status >= 500 || res.status === 408 || (text.trim() !== '' && parsed === undefined)) {
+    // Gateway down or overloaded (5xx, 408): no account check — except a gateway timeout of the MPIN
+    // step (504 / 408), which Kotak may have processed like a client-side timeout.
+    if (res.status >= 500 || res.status === 408) {
+      this.loginTransient = !(step === 'tradeApiValidate' && (res.status === 504 || res.status === 408));
+      throw new KotakError(`Kotak ${label} failed: service unavailable (HTTP ${res.status})`, 'login', res.status);
+    }
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (e) {
+      // The answer was cut off: at the TOTP step no account check counted; at the MPIN step it may have.
+      this.loginTransient = step === 'tradeApiLogin';
+      throw new KotakError(`Kotak ${label} failed: answer cut off (HTTP ${res.status}: ${this.scrub(e instanceof Error ? e.message : String(e))})`, 'login', res.status);
+    }
+    const parsed = parseJson(text);
+    // A 2xx that is empty or not JSON (a maintenance page in front of the API): no account check. Any
+    // 4xx is a refusal whatever its body format (e.g. an XML gateway fault for a revoked key).
+    if (res.ok && parsed === undefined) {
       this.loginTransient = true;
-      throw new KotakError(`Kotak ${label} failed: service unavailable (HTTP ${res.status}${parsed === undefined && text.trim() ? ', not a JSON answer' : ''})`, 'login', res.status);
+      throw new KotakError(`Kotak ${label} failed: service unavailable (HTTP ${res.status}, ${text.trim() ? 'not a JSON answer' : 'empty answer'})`, 'login', res.status);
     }
     // A 2xx can still carry an error body with no `data` (kotak-rest-auth.md §1.2).
     const data = isObj(parsed) && isObj(parsed.data) ? parsed.data : undefined;
@@ -709,7 +758,7 @@ export class KotakSession {
       ...(s ? { nextReloginAt: this.nextReloginAt() ?? undefined } : {}),
       ...(Math.max(this.blockedUntil, this.authHoldUntil) > this.now() ? { loginBlockedUntil: Math.max(this.blockedUntil, this.authHoldUntil) } : {}),
       ...(this.failures || this.transientFailures
-        ? { loginFailures: { rejected: this.failures, transient: this.transientFailures, ...(this.lastError ? { lastError: this.lastError } : {}) } }
+        ? { loginFailures: { rejected: this.failures, transient: this.transientFailures, ...(this.lastLoginError ? { lastError: this.lastLoginError } : {}) } }
         : {}),
       ...(this.failures >= this.maxRejectedLogins ? { loginPaused: this.pausedReason() } : {}),
       feedUrlKnown: !!s?.feedUrl,
@@ -725,7 +774,38 @@ export class KotakSession {
   }
 
   private pausedReason(): string {
-    return `Kotak refused ${this.failures} logins in a row (last: ${this.lastError ?? 'unknown'}); fix the NEO_* values in .env and restart, or press Re-login now`;
+    return `Kotak refused ${this.failures} logins in a row (last: ${this.lastLoginError ?? 'unknown'}); fix the NEO_* values in .env and restart, or press Re-login now`;
+  }
+
+  /** Restore the refusal count / hold / pause saved by a previous run with the same credentials. */
+  private restoreLoginState(): void {
+    let saved: SavedLoginState | undefined;
+    try {
+      saved = this.stateStore?.load();
+    } catch {
+      saved = undefined;
+    }
+    if (!saved || saved.credHash !== credentialsHash(this.creds) || !(saved.failures > 0)) return;
+    this.failures = Math.floor(saved.failures);
+    this.blockedUntil = Number.isFinite(saved.blockedUntil) ? saved.blockedUntil : 0;
+    this.lastLoginError = saved.lastLoginError;
+    this.lastError = saved.lastLoginError;
+    this.log.warn(
+      `Kotak: ${this.failures} refused login(s) carried over from the previous run${this.failures >= this.maxRejectedLogins ? '; automatic login stays paused' : this.blockedUntil > this.now() ? `; next login not before ${istWhen(this.blockedUntil, this.now())}` : ''}`,
+    );
+  }
+
+  private saveLoginState(): void {
+    if (!this.stateStore) return;
+    try {
+      this.stateStore.save(
+        this.failures > 0
+          ? { credHash: credentialsHash(this.creds), failures: this.failures, blockedUntil: this.blockedUntil, ...(this.lastLoginError ? { lastLoginError: this.lastLoginError } : {}), savedAt: this.now() }
+          : null,
+      );
+    } catch (e) {
+      this.log.warn(`Kotak: login state not saved: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /** Credentials for the market-data websocket, or null when not logged in. Contains secrets. */

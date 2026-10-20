@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -17,14 +17,19 @@ import {
   type WeeklyAuditStatus,
 } from '@q26/core';
 import { api, ApiError, errorText } from '../lib/api';
-import { formatAsOf, formatDate, formatDateTime, isNum } from '../lib/format';
+import { formatAge, formatAsOf, formatDate, formatDateTime, isNum } from '../lib/format';
 import { useApp, useTicks } from '../lib/store';
 import { Card, cx, Dash, ErrorBox, Modal, NoData, Pill, Spinner } from './ui';
 
 /**
  * Operations (Model F) on the dashboard: the Kotak login monitor, the 24×7 watchdog and the weekly
- * audit, each with its button. Status is GET /api/ops (public); the three actions need a registered
- * account. A server without operations (e.g. the test fixture server) answers 404: a neutral note.
+ * audit, each with its button. Status is GET /api/ops (public). The server decides, per request, whether
+ * the caller may run the three actions (`operator.canOperate`, with the reason when not: signed out, a
+ * guest, or a registered account that is not an operator) and withholds the details from non-operators
+ * (`restricted`: journal events, check details, process figures, audit items) — only the states are
+ * shown then. A status the browser has not refreshed for three polls (browser clock), or whose refresh
+ * failed, is shown as STATUS UNKNOWN, never in its last green tones. Only a 404 means the server runs no
+ * operations (e.g. the test fixture server): a neutral note.
  */
 
 type Tone = 'muted' | 'up' | 'down' | 'accent' | 'warn';
@@ -37,11 +42,27 @@ export const OPS_ACTIONS: Record<OpsAction, { path: string; label: string; busy:
   audit: { path: '/ops/audit/run', label: 'Run audit now', busy: 'Starting…' },
 };
 
+/** GET /api/ops polling interval (every 3 s while an audit runs). */
+export const OPS_POLL_MS = 10_000;
+/** A status not refreshed for three polls (browser clock) is no longer vouched for: STATUS UNKNOWN. */
+export const OPS_UNKNOWN_AFTER_MS = 3 * OPS_POLL_MS;
+/** GET /api/ops is aborted after this long: a hung server must not leave the request pending. */
+export const OPS_TIMEOUT_MS = 10_000;
+/** The one line shown in place of what the server withholds from non-operators. */
+export const OPS_WITHHELD = 'Details are shown to the operator account';
+
 /** The answer to a button press: the server's message (or its error text) and the new status when it sent one. */
 export interface OpsActionResult {
   ok: boolean;
   message: string;
   status?: OpsStatusResponse;
+  /** The call itself was refused or failed (HTTP error, network): red. An answer with ok=false (the action ran and found a problem) is amber. */
+  failed?: boolean;
+}
+
+/** GET /api/ops, cancelled with `signal` (React Query's) and aborted after OPS_TIMEOUT_MS. */
+export function fetchOpsStatus(signal?: AbortSignal): Promise<OpsStatusResponse> {
+  return api<OpsStatusResponse>('/ops', { signal, timeoutMs: OPS_TIMEOUT_MS });
 }
 
 /** What a button press does: POST the action with the session's token; a refused or failed call is a result with the server's reason. */
@@ -50,24 +71,39 @@ export async function runOpsAction(action: OpsAction): Promise<OpsActionResult> 
     const r = await api<OpsActionResponse>(OPS_ACTIONS[action].path, { method: 'POST' });
     return { ok: r.ok, message: r.message, status: r.status };
   } catch (e) {
-    return { ok: false, message: errorText(e) };
+    return { ok: false, failed: true, message: errorText(e) };
   }
 }
 
-/** GET /api/ops answers 404 (503 on older servers) when operations do not run in that server. */
+/**
+ * GET /api/ops answers 404 ("… are not running on this server") when operations do not run in that
+ * server. Any other failure (503, 500, a timeout, the network) is a failed refresh, not this state.
+ */
 export function opsNotRunning(err: unknown): boolean {
-  return err instanceof ApiError && (err.status === 404 || err.status === 503);
+  return err instanceof ApiError && err.status === 404;
 }
 
-/** Why the current user cannot run operations (null: a registered account can). */
+/** Fallback for a server whose status has no `operator`: a guess from the session (null: may try). */
 export function opsBlockedReason(user: UserProfile | null): string | null {
   if (!user) return 'Please sign in to run operations';
   if (user.guest) return 'Sign in with a registered account to run operations';
   return null;
 }
 
+/**
+ * Whether the caller may run the actions: the server's answer (`status.operator`, the reason as the
+ * visible text when not), or the session guess when the server does not send it. `signIn`: offer the
+ * Settings link (signed out, a guest, or a reason asking to sign in).
+ */
+export function opsGate(status: OpsStatusResponse | undefined, user: UserProfile | null): { blocked: string | null; signIn: boolean } {
+  const op = status?.operator;
+  const blocked = op && typeof op.canOperate === 'boolean' ? (op.canOperate ? null : op.reason?.trim() || 'This account cannot run operations') : opsBlockedReason(user);
+  return { blocked, signIn: !!blocked && (!user || user.guest || /sign in/i.test(blocked)) };
+}
+
 const FEED_TONE: Record<FeedState, Tone> = { LIVE: 'up', 'FEED STALE': 'warn', 'DATA UNAVAILABLE': 'down', 'MARKET CLOSED': 'muted' };
 const LOGIN_TONE: Record<LoginMonitorState, Tone> = { LOGGED_IN: 'up', LOGGING_IN: 'accent', WAITING: 'warn', PAUSED: 'down', DISCONNECTED: 'down', NO_CREDENTIALS: 'warn', STOPPED: 'muted' };
+const RESULT_CLASS = { ok: 'text-up', problem: 'text-warn', failed: 'text-down' } as const;
 const WATCHDOG_TONE: Record<WatchdogStatus['state'], Tone> = { HEALTHY: 'up', DEGRADED: 'warn', CRITICAL: 'down', STARTING: 'muted' };
 const CHECK_TONE: Record<WatchdogCheckResult, Tone> = { ok: 'up', warn: 'warn', fail: 'down', fixed: 'accent', skipped: 'muted' };
 const AUDIT_TONE: Record<AuditItemStatus, Tone> = { PASS: 'up', FIXED: 'accent', WARN: 'warn', FAIL: 'down', SKIPPED: 'muted' };
@@ -142,13 +178,28 @@ function AuditCounts({ summary }: { summary: AuditReport['summary'] }) {
   );
 }
 
+/** A state chip, or a grey STATUS UNKNOWN (the last state in its tooltip) when the status is not current. */
+function StatePill({ state, tone, unknown }: { state: string; tone: Tone; unknown: boolean }) {
+  if (!unknown) return <Pill tone={tone}>{state}</Pill>;
+  return (
+    <span title={`Last reported: ${state}`}>
+      <Pill tone="muted">STATUS UNKNOWN</Pill>
+    </span>
+  );
+}
+
+/** The one muted line in place of the details the server withholds from non-operators. */
+function Withheld() {
+  return <p className="text-muted">{OPS_WITHHELD}</p>;
+}
+
 /** One of the three blocks: title and state, the details, and the button row. */
-function OpsCard({ title, state, tone, children, footer }: { title: string; state: string; tone: Tone; children: ReactNode; footer: ReactNode }) {
+function OpsCard({ title, state, tone, unknown, children, footer }: { title: string; state: string; tone: Tone; unknown: boolean; children: ReactNode; footer: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col rounded-lg border border-line bg-panel2/40 p-3" aria-label={title}>
       <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">{title}</h3>
-        <Pill tone={tone}>{state}</Pill>
+        <StatePill state={state} tone={tone} unknown={unknown} />
       </header>
       <div className="min-w-0 flex-1 space-y-2 text-xs">{children}</div>
       <footer className="mt-3 space-y-1 border-t border-line pt-2">{footer}</footer>
@@ -159,16 +210,17 @@ function OpsCard({ title, state, tone, children, footer }: { title: string; stat
 /** The action button with, under it, why it cannot be pressed and the answer of the last press. */
 function ActionRow({ action, blocked, busy, result, onRun, signIn, extra }: { action: OpsAction; blocked: string | null; busy: boolean; result?: OpsActionResult; onRun: (a: OpsAction) => void; signIn: boolean; extra?: ReactNode }) {
   const a = OPS_ACTIONS[action];
+  const reasonId = useId();
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="btn-primary px-2.5 py-1 text-xs" disabled={busy || !!blocked} title={blocked ?? undefined} onClick={() => !blocked && !busy && onRun(action)}>
+        <button type="button" className="btn-primary px-2.5 py-1 text-xs" disabled={busy || !!blocked} title={blocked ?? undefined} aria-describedby={blocked ? reasonId : undefined} onClick={() => !blocked && !busy && onRun(action)}>
           {busy ? a.busy : a.label}
         </button>
         {extra}
       </div>
       {blocked && (
-        <p className="text-2xs text-muted">
+        <p id={reasonId} className="text-2xs text-muted">
           {blocked}
           {signIn && (
             <>
@@ -179,7 +231,7 @@ function ActionRow({ action, blocked, busy, result, onRun, signIn, extra }: { ac
         </p>
       )}
       {result && (
-        <p role="status" aria-live="polite" className={cx('break-words text-2xs', result.ok ? 'text-up' : 'text-down')}>
+        <p role="status" aria-live="polite" className={cx('break-words text-2xs', RESULT_CLASS[result.ok ? 'ok' : result.failed ? 'failed' : 'problem'])}>
           {result.message}
         </p>
       )}
@@ -189,10 +241,22 @@ function ActionRow({ action, blocked, busy, result, onRun, signIn, extra }: { ac
 
 /* --------------------------------------------------------------------------------------------- */
 
-function LoginCard({ s, now, footer }: { s: OpsStatusResponse['login']; now: number; footer: ReactNode }) {
+function LoginCard({ s, now, footer, unknown, restricted }: { s: OpsStatusResponse['login']; now: number; footer: ReactNode; unknown: boolean; restricted: boolean }) {
+  // PAUSED stops the automatic logins only: a still-valid session keeps working (not "disconnected").
+  const pausedWithSession = s.state === 'PAUSED' && s.sessionValid === true;
   return (
-    <OpsCard title="Login Monitor" state={s.state} tone={LOGIN_TONE[s.state] ?? 'muted'} footer={footer}>
+    <OpsCard title="Login Monitor" state={s.state} tone={pausedWithSession ? 'warn' : LOGIN_TONE[s.state] ?? 'muted'} unknown={unknown} footer={footer}>
       <p className="break-words">{s.detail}</p>
+      {pausedWithSession && (
+        <p className="break-words text-accent">
+          Current session still valid: only the automatic logins are paused
+          {isNum(s.tokenExpiresAt) && (
+            <>
+              {' '}· it expires <When ts={s.tokenExpiresAt} now={now} />
+            </>
+          )}
+        </p>
+      )}
       <div className="text-muted">
         Checks every {Math.round(s.checkEveryMs / 1000)} s · last check <When ts={s.lastCheckAt} now={now} />
       </div>
@@ -204,15 +268,13 @@ function LoginCard({ s, now, footer }: { s: OpsStatusResponse['login']; now: num
         </div>
       </Section>
       <div className="space-y-0.5">
-        <Row label="Last failure">
-          {s.lastFailure ? (
-            <>
-              <When ts={s.lastFailure.at} now={now} /> · {s.lastFailure.reason}
-            </>
-          ) : (
-            <span className="text-muted">none recorded</span>
-          )}
-        </Row>
+        {s.lastFailure ? (
+          <Row label="Last failure">
+            <When ts={s.lastFailure.at} now={now} /> · {s.lastFailure.reason}
+          </Row>
+        ) : restricted ? null : (
+          <Row label="Last failure"><span className="text-muted">none recorded</span></Row>
+        )}
         {s.consecutiveFailures > 0 && <Row label="Failed attempts since the last login">{s.consecutiveFailures}</Row>}
         {s.state === 'LOGGED_IN' ? (
           <>
@@ -225,39 +287,47 @@ function LoginCard({ s, now, footer }: { s: OpsStatusResponse['login']; now: num
           </Row>
         )}
       </div>
-      <Section title="Recent events">
-        <Events events={s.events} now={now} none="No login events yet" />
-      </Section>
+      {restricted ? (
+        <Withheld />
+      ) : (
+        <Section title="Recent events">
+          <Events events={s.events} now={now} none="No login events yet" />
+        </Section>
+      )}
     </OpsCard>
   );
 }
 
-function WatchdogCard({ s, now, footer }: { s: WatchdogStatus; now: number; footer: ReactNode }) {
+function WatchdogCard({ s, now, footer, unknown, restricted }: { s: WatchdogStatus; now: number; footer: ReactNode; unknown: boolean; restricted: boolean }) {
   const p = s.process;
-  const uptime = formatUptime(p.uptimeSec);
+  const uptime = p ? formatUptime(p.uptimeSec) : null;
   return (
-    <OpsCard title="24×7 Watchdog" state={s.state} tone={WATCHDOG_TONE[s.state]} footer={footer}>
+    <OpsCard title="24×7 Watchdog" state={s.state} tone={WATCHDOG_TONE[s.state] ?? 'muted'} unknown={unknown} footer={footer}>
       <div className="text-muted">
         Last run {s.lastRunAt === null ? 'not yet' : <When ts={s.lastRunAt} now={now} />} · every {Math.round(s.intervalMs / 1000)} s{s.supervised ? ' · supervised (restarts after a crash)' : ''}
       </div>
-      <Section title="Process">
-        <div className="flex flex-wrap gap-x-3">
-          <span>Uptime <b className="tabular-nums">{uptime ?? <Dash reason="Not reported" />}</b></span>
-          <span>Heap <b className="tabular-nums">{Math.round(p.heapUsedMb)} / {Math.round(p.heapLimitMb)} MB</b></span>
-          <span>
-            Event-loop p99 <b className="tabular-nums">{isNum(p.eventLoopP99Ms) ? `${Math.round(p.eventLoopP99Ms)} ms` : <Dash reason="Not measured yet" />}</b>
-          </span>
-        </div>
-      </Section>
+      {p && !restricted && (
+        <Section title="Process">
+          <div className="flex flex-wrap gap-x-3">
+            <span>Uptime <b className="tabular-nums">{uptime ?? <Dash reason="Not reported" />}</b></span>
+            <span>Heap <b className="tabular-nums">{Math.round(p.heapUsedMb)} / {Math.round(p.heapLimitMb)} MB</b></span>
+            <span>
+              Event-loop p99 <b className="tabular-nums">{isNum(p.eventLoopP99Ms) ? `${Math.round(p.eventLoopP99Ms)} ms` : <Dash reason="Not measured yet" />}</b>
+            </span>
+          </div>
+        </Section>
+      )}
       <Section title="Checks">
         {s.checks.length ? (
           <ul className="space-y-1">
             {s.checks.map((c) => (
               <li key={c.id} className="flex min-w-0 gap-1.5">
-                <span className="shrink-0"><Pill tone={CHECK_TONE[c.result]}>{c.result}</Pill></span>
+                {/* A result is only vouched for while the status is current. */}
+                <span className="shrink-0"><Pill tone={unknown ? 'muted' : CHECK_TONE[c.result] ?? 'muted'}>{c.result}</Pill></span>
                 <span className="min-w-0 break-words">
-                  <span className="font-medium">{c.title}</span> <span className="text-muted">{c.detail}</span>
-                  {c.action && <span className="block text-accent">→ {c.action}</span>}
+                  <span className="font-medium">{c.title}</span>
+                  {!restricted && c.detail && <> <span className="text-muted">{c.detail}</span></>}
+                  {!restricted && c.action && <span className="block text-accent">→ {c.action}</span>}
                 </span>
               </li>
             ))}
@@ -266,23 +336,27 @@ function WatchdogCard({ s, now, footer }: { s: WatchdogStatus; now: number; foot
           <div className="text-muted">The first round of checks runs within {Math.round(s.intervalMs / 1000)} s of the start</div>
         )}
       </Section>
-      <Section title="Recent incidents">
-        <Events events={s.incidents} now={now} none="No incidents" />
-      </Section>
+      {restricted ? (
+        <Withheld />
+      ) : (
+        <Section title="Recent incidents">
+          <Events events={s.incidents} now={now} none="No incidents" />
+        </Section>
+      )}
     </OpsCard>
   );
 }
 
-function AuditCard({ s, now, footer, onView }: { s: WeeklyAuditStatus; now: number; footer: ReactNode; onView: (id: string) => void }) {
+function AuditCard({ s, now, footer, onView, unknown, restricted }: { s: WeeklyAuditStatus; now: number; footer: ReactNode; onView: ((id: string) => void) | null; unknown: boolean; restricted: boolean }) {
   const last = s.last;
   const state = s.running ? 'RUNNING' : last ? last.verdict : 'NO REPORT';
   const tone: Tone = s.running ? 'accent' : last ? VERDICT_TONE[last.verdict] : 'muted';
   const history = s.history.filter((h) => h.id !== last?.id).slice(0, 3);
   return (
-    <OpsCard title="Weekly Audit" state={state} tone={tone} footer={footer}>
+    <OpsCard title="Weekly Audit" state={state} tone={tone} unknown={unknown} footer={footer}>
       <div className="text-muted">{s.schedule}</div>
       <Row label="Next run">{isNum(s.nextRunAt) ? <When ts={s.nextRunAt} now={now} /> : <span className="text-muted">not scheduled</span>}</Row>
-      {s.running && (
+      {s.running && !unknown && (
         <div className="flex items-center gap-2 text-accent">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-hidden />
           Audit running…
@@ -314,12 +388,13 @@ function AuditCard({ s, now, footer, onView }: { s: WeeklyAuditStatus; now: numb
                 <span className="text-muted"><When ts={h.finishedAt} now={now} /></span>
                 <Pill tone={VERDICT_TONE[h.verdict]}>{h.verdict}</Pill>
                 <span className="text-muted">{h.trigger} · {h.summary.FAIL ?? 0} fail · {h.summary.WARN ?? 0} warn · {h.summary.FIXED ?? 0} fixed</span>
-                <button type="button" className="text-accent hover:underline" onClick={() => onView(h.id)}>View</button>
+                {onView && <button type="button" className="text-accent hover:underline" onClick={() => onView(h.id)}>View</button>}
               </li>
             ))}
           </ul>
         </Section>
       )}
+      {restricted && last && <Withheld />}
     </OpsCard>
   );
 }
@@ -396,18 +471,32 @@ export interface OperationsViewProps {
   status?: OpsStatusResponse;
   error?: unknown;
   loading?: boolean;
-  /** Why the user cannot run operations (guest / signed out), null when they can. */
-  blocked: string | null;
+  /** When `status` was fetched (browser clock, React Query's dataUpdatedAt); 0 / absent: not known. */
+  updatedAt?: number;
+  /** The signed-in user (null: signed out): the fallback when the server sends no `operator`, and the Settings link. */
+  user: UserProfile | null;
   busy?: Partial<Record<OpsAction, boolean>>;
   results?: Partial<Record<OpsAction, OpsActionResult>>;
   onRun: (a: OpsAction) => void;
 }
 
+/** Re-renders every `ms` so ages measured on the browser clock keep moving when nothing else changes (a hung server). */
+function useTick(ms: number): void {
+  const [, setN] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setN((n) => n + 1), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+}
+
 /** The panel from a status answer (or its error): chips, the three cards and their buttons. */
-export function OperationsView({ status, error, loading, blocked, busy = {}, results = {}, onRun }: OperationsViewProps) {
+export function OperationsView({ status, error, loading, updatedAt, user, busy = {}, results = {}, onRun }: OperationsViewProps) {
   const serverNow = useTicks((st) => st.clock?.ts);
   const now = serverNow ?? Date.now();
   const [reportId, setReportId] = useState<string | null>(null);
+  useTick(5000);
+  // Freshness is measured on the browser clock: the server's websocket clock stops when the server hangs.
+  const browserNow = Date.now();
 
   if (opsNotRunning(error)) {
     const why = errorText(error);
@@ -422,18 +511,24 @@ export function OperationsView({ status, error, loading, blocked, busy = {}, res
   }
 
   const s = status;
+  const restricted = s.restricted === true;
+  const { blocked, signIn } = opsGate(s, user);
+  // Audit reports (GET /api/ops/audit/reports/:id) are for the operator account only.
+  const canView = !blocked && !restricted;
+  const age = isNum(updatedAt) && updatedAt > 0 ? Math.max(0, browserNow - updatedAt) : null;
+  const unknown = !!error || (age !== null && age > OPS_UNKNOWN_AFTER_MS);
   const row = (action: OpsAction, extraBlocked: string | null, extra?: ReactNode) => (
-    <ActionRow action={action} blocked={blocked ?? extraBlocked} signIn={!!blocked} busy={!!busy[action]} result={results[action]} onRun={onRun} extra={extra} />
+    <ActionRow action={action} blocked={blocked ?? extraBlocked} signIn={signIn} busy={!!busy[action]} result={results[action]} onRun={onRun} extra={extra} />
   );
   const chips = (
     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-2xs">
       <span className="inline-flex items-center gap-1">
         <span className="text-muted">Broker</span>
-        <Pill tone={s.broker === 'CONNECTED' ? 'accent' : 'down'}>{s.broker}</Pill>
+        <StatePill state={s.broker} tone={s.broker === 'CONNECTED' ? 'accent' : 'down'} unknown={unknown} />
       </span>
       <span className="inline-flex items-center gap-1">
         <span className="text-muted">Market data</span>
-        <Pill tone={FEED_TONE[s.feed] ?? 'muted'}>{s.feed}</Pill>
+        <StatePill state={s.feed} tone={FEED_TONE[s.feed] ?? 'muted'} unknown={unknown} />
       </span>
       {s.safety.mode === 'paper' && <Pill tone="accent">PAPER TRADING</Pill>}
       <span className="inline-flex items-center gap-1">
@@ -442,40 +537,64 @@ export function OperationsView({ status, error, loading, blocked, busy = {}, res
       </span>
     </div>
   );
+  const fetched = age === null ? null : age < 5000 ? 'just now' : `${formatAge(age)} ago`;
+  const notes = [
+    fetched && `Status last fetched ${fetched}`,
+    unknown && (error ? `STATUS UNKNOWN: could not refresh (${errorText(error)}) — showing the last status` : 'STATUS UNKNOWN: no answer from the server since — showing the last status'),
+  ].filter(Boolean);
   return (
     <Card title="Operations" actions={chips}>
-      {error ? <div className="mb-2 text-2xs text-warn">Could not refresh — showing the last status ({errorText(error)})</div> : null}
+      {notes.length > 0 && (
+        <div className={cx('mb-2 text-2xs', unknown ? 'text-warn' : 'text-muted')} title={isNum(updatedAt) && updatedAt > 0 ? `Fetched ${formatDateTime(updatedAt)} IST (this browser's clock)` : undefined}>
+          {notes.join(' · ')}
+        </div>
+      )}
       <div className="grid gap-3 lg:grid-cols-3">
-        <LoginCard s={s.login} now={now} footer={row('login', null)} />
-        <WatchdogCard s={s.watchdog} now={now} footer={row('watchdog', null)} />
+        <LoginCard s={s.login} now={now} unknown={unknown} restricted={restricted} footer={row('login', null)} />
+        <WatchdogCard s={s.watchdog} now={now} unknown={unknown} restricted={restricted} footer={row('watchdog', null)} />
         <AuditCard
           s={s.audit}
           now={now}
-          onView={setReportId}
+          unknown={unknown}
+          restricted={restricted}
+          onView={canView ? setReportId : null}
           footer={row(
             'audit',
             s.audit.running ? 'An audit is running: wait for its report' : null,
-            <button type="button" className="btn-ghost px-2.5 py-1 text-xs" disabled={!s.audit.last} title={s.audit.last ? undefined : 'No audit report yet'} onClick={() => s.audit.last && setReportId(s.audit.last.id)}>
-              View report
-            </button>,
+            canView ? (
+              <button type="button" className="btn-ghost px-2.5 py-1 text-xs" disabled={!s.audit.last} title={s.audit.last ? undefined : 'No audit report yet'} onClick={() => s.audit.last && setReportId(s.audit.last.id)}>
+                View report
+              </button>
+            ) : undefined,
           )}
         />
       </div>
-      <ReportModal id={reportId} last={s.audit.last} now={now} onClose={() => setReportId(null)} />
+      {canView && <ReportModal id={reportId} last={s.audit.last} now={now} onClose={() => setReportId(null)} />}
     </Card>
   );
 }
 
-/** The dashboard panel: polls GET /api/ops every 10 s (every 3 s while an audit runs) while the page is visible. */
+/**
+ * The dashboard panel: polls GET /api/ops every 10 s (every 3 s while an audit runs) while the page is
+ * visible; each request is cancelled with the query and aborted after OPS_TIMEOUT_MS.
+ */
 export function OperationsPanel() {
   const user = useApp((st) => st.user);
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ['ops'],
-    queryFn: () => api<OpsStatusResponse>('/ops'),
+    queryFn: ({ signal }) => fetchOpsStatus(signal),
     // Background tabs do not poll (refetchIntervalInBackground is off).
-    refetchInterval: (query) => (opsNotRunning(query.state.error) ? 60_000 : query.state.data?.audit.running ? 3000 : 10_000),
+    refetchInterval: (query) => (opsNotRunning(query.state.error) ? 60_000 : query.state.data?.audit.running ? 3000 : OPS_POLL_MS),
   });
+  // Who may operate is decided per request: ask again when the account changes (sign in / out).
+  const uid = user?.id ?? null;
+  const seenUid = useRef(uid);
+  useEffect(() => {
+    if (seenUid.current === uid) return;
+    seenUid.current = uid;
+    void qc.invalidateQueries({ queryKey: ['ops'] });
+  }, [uid, qc]);
   const [busy, setBusy] = useState<Partial<Record<OpsAction, boolean>>>({});
   const [results, setResults] = useState<Partial<Record<OpsAction, OpsActionResult>>>({});
   const run = async (a: OpsAction) => {
@@ -486,5 +605,5 @@ export function OperationsPanel() {
     setResults((x) => ({ ...x, [a]: r }));
     setBusy((b) => ({ ...b, [a]: false }));
   };
-  return <OperationsView status={q.data} error={q.error} loading={q.isLoading} blocked={opsBlockedReason(user)} busy={busy} results={results} onRun={(a) => void run(a)} />;
+  return <OperationsView status={q.data} error={q.error} loading={q.isLoading} updatedAt={q.dataUpdatedAt} user={user} busy={busy} results={results} onRun={(a) => void run(a)} />;
 }

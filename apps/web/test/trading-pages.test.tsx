@@ -311,6 +311,25 @@ describe('Positions', () => {
     expect(ready).not.toContain('Select an expiry');
   });
 
+  it('Place order: after a symbol / expiry change the previous chain on screen is "loading the strikes…", not "not available"', () => {
+    const order = (html: string) => /<button class="btn-buy"([^>]*)>Buy<\/button>/.exec(html)?.[1] ?? '';
+    // The cache holds a chain that is not the selected contract's (the previous expiry / symbol kept as
+    // placeholder) while the new one is fetched.
+    for (const previous of [chainOf({ expiry: '2026-10-27' }), chainOf({ symbol: 'BANKNIFTY', expiry: '2026-10-20' })]) {
+      const html = render(<Positions />, [...seeds([], funds()), [['chain', 'NIFTY', '2026-10-20', 'live'], previous]]);
+      expect(order(html)).toContain('disabled=""');
+      expect(html).toContain('<p class="w-full text-2xs text-muted">Select a strike: loading the strikes…</p>');
+      expect(html).not.toContain('the option chain is not available');
+      expect(html).toContain('title="Loading the strikes…"'); // the LTP blank's reason
+      expect(html).not.toContain('>No strikes<');
+    }
+    // The expiries are loading (a new symbol): "loading the listed expiries…".
+    const base = seeds([], funds()).filter(([k]) => k[0] !== 'expiries');
+    const loading = render(<Positions />, base);
+    expect(loading).toContain('Select an expiry and strike: loading the listed expiries…');
+    expect(loading).not.toContain('no expiry is listed');
+  });
+
   it('an empty account: P&L totals are dashes with "No open positions", never ₹0', () => {
     const html = render(<Positions />, seeds([], funds({ unrealizedPnl: 0, usedMargin: 0, available: 1_000_000, premiumPaid: 0 })));
     expect(html).toContain('No open positions');

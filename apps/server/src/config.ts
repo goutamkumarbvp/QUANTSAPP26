@@ -26,6 +26,8 @@ export interface AppConfig {
    * audit), lower-case. Empty: only the first account registered on this server (its owner).
    */
   opsAdmins: string[];
+  /** TRUST_PROXY: the reverse proxy address(es) whose X-Forwarded-For is trusted ('true': any). */
+  trustProxy?: string | boolean;
   /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
   persist: boolean;
@@ -66,6 +68,14 @@ export function authSecretFrom(raw: string | undefined): { authSecret: string; a
   return { authSecret: v };
 }
 
+/** TRUST_PROXY: unset / empty / false → not trusted; true → any proxy; else a comma-separated address list. */
+export function trustProxyFrom(raw: string | undefined): { trustProxy?: string | boolean } {
+  const v = (raw ?? '').trim();
+  if (!v || v.toLowerCase() === 'false') return {};
+  if (v.toLowerCase() === 'true') return { trustProxy: true };
+  return { trustProxy: v };
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const base: AppConfig = {
     port: num('PORT', 8787),
@@ -75,6 +85,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     riskFreeRate: num('RISK_FREE_RATE', 0.065),
     ...authSecretFrom(process.env.AUTH_SECRET),
     opsAdmins: (process.env.OPS_ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
+    ...trustProxyFrom(process.env.TRUST_PROXY),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),

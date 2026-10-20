@@ -8,12 +8,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { istTs, type LoginMonitorStatus, type OpsStatusResponse } from '@q26/core';
-import { buildApp } from '../src/app';
-import { authSecretFrom, loadConfig } from '../src/config';
+import { buildApp, clientKey } from '../src/app';
+import { authSecretFrom, loadConfig, trustProxyFrom } from '../src/config';
 import type { KotakSessionStatus } from '../src/live/kotak/session';
 import type { FeedHealth } from '../src/live/types';
 import { formatLogLine, istWhen, serverLoggerOptions } from '../src/log';
-import type { Operations } from '../src/ops';
+import { restrict, type Operations } from '../src/ops';
 import { OpsJournal } from '../src/ops/journal';
 import { LoginMonitor, MANUAL_SLOW_AFTER_REJECTIONS, type LoginTarget } from '../src/ops/login-monitor';
 import { Watchdog, type WatchdogTarget } from '../src/ops/watchdog';
@@ -346,7 +346,9 @@ describe('watchdog', () => {
     });
     const mem = async () => (await w.run()).find((c) => c.id === 'memory')!;
     const first = await mem();
-    expect(first.result).toBe('fixed');
+    // Dropped answers free memory only at the next GC: a warning now, judged again next round (never a false "fixed").
+    expect(first.result).toBe('warn');
+    expect(first.action).toContain('checked again at the next round');
     expect(s.cleared).toEqual([false]);
     heap = 0.95;
     expect((await mem()).result).toBe('fail');
@@ -399,7 +401,7 @@ describe('weekly audit schedule', () => {
 
 const SECRET = 'TEST-MPIN-998877';
 
-function auditSetup(opts: { dbLeak?: boolean; orderMethod?: boolean; offline?: boolean } = {}) {
+function auditSetup(opts: { dbLeak?: boolean; orderMethod?: boolean; offline?: boolean; reloadRestores?: boolean } = {}) {
   const dir = tmpDir();
   const now = MON_11;
   const journal = new OpsJournal({ dataDir: dir, now: () => now });
@@ -426,9 +428,11 @@ function auditSetup(opts: { dbLeak?: boolean; orderMethod?: boolean; offline?: b
       wasUnavailable: () => false,
       status: () => ({ backfill: { running: false, days: 30, lastRunAt: null, datesMissing: 0 } }) as unknown as ReturnType<NonNullable<AuditTarget['eod']>['status']>,
       forget: (s, d) => (forgotten.push(`${s}|${d}`), loaded.delete(`${s}|${d}`)),
-      loadDateQueued: async (d, need) =>
+      loadDateQueued: async (d, need, o) =>
         need!.map((s) => {
-          loads.push(`${s}|${d}`);
+          loads.push(`${s}|${d}${o?.force ? '|force' : ''}`);
+          // A forced download rewrites the date's file (as EodJobs.loadFo / loadCm do).
+          if (o?.force && s === 'nseCm' && opts.reloadRestores !== false) fs.writeFileSync(path.join(dir, 'eod', 'cm', `${d}.json`), '{"RELIANCE":{"close":1402.3}}');
           if (opts.offline) return s === 'participants' ? { source: s, date: d, outcome: 'waiting' as const, reason: 'NIFTY close not loaded' } : { source: s, date: d, outcome: 'failed' as const, reason: 'x.csv: fetch failed', network: true };
           loaded.add(`${s}|${d}`);
           return { source: s, date: d, outcome: 'loaded' as const };
@@ -438,7 +442,7 @@ function auditSetup(opts: { dbLeak?: boolean; orderMethod?: boolean; offline?: b
     intradaySessions: () => ['2026-10-13', '2026-10-14', '2026-10-16'],
     refdata: () => ({ ready: true, date: '2026-10-19', underlyings: 200, listings: 90_000, warnings: [] }),
     refreshInstrumentMaster: async () => undefined,
-    login: () => ({ state: 'LOGGED_IN', detail: 'Logged in' }) as LoginMonitorStatus,
+    login: () => ({ state: 'LOGGED_IN', sessionValid: true, detail: 'Logged in' }) as LoginMonitorStatus,
     secrets: () => [SECRET],
     db: opts.dbLeak ? null : db,
     config: { host: '0.0.0.0', authSecretSet: false, persist: true, invalidHolidays: [] },
@@ -463,7 +467,9 @@ describe('weekly audit', () => {
     expect(loads).toContain('nseCm|2026-10-14');
     expect(by['DATA-2']).toMatchObject({ status: 'FIXED' });
     expect(forgotten).toEqual(expect.arrayContaining(['history:cm|2026-10-15', 'nseCm|2026-10-15']));
-    expect(fs.existsSync(path.join(dir, 'eod', 'cm', '2026-10-15.json'))).toBe(false);
+    // Downloaded again (forced: the store's loaded markers must not short-circuit it) and readable.
+    expect(loads).toContain('nseCm|2026-10-15|force');
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'eod', 'cm', '2026-10-15.json'), 'utf8'))).toEqual({ RELIANCE: { close: 1402.3 } });
     expect(fs.readdirSync(path.join(dir, 'ops', 'quarantine')).length).toBe(1);
     expect(by['DATA-3'].status).toBe('WARN'); // 2026-10-12 and 2026-10-15 were not recorded
     expect(by['DATA-3'].detail).toContain('never synthesised');
@@ -481,6 +487,14 @@ describe('weekly audit', () => {
     expect(audit.report('../../etc')).toBeNull();
     // Nothing in the reports carries the credential value.
     for (const f of fs.readdirSync(path.join(dir, 'ops', 'audits'))) expect(fs.readFileSync(path.join(dir, 'ops', 'audits', f), 'utf8')).not.toContain(SECRET);
+  });
+
+  it('reports FAIL, not FIXED, when a quarantined file did not come back after the download', async () => {
+    const { audit } = auditSetup({ reloadRestores: false });
+    const r = await audit.run('manual');
+    const d2 = r.items.find((i) => i.id === 'DATA-2')!;
+    expect(d2.status).toBe('FAIL');
+    expect(d2.detail).toContain('cm/2026-10-15.json not restored');
   });
 
   it('fails the safety check when the broker client gains an order method, and reports (does not edit) a leak in db.json', async () => {
@@ -552,76 +566,137 @@ describe('weekly audit', () => {
 /* ------------------------------------------------------------------------------------------ */
 
 describe('/api/ops routes', () => {
-  async function app(withOps: boolean, opsAdmins: string[] = []) {
+  async function app(withOps: boolean, cfg: { opsAdmins?: string[]; persist?: boolean; checks?: { result: string }[] } = {}) {
     const p = new FakeProvider();
     loadSampleBook(p);
-    const svc = createServices(loadConfig({ persist: false, authSecret: 'test-secret', opsAdmins }), { provider: p });
+    const persist = cfg.persist ?? true;
+    const svc = createServices(loadConfig({ persist, dataDir: persist ? tmpDir() : undefined, authSecret: 'test-secret', opsAdmins: cfg.opsAdmins ?? [] }), { provider: p });
     const relogin = vi.fn(async () => ({ ok: true, message: 'Logged in to Kotak Neo' }));
-    const status = { broker: 'DISCONNECTED', feed: 'DATA UNAVAILABLE', liveTrading: 'NOT READY' } as unknown as OpsStatusResponse;
+    const full = {
+      broker: 'DISCONNECTED',
+      feed: 'DATA UNAVAILABLE',
+      liveTrading: 'NOT READY',
+      login: { state: 'WAITING', events: [{ type: 'LOGIN_FAILED', message: 'secret detail' }] },
+      watchdog: { state: 'HEALTHY', checks: [{ id: 'storage', title: 'Disk', result: 'fail', detail: "EACCES open '/app/data/x'" }], incidents: [{ type: 'X' }], process: { pid: 1 } },
+      audit: { last: { id: 'r1', items: [{ id: 'SEC-1' }] }, history: [] },
+    } as unknown as OpsStatusResponse;
     const ops = {
-      status: () => status,
+      status: (viewer = { canOperate: false }) => {
+        const s = { ...full, operator: viewer, restricted: !viewer.canOperate };
+        return viewer.canOperate ? s : restrict(s);
+      },
       login: { relogin },
-      watchdog: { run: async () => [{ id: 'memory', title: 'Memory', result: 'fixed', detail: 'x' }] },
+      watchdog: { run: async () => (cfg.checks ?? [{ result: 'fixed' }]).map((c, i) => ({ id: `c${i}`, title: 'C', detail: 'x', ...c })) },
       audit: { runNow: () => ({ started: true, message: 'Audit started', done: Promise.resolve() }), report: (id: string) => (id === 'r1' ? { id } : null) },
     } as unknown as Operations;
     const a = await buildApp(svc, { serveWeb: false, ...(withOps ? { ops } : {}) });
     cleanup.push(() => p.dispose(), () => svc.stop(), () => a.close());
     return { a, svc, relogin };
   }
+  type App = Awaited<ReturnType<typeof app>>['a'];
   const token = (body: string) => (JSON.parse(body) as { token: string }).token;
+  const register = async (a: App, email: string, guestToken?: string) =>
+    token((await a.inject({ method: 'POST', url: '/api/auth/register', payload: { name: 'X', email, password: 'secret1' }, ...(guestToken ? { headers: { authorization: `Bearer ${guestToken}` } } : {}) })).body);
+  const guest = async (a: App) => token((await a.inject({ method: 'POST', url: '/api/auth/guest' })).body);
+  const press = (a: App, t: string | undefined, what = 'watchdog/run') => a.inject({ method: 'POST', url: `/api/ops/${what}`, ...(t ? { headers: { authorization: `Bearer ${t}` } } : {}) });
+  const statusAs = async (a: App, t?: string) => (await a.inject({ method: 'GET', url: '/api/ops', ...(t ? { headers: { authorization: `Bearer ${t}` } } : {}) })).json() as OpsStatusResponse;
 
-  it('status is public; the actions need a registered account', async () => {
-    const { a, relogin } = await app(true);
-    expect((await a.inject({ method: 'GET', url: '/api/ops' })).json()).toMatchObject({ broker: 'DISCONNECTED', liveTrading: 'NOT READY' });
-    expect((await a.inject({ method: 'POST', url: '/api/ops/login/relogin' })).statusCode).toBe(401);
-    const guest = token((await a.inject({ method: 'POST', url: '/api/auth/guest' })).body);
-    const g = await a.inject({ method: 'POST', url: '/api/ops/login/relogin', headers: { authorization: `Bearer ${guest}` } });
-    expect(g.statusCode).toBe(403);
-    expect(g.json().error).toContain('registered account');
-    expect(relogin).not.toHaveBeenCalled();
-    const reg = token((await a.inject({ method: 'POST', url: '/api/auth/register', payload: { name: 'Op', email: 'op@example.com', password: 'secret1' } })).body);
-    const auth = { authorization: `Bearer ${reg}` };
-    expect((await a.inject({ method: 'POST', url: '/api/ops/login/relogin', headers: auth })).json()).toMatchObject({ ok: true, message: 'Logged in to Kotak Neo' });
-    expect((await a.inject({ method: 'POST', url: '/api/ops/watchdog/run', headers: auth })).json().message).toContain('1 fixed');
-    expect((await a.inject({ method: 'POST', url: '/api/ops/audit/run', headers: auth })).json()).toMatchObject({ ok: true, message: 'Audit started' });
-    expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/r1' })).statusCode).toBe(200);
-    expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/nope' })).statusCode).toBe(404);
+  it('status: everyone sees the states; only the operator sees details; the caller learns whether it may operate', async () => {
+    const { a } = await app(true);
+    const anon = await statusAs(a);
+    expect(anon).toMatchObject({ broker: 'DISCONNECTED', liveTrading: 'NOT READY', restricted: true, operator: { canOperate: false } });
+    expect(anon.login.events).toEqual([]);
+    expect(anon.watchdog.checks).toEqual([{ id: 'storage', title: 'Disk', result: 'fail', detail: '' }]);
+    expect(anon.watchdog.process).toBeUndefined();
+    expect(anon.audit.last?.items).toEqual([]);
+    const g = await guest(a);
+    expect((await statusAs(a, g)).operator).toEqual({ canOperate: false, reason: expect.stringContaining('registered account') });
+    const owner = await register(a, 'owner@example.com');
+    const mine = await statusAs(a, owner);
+    expect(mine).toMatchObject({ restricted: false, operator: { canOperate: true } });
+    expect(mine.watchdog.checks[0].detail).toContain('EACCES');
+    // Full audit reports: operators only.
+    expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/r1' })).statusCode).toBe(401);
+    expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/r1', headers: { authorization: `Bearer ${g}` } })).statusCode).toBe(403);
+    expect((await a.inject({ method: 'GET', url: '/api/ops/audit/reports/r1', headers: { authorization: `Bearer ${owner}` } })).statusCode).toBe(200);
   });
 
-  it('only an operator may run the actions: the first registered account, or the OPS_ADMIN_EMAILS accounts', async () => {
-    const register = async (a: Awaited<ReturnType<typeof app>>['a'], email: string) => token((await a.inject({ method: 'POST', url: '/api/auth/register', payload: { name: 'X', email, password: 'secret1' } })).body);
-    const press = (a: Awaited<ReturnType<typeof app>>['a'], t: string) => a.inject({ method: 'POST', url: '/api/ops/watchdog/run', headers: { authorization: `Bearer ${t}` } });
-    // Default: the owner (first registered account) only.
-    const one = await app(true);
-    const owner = await register(one.a, 'owner@example.com');
-    const stranger = await register(one.a, 'stranger@example.com');
-    expect((await press(one.a, owner)).statusCode).toBe(200);
-    const r = await press(one.a, stranger);
+  it('actions: 401 signed out, 403 guest or non-operator, 200 for the owner; the health check answers ok:false when checks found problems', async () => {
+    const { a, relogin } = await app(true, { checks: [{ result: 'ok' }, { result: 'fail' }] });
+    expect((await press(a, undefined, 'login/relogin')).statusCode).toBe(401);
+    expect((await press(a, await guest(a), 'login/relogin')).statusCode).toBe(403);
+    expect(relogin).not.toHaveBeenCalled();
+    const owner = await register(a, 'owner@example.com');
+    expect((await press(a, owner, 'login/relogin')).json()).toMatchObject({ ok: true, message: 'Logged in to Kotak Neo' });
+    const run = (await press(a, owner)).json();
+    expect(run).toMatchObject({ ok: false, message: expect.stringContaining('1 need attention') });
+    expect((await press(a, owner, 'audit/run')).json()).toMatchObject({ ok: true, message: 'Audit started' });
+    const stranger = await register(a, 'stranger@example.com');
+    const r = await press(a, stranger);
     expect(r.statusCode).toBe(403);
-    expect(r.json().error).toContain('first account registered');
-    // OPS_ADMIN_EMAILS: exactly the listed accounts (case-insensitive), whoever registered first.
-    const two = await app(true, ['ops@example.com']);
+    expect(r.json().error).toContain("server's owner");
+  });
+
+  it('a guest created before the owner registered cannot take the operator role over by upgrading later', async () => {
+    const { a } = await app(true);
+    const early = await guest(a); // a visitor's guest, older than the owner's account
+    const owner = await register(a, 'owner@example.com');
+    const upgraded = await register(a, 'visitor@example.com', early); // upgrades the old guest
+    expect((await press(a, owner)).statusCode).toBe(200);
+    expect((await press(a, upgraded)).statusCode).toBe(403);
+  });
+
+  it('OPS_ADMIN_EMAILS: exactly the listed accounts; with persistence off it is required', async () => {
+    const two = await app(true, { opsAdmins: ['ops@example.com'] });
     const first = await register(two.a, 'first@example.com');
     const ops = await register(two.a, 'OPS@example.com');
     expect((await press(two.a, first)).statusCode).toBe(403);
     expect((await press(two.a, ops)).statusCode).toBe(200);
+    const mem = await app(true, { persist: false });
+    const someone = await register(mem.a, 'someone@example.com');
+    const r = await press(mem.a, someone);
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toContain('PERSIST=false');
   });
 
-  it('limits sign-in attempts per client address (429 with Retry-After)', async () => {
-    const { a } = await app(false);
+  it('limits operator presses per account, and sign-in attempts per client address (429 with Retry-After)', async () => {
+    const { a } = await app(true);
+    const owner = await register(a, 'owner@example.com');
     const codes: number[] = [];
-    for (let i = 0; i < 31; i++) codes.push((await a.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'x@example.com', password: 'wrong-1' } })).statusCode);
-    expect(codes.slice(0, 30).every((c) => c === 401)).toBe(true);
-    expect(codes[30]).toBe(429);
+    for (let i = 0; i < 11; i++) codes.push((await press(a, owner)).statusCode);
+    expect(codes.slice(0, 10).every((c) => c === 200)).toBe(true);
+    expect(codes[10]).toBe(429);
+    // Anonymous calls do not use up the operator's quota (authorised first, then counted per account).
+    const b = await app(true);
+    for (let i = 0; i < 15; i++) await press(b.a, undefined);
+    expect((await press(b.a, await register(b.a, 'owner@example.com'))).statusCode).toBe(200);
+
+    const login: number[] = [];
+    for (let i = 0; i < 31; i++) login.push((await a.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'x@example.com', password: 'wrong-1' } })).statusCode);
+    expect(login.slice(0, 30).every((c) => c === 401)).toBe(true);
+    expect(login[30]).toBe(429);
     const r = await a.inject({ method: 'POST', url: '/api/auth/login', payload: { email: 'x@example.com', password: 'wrong-1' } });
     expect(r.json().error).toMatch(/Too many requests/);
     expect(Number(r.headers['retry-after'])).toBeGreaterThan(0);
   });
 
-  it('answers 404 with the reason when operations are not running', async () => {
+  it('keys IPv6 clients by their /64 and reads TRUST_PROXY', () => {
+    expect(clientKey('203.0.113.7')).toBe('203.0.113.7');
+    expect(clientKey('::ffff:203.0.113.7')).toBe('203.0.113.7');
+    expect(clientKey('2001:db8:1:2:aaaa::1')).toBe('2001:db8:1:2::/64');
+    expect(clientKey('2001:db8:1:2:bbbb:cccc:dddd:eeee')).toBe('2001:db8:1:2::/64');
+    expect(clientKey('2001:0db8::1')).toBe('2001:db8:0:0::/64');
+    expect(trustProxyFrom(undefined)).toEqual({});
+    expect(trustProxyFrom('false')).toEqual({});
+    expect(trustProxyFrom('true')).toEqual({ trustProxy: true });
+    expect(trustProxyFrom('127.0.0.1, 10.0.0.0/8')).toEqual({ trustProxy: '127.0.0.1, 10.0.0.0/8' });
+  });
+
+  it('answers 404 with the reason when operations are not running (after the sign-in check)', async () => {
     const { a } = await app(false);
     const r = await a.inject({ method: 'GET', url: '/api/ops' });
     expect(r.statusCode).toBe(404);
     expect(r.json().error).toContain('not running');
+    expect((await press(a, undefined)).statusCode).toBe(401);
   });
 });

@@ -35,12 +35,20 @@ function NewOrder({ onTicket }: { onTicket: (t: TicketSpec) => void }) {
   const row = chainData?.rows.find((r) => r.strike === k);
   const optQuote = row ? (type === 'CE' ? row.ce : row.pe) : undefined;
   const price = isFut ? futs.data?.find((x) => x.expiry === e)?.ltp ?? null : optQuote?.ltp ?? null;
-  const priceWhy = !e ? 'No listed expiry' : !isFut && k === undefined ? 'No strikes: the option chain is not available' : 'Not traded in the live session; the order ticket shows the live bid / ask';
+  // After a symbol / expiry change the previous answer stays on as placeholder while the new one loads:
+  // that is loading, not "not available".
+  const expLoading = exp.isLoading || (exp.isFetching && !exp.data);
+  const chainLoading = chain.isLoading || chain.isPlaceholderData || (chain.isFetching && !chainData);
+  const priceWhy = !e
+    ? expLoading ? 'Loading the listed expiries…' : 'No listed expiry'
+    : !isFut && k === undefined
+      ? chainLoading ? 'Loading the strikes…' : 'No strikes: the option chain is not available'
+      : 'Not traded in the live session; the order ticket shows the live bid / ask';
   // No contract chosen (no expiry, or an option without a strike): Buy / Sell are disabled and say why.
   const blocked = !e
-    ? `${isFut ? 'Select an expiry' : 'Select an expiry and strike'}: ${exp.isLoading ? 'loading the listed expiries…' : exp.error ? errorText(exp.error) : 'no expiry is listed'}`
+    ? `${isFut ? 'Select an expiry' : 'Select an expiry and strike'}: ${expLoading ? 'loading the listed expiries…' : exp.error ? errorText(exp.error) : 'no expiry is listed'}`
     : !isFut && k === undefined
-      ? `Select a strike: ${chain.isLoading ? 'loading the strikes…' : chain.error ? errorText(chain.error) : 'the option chain is not available'}`
+      ? `Select a strike: ${chainLoading ? 'loading the strikes…' : chain.error ? errorText(chain.error) : 'the option chain is not available'}`
       : null;
   return (
     <div className="flex flex-wrap items-end gap-2">
@@ -49,12 +57,12 @@ function NewOrder({ onTicket }: { onTicket: (t: TicketSpec) => void }) {
       <Field label="Expiry">
         <select className="input w-auto" value={e ?? ''} disabled={!list.length} title={list.length ? undefined : exp.error ? errorText(exp.error) : 'No listed expiry'} onChange={(ev) => setExpiry(ev.target.value)}>
           {list.map((x) => <option key={x} value={x}>{formatExpiry(x)}</option>)}
-          {!list.length && <option value="">{exp.isLoading ? 'Loading…' : 'No expiry'}</option>}
+          {!list.length && <option value="">{expLoading ? 'Loading…' : 'No expiry'}</option>}
         </select>
       </Field>
       {!isFut && (
         <Field label="Strike">
-          <StrikeSelect chain={chainData} value={k} onChange={setStrike} error={chain.error} loading={chain.isLoading} />
+          <StrikeSelect chain={chainData} value={k} onChange={setStrike} error={chainLoading ? undefined : chain.error} loading={chainLoading} />
         </Field>
       )}
       <span className="pb-2 text-sm text-muted">LTP <b className="text-ink"><Val value={price} format={formatPrice} reason={priceWhy} /></b></span>

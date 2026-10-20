@@ -57,3 +57,6 @@ GET /api/ops -> broker DISCONNECTED | feed DATA UNAVAILABLE | live NOT READY | l
 GET / -> 200 (web app); GET /..%2f..%2fpackage.json, /../../package.json, /%2e%2e/%2e%2e/apps/server/package.json -> the SPA index.html (no file disclosure)
 docker inspect health -> healthy (failing streak 0, probe exit codes 0 0)
 docker stop -t 20 -> supervisor: SIGTERM: stopping the server / server stopped; supervisor exiting; container exit 0
+
+# Rebuilt image q26-options:final (entrypoint): old root-owned volume
+health 200; entrypoint chown + su node; PIDs run as node; clean stop exit 0

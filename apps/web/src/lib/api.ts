@@ -45,18 +45,59 @@ export function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export async function api<T>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+/** The server did not answer within the request's `timeoutMs` (the request was aborted). */
+export class RequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`The server did not answer within ${Math.round(timeoutMs / 1000)} s`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * Calls the API. `signal` cancels the request (pass React Query's); `timeoutMs` also aborts it when the
+ * server has not answered in time (headers and body), rejecting with a RequestTimeoutError.
+ */
+export async function api<T>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers.authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
-  const res = await fetch(`/api${path}`, {
-    method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    signal: opts.signal,
-  });
-  const text = await res.text();
+  let signal = opts.signal;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let unlink: (() => void) | undefined;
+  if (opts.timeoutMs !== undefined) {
+    const ctl = new AbortController();
+    const outer = opts.signal;
+    if (outer?.aborted) ctl.abort(outer.reason);
+    else if (outer) {
+      const forward = () => ctl.abort(outer.reason);
+      outer.addEventListener('abort', forward, { once: true });
+      unlink = () => outer.removeEventListener('abort', forward);
+    }
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctl.abort();
+    }, opts.timeoutMs);
+    signal = ctl.signal;
+  }
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`/api${path}`, {
+      method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal,
+    });
+    text = await res.text();
+  } catch (e) {
+    if (timedOut) throw new RequestTimeoutError(opts.timeoutMs!);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    unlink?.();
+  }
   // A non-JSON body (a proxy's HTML error page, an empty 502) must not hide the HTTP status.
   let data: unknown = null;
   try {

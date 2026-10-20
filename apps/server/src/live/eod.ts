@@ -319,16 +319,17 @@ export class EodJobs {
   /* ---------------------------------- loading ---------------------------------- */
 
   /** Load the official files of one date (each source independently). */
-  async loadDate(date: string, sources: readonly EodSource[] = EOD_SOURCES): Promise<EodResult[]> {
+  /** `force`: fetch even when the store already reads as loaded (e.g. after a damaged file was moved away). */
+  async loadDate(date: string, sources: readonly EodSource[] = EOD_SOURCES, opts: { force?: boolean } = {}): Promise<EodResult[]> {
     if (!isIsoDate(date)) throw new Error(`loadDate: invalid date '${date}'`);
     const out: EodResult[] = [];
-    for (const s of EOD_SOURCES) if (sources.includes(s)) out.push(await this.loadSource(s, date));
+    for (const s of EOD_SOURCES) if (sources.includes(s)) out.push(await this.loadSource(s, date, opts.force));
     return out;
   }
 
   /** loadDate() after the backfill / daily job in progress (never two loads of the store at once). */
-  loadDateQueued(date: string, sources: readonly EodSource[] = EOD_SOURCES): Promise<EodResult[]> {
-    return this.enqueue(() => this.loadDate(date, sources));
+  loadDateQueued(date: string, sources: readonly EodSource[] = EOD_SOURCES, opts: { force?: boolean } = {}): Promise<EodResult[]> {
+    return this.enqueue(() => this.loadDate(date, sources, opts));
   }
 
   /** Load the dates missing from the store over the last `days` sessions (newest first). */
@@ -371,12 +372,12 @@ export class EodJobs {
     return results;
   }
 
-  private async loadSource(source: EodSource, date: string): Promise<EodResult> {
+  private async loadSource(source: EodSource, date: string, force = false): Promise<EodResult> {
     const st = this.st[source];
     st.lastAttemptAt = this.now();
     let r: EodResult;
     try {
-      r = this.isLoaded(source, date) ? { source, date, outcome: 'already-loaded' } : await this.load(source, date);
+      r = !force && this.isLoaded(source, date) ? { source, date, outcome: 'already-loaded' } : await this.load(source, date);
     } catch (e) {
       r = { source, date, outcome: 'failed', reason: errMsg(e), ...(e instanceof NseError && e.kind === 'network' ? { network: true } : {}) };
     }

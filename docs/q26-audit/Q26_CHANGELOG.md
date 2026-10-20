@@ -23,6 +23,17 @@ Every material change, why it was made, the files it touches, the tests that cov
 | C-16 | Fastify `disableRequestLogging` (deprecated, printed a warning at start) replaced by `logController` | Terminal warning | `apps/server/src/app.ts` | all route tests | None |
 | C-17 | `@fastify/static` 8.3.0 → 10.x, if the upgrade passed the full suite: see TEST_EXECUTION_REPORT.md §3 | Risk R-15 (high advisories: path traversal, route-guard bypass) | `apps/server/package.json`, `package-lock.json` | full suite + e2e | None |
 
+## Second adversarial review (35 findings, all fixed)
+
+| # | Change | Files | Tests |
+|---|---|---|---|
+| C-18 | **Login safety:**<br>• a cut-off TOTP answer, 5xx, 408, 429 or a 2xx non-JSON page is transient;<br>• any 4xx and validate-step 504/timeouts are refusals;<br>• a separate last-login error;<br>• the refusal count, hold and pause persist across restarts (DATA_DIR/ops/login-state.json, keyed by a credential hash);<br>• the monitor exposes `sessionValid` (PAUSED with a valid token stays CONNECTED). | `live/kotak/session.ts`, `live/provider.ts`, `ops/login-monitor.ts` | `kotak-session.test.ts`, `ops.test.ts` |
+| C-19 | **Operators and status:**<br>• the owner is recorded once (a later-upgraded guest cannot take over);<br>• OPS_ADMIN_EMAILS is required with PERSIST=false;<br>• startup warnings for unregistered admin addresses;<br>• `GET /api/ops` gives operators details and everyone else states only;<br>• reports are operator-only;<br>• the health-check action returns ok:false on problems;<br>• rate limits are per operator account, per IPv6 /64, with a bounded store and TRUST_PROXY;<br>• AUTH_SECRET unset or weak → a generated secret kept in DATA_DIR/.auth-secret, with a warning. | `app.ts`, `auth.ts`, `config.ts`, `index.ts`, `ops/index.ts`, `store/db.ts` | `ops.test.ts`, `routes-smoke.test.ts` |
+| C-20 | **Watchdog and supervisor:**<br>• the memory effect is judged at the next round (no false "fixed");<br>• the instrument download is started, not awaited, and an in-progress download is never a failure;<br>• one FEED_STALE_MS (60 s) for every view, socket restart after 90 s;<br>• "fixed" counts as DEGRADED;<br>• db.json write failures are reported (no crash);<br>• the supervisor reads PORT/HOST like the server (.env, HOST), backs off watchdog restarts and caps them at 3 per hour (Q26_RESTART_LOOP);<br>• the Docker entrypoint hands old root-owned volumes to `node`. | `ops/watchdog.ts`, `scripts/supervise.mjs`, `scripts/docker-entrypoint.sh`, `Dockerfile`, `store/db.ts` | `ops.test.ts`; Docker build and run |
+| C-21 | **Weekly audit:**<br>• DATA-1 is FIXED only when every source is really loaded (404 → WARN);<br>• DATA-2 force-downloads and verifies each quarantined file;<br>• SEC-1 matches whole tokens and redacts only JSON string values (no corrupted records);<br>• OPS-1 fails while PAUSED or not logged in and counts RELOGIN_FAILED;<br>• new OPS-4 for journal writes that failed;<br>• unwritten events are kept and counted. | `ops/weekly-audit.ts`, `ops/journal.ts`, `live/eod.ts` (`force`) | `ops.test.ts` |
+| C-22 | **Dashboard:**<br>• buttons follow the server's `operator.canOperate` and reason;<br>• the restricted view;<br>• grey STATUS UNKNOWN when refreshes fail or hang (10 s abort, browser clock);<br>• only a 404 means "not running";<br>• amber result lines when the health check found problems;<br>• contract labels with decimal strikes are no longer split;<br>• "loading the strikes…" while a new chain loads. | `apps/web/src/components/Operations.tsx`, `ui.tsx`, `lib/api.ts`, `lib/feed.ts`, `pages/Positions.tsx` | web unit tests (171), e2e |
+| C-23 | **Dependencies:** react-router-dom 7.18.4 and echarts 6.1.0 (v5 look kept). Runtime `npm audit` now reports 0 | `apps/web/package.json`, `Chart.tsx`, `main.tsx`, lockfile | web tests, e2e |
+
 ## Explicitly not changed
 
 These were preserved:
@@ -37,4 +48,4 @@ These were preserved:
 Two items were reviewed and left as they are:
 
 - **Restored at the user's request:** `apps/server/src/live/net.ts`, a fetch-error helper added during this work, was removed and both of its call sites restored to their original code, as the user asked.
-- **Deferred:** the dev-only dependency advisories (vitest, vite, tailwind toolchain) and the moderate runtime advisories in `echarts` and `react-router-dom`. Each needs a major-version migration across many screens; see the risk notes in ZERO_TRUST_45_POINT_AUDIT.md (control 39).
+- **Deferred:** the dev-only toolchain advisories (vitest, vite, tailwind 3). They are not shipped in the image; see ZERO_TRUST_45_POINT_AUDIT.md control 39. The runtime advisories were fixed (C-23).

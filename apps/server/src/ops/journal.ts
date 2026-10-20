@@ -27,6 +27,8 @@ export class OpsJournal {
   private readonly now: () => number;
   private readonly max: number;
   private readonly recent: OpsEvent[] = [];
+  /** Events whose write to disk failed (merged into read(); lost at restart). */
+  private readonly failed: OpsEvent[] = [];
   private writeError: string | undefined;
 
   constructor(opts: OpsJournalOptions) {
@@ -47,6 +49,8 @@ export class OpsJournal {
         this.writeError = undefined;
       } catch (err) {
         this.writeError = err instanceof Error ? err.message : String(err);
+        this.failed.push(ev);
+        if (this.failed.length > this.max) this.failed.splice(0, this.failed.length - this.max);
       }
     }
     return ev;
@@ -66,7 +70,8 @@ export class OpsJournal {
   /** Events with from <= ts < to, oldest first (from the files when persisted; unreadable lines are skipped). */
   read(from: number, to: number): OpsEvent[] {
     if (!this.dir) return this.recent.filter((e) => e.ts >= from && e.ts < to);
-    const out: OpsEvent[] = [];
+    // Events that could not be written still count (until a restart).
+    const out: OpsEvent[] = this.failed.filter((e) => e.ts >= from && e.ts < to);
     const first = istParts(from).date;
     const last = istParts(to).date;
     for (const f of this.files()) {
@@ -119,6 +124,11 @@ export class OpsJournal {
       }
     }
     return n;
+  }
+
+  /** Events of [from, to) that could not be written to disk. */
+  unpersisted(from: number, to: number): number {
+    return this.failed.filter((e) => e.ts >= from && e.ts < to).length;
   }
 
   /** The last write failure (cleared by the next successful write). */
