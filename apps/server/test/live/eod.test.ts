@@ -253,6 +253,20 @@ describe('EodJobs schedule, holidays and backfill', () => {
     expect(urls.some((u) => u.startsWith('https://archives.nseindia.com'))).toBe(false);
   });
 
+  it('backfill counts only the dates still incomplete after it ran; a date filled later drops out', async () => {
+    // Owner's PC: "30 session(s) still missing files" right after all 30 had been downloaded.
+    const routes = publishedRoutes({ [participantUrls(D, 'oi')[1]]: notFound() });
+    const h = harness(routes, { backfillDays: 1 }, ist('2026-09-16', '09:00'));
+    await h.eod.backfill();
+    expect(h.eod.status().backfill.datesMissing).toBe(1); // BSE F&O for D not published yet
+    const bse = fixture('bse-fo-20260430.csv').replaceAll('2026-04-30', D).replaceAll('2026-06-25', '2026-12-24');
+    routes[bseFoBhavcopyUrl(D)] = text(bse);
+    expect(outcomes(await h.eod.loadDateQueued(D, ['bseFo']))).toEqual({ bseFo: 'loaded' });
+    expect(h.eod.status().backfill.datesMissing).toBe(0);
+    await h.eod.backfill();
+    expect(h.eod.status().backfill.datesMissing).toBe(0);
+  });
+
   it('stops the backfill after the first date when NSE/BSE cannot be reached at all, with one warning', async () => {
     const down = () => new TypeError('fetch failed');
     const routes: Routes = {};

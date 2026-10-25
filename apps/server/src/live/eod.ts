@@ -140,6 +140,8 @@ export class EodJobs {
   private readonly st = {} as Record<EodSource, EodSourceStatus>;
   /** Dates loaded by this process per source (the store answers for earlier runs). */
   private readonly loaded = new Map<EodSource, Set<string>>();
+  /** Dates the last backfill could not complete (status() drops those filled since). */
+  private missingDates: string[] = [];
   /** (date, source) pairs the source cannot serve: not attempted again. */
   private readonly unavailable = new Set<string>();
   private readonly indexFiles = new Map<string, IndexCloseFile>();
@@ -331,6 +333,11 @@ export class EodJobs {
     return this.enqueue(() => this.loadDate(date, sources, opts));
   }
 
+  /** Backfill sources of `date` neither loaded nor known to be unpublished. */
+  private backfillGaps(date: string): EodSource[] {
+    return BACKFILL_SOURCES.filter((s) => !this.isLoaded(s, date) && !this.unavailable.has(`${date}|${s}`));
+  }
+
   /** Load the dates missing from the store over the last `days` sessions (newest first). */
   backfill(days: number = this.backfillDays): Promise<EodResult[]> {
     return this.enqueue(() => this.backfillNow(days));
@@ -341,7 +348,7 @@ export class EodJobs {
     this.bf.running = true;
     this.bf.lastRunAt = this.now();
     const results: EodResult[] = [];
-    let missing = 0;
+    const missing: string[] = [];
     delete this.bf.stoppedOffline;
     try {
       const today = cal.session(this.now()).date;
@@ -349,11 +356,11 @@ export class EodJobs {
       for (let d = cal.prev(today); dates.length < days && d >= NSE_UDIFF_START; d = cal.prev(d)) dates.push(d);
       for (const date of dates) {
         if (this.halted) break;
-        const need = BACKFILL_SOURCES.filter((s) => !this.isLoaded(s, date) && !this.unavailable.has(`${date}|${s}`));
+        const need = this.backfillGaps(date);
         if (!need.length) continue;
-        missing++;
         const got = await this.loadDate(date, need);
         results.push(...got);
+        if (this.backfillGaps(date).length) missing.push(date);
         const offline = offlineReason(got);
         if (offline) {
           // Every file of the date failed to connect: the other dates would too. Stop and say so once.
@@ -366,7 +373,8 @@ export class EodJobs {
       if (!this.halted && !this.bf.stoppedOffline && dates.length && !this.isLoaded('fiidii', dates[0])) results.push(await this.loadSource('fiidii', dates[0]));
     } finally {
       this.bf.running = false;
-      this.bf.datesMissing = missing;
+      this.missingDates = missing;
+      this.bf.datesMissing = missing.length;
     }
     return results;
   }
@@ -555,6 +563,6 @@ export class EodJobs {
     for (const s of EOD_SOURCES) sources[s] = { ...this.st[s], ...(this.st[s].last ? { last: { ...this.st[s].last! } } : {}) };
     const kinds = {} as Record<EodKind, string | null>;
     for (const k of KINDS) kinds[k] = this.opts.history.loadedDates(k).at(-1) ?? null;
-    return { sources, kinds, holidays: { ...this.hol }, next: this.next ? { ...this.next } : null, backfill: { ...this.bf } };
+    return { sources, kinds, holidays: { ...this.hol }, next: this.next ? { ...this.next } : null, backfill: { ...this.bf, ...(this.bf.datesMissing !== null ? { datesMissing: this.missingDates.filter((d) => this.backfillGaps(d).length).length } : {}) } };
   }
 }
