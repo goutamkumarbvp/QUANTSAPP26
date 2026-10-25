@@ -28,6 +28,9 @@ import type { ScripMasterStatus } from '../live/kotak/scripmaster';
 import type { OpsJournal } from './journal';
 
 /** What the watchdog needs from the program (index.ts wires the live provider and the login monitor). */
+/** Event-loop pauses in the first minutes (start-up loading) are warnings only. */
+const STARTUP_GRACE_MS = 5 * 60_000;
+
 export interface WatchdogTarget {
   /** 'open' while the exchange session is open (ticks are expected). */
   marketStatus(): string;
@@ -248,6 +251,11 @@ export class Watchdog {
     if (p99 < 1000) {
       this.lagStrikes = 0;
       return { ...base, result: 'ok', detail: `99% of event-loop delays under ${p99} ms` };
+    }
+    // The first minutes load the instrument master and the EOD backfill (large CSVs parsed in one
+    // go): a long pause then is expected once, not a hang. Report it, never count it towards a restart.
+    if (this.now() - this.startedAt < STARTUP_GRACE_MS) {
+      return { ...base, result: 'warn', detail: `event loop delayed up to ${p99} ms during start-up (loading the instrument master and EOD files)` };
     }
     this.lagStrikes++;
     if (p99 < 5000) return { ...base, result: 'warn', detail: `event loop delayed up to ${p99} ms (requests answer slowly)` };

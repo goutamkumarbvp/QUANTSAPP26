@@ -203,7 +203,7 @@ describe('ScripMaster', () => {
     expect(st).toMatchObject({ ready: true, date: DATE, sourceDate: DATE, source: 'download', underlyings: 5 });
     expect(st.warnings.join('\n')).toMatch(/FINNIFTY: no live option contracts/);
     expect(st.warnings.join('\n')).toMatch(/BANKEX: no live option contracts in bse_fo \(pSymbolName BANKEX\/BKX\)/);
-    expect(st.warnings.join('\n')).toMatch(/configured stocks have no OPTSTK rows/);
+    expect(st.warnings.join('\n')).toMatch(/configured stocks have no OPTSTK rows in nse_fo; not offered: [A-Z]/);
   });
 
   it('answers 404 for unknown symbols and unlisted expiries', async () => {

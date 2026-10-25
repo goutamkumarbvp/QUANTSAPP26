@@ -305,6 +305,18 @@ function fakeWatchdogTarget() {
 }
 
 describe('watchdog', () => {
+  it('a long event-loop pause in the first 5 min (start-up loading) is a warning, later it is a failure', async () => {
+    let now = MON_11;
+    const { target } = fakeWatchdogTarget();
+    const w = new Watchdog(target, new OpsJournal({ dataDir: null }), { dataDir: null, now: () => now, timers: manualTimers() });
+    (w as unknown as { histogram: unknown }).histogram = { percentile: () => 7_910 * 1e6, reset: () => {}, disable: () => {} };
+    let loop = (await w.run()).find((c) => c.id === 'event-loop')!;
+    expect(loop).toMatchObject({ result: 'warn', detail: expect.stringContaining('during start-up') });
+    now += 6 * 60_000;
+    loop = (await w.run()).find((c) => c.id === 'event-loop')!;
+    expect(loop).toMatchObject({ result: 'fail', detail: 'event loop blocked up to 7910 ms' });
+  });
+
   it('restarts a feed that stopped ticking during market hours, at most once per 5 min', async () => {
     let now = MON_11;
     const { s, target } = fakeWatchdogTarget();

@@ -762,7 +762,7 @@ export class ScripMaster implements ReferenceData {
     const list: Underlying[] = [];
     const bySymbol = new Map<string, { u: Underlying; st: UState }>();
     const spots = new Map<string, Listing>();
-    let skippedStocks = 0;
+    const skippedStocks: string[] = [];
     for (const spec of INDEX_SPECS) {
       const st = t.states.get(spec.symbol)!;
       st.spot = { symbol: spec.symbol, kind: 'SPOT', exchange: spec.exchange, segment: spec.spotSegment, token: spec.spotName, tradingSymbol: spec.spotName, ...INDEX_SPOT_META };
@@ -773,7 +773,7 @@ export class ScripMaster implements ReferenceData {
     for (const st of t.states.values()) {
       if (st.kind === 'stock') {
         if (!st.hasOptStk) {
-          skippedStocks++;
+          skippedStocks.push(st.symbol);
           continue;
         }
         const sp = stockSpots.get(st.symbol);
@@ -801,7 +801,7 @@ export class ScripMaster implements ReferenceData {
       list.push(u);
       bySymbol.set(st.symbol, { u, st });
     }
-    if (skippedStocks) warnings.push(`${skippedStocks} configured stocks have no OPTSTK rows in nse_fo; not offered`);
+    if (skippedStocks.length) warnings.push(`${skippedStocks.length} configured stocks have no OPTSTK rows in nse_fo; not offered: ${skippedStocks.slice(0, 10).join(', ')}${skippedStocks.length > 10 ? ', …' : ''}`);
     if (!list.length) throw new FileRejected('Instrument master has no usable underlyings');
 
     // Spot listings by name, plus numeric index tokens where a cm file has them (feed decoding).
