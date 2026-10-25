@@ -475,8 +475,16 @@ function networkReason(e: unknown, timeoutMs: number): string {
   const name = (e as { name?: string })?.name;
   if (name === 'TimeoutError' || name === 'AbortError') return `timed out after ${Math.round(timeoutMs / 1000)} s`;
   const msg = e instanceof Error ? e.message : String(e);
-  const cause = (e as { cause?: { code?: string; message?: string } })?.cause;
-  return cause?.code ? `${msg} (${cause.code})` : msg;
+  // undici's "fetch failed" hides the reason in `cause` (for IPv4/IPv6 attempts, in cause.errors).
+  type Cause = { code?: string; message?: string; errors?: Cause[] };
+  const cause = (e as { cause?: Cause })?.cause;
+  if (!cause) return msg;
+  const inner = cause.errors?.find((x) => x?.code) ?? cause;
+  const code = cause.code ?? inner.code;
+  const detail = (inner.message || cause.message || '').trim();
+  if (code && detail) return detail.includes(code) ? `${msg} (${detail})` : `${msg} (${code}: ${detail})`;
+  if (code) return `${msg} (${code})`;
+  return detail && detail !== msg ? `${msg} (${detail})` : msg;
 }
 
 /** Retry-After in ms (seconds or HTTP date), or undefined. */

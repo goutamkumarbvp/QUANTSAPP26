@@ -108,7 +108,6 @@ const MINUTE_MS = 60_000;
 const MAX_TIMER_MS = 6 * HOUR;
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** The reason when every result failed because its host could not be reached (the network is down), else undefined. */
 /** The reason when every file that was requested failed to connect (NSE/BSE unreachable), else undefined. */
 export function offlineReason(results: readonly EodResult[]): string | undefined {
   // 'waiting' sources (participants wait for the NIFTY close) made no request: they do not count.

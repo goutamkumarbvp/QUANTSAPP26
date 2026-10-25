@@ -95,6 +95,15 @@ describe('NseHttp files', () => {
     expect(calls).toHaveLength(4);
   });
 
+  it('names the hidden reason behind "fetch failed" (TLS cause without a code, IPv4/IPv6 AggregateError)', async () => {
+    const tls = Object.assign(new TypeError('fetch failed'), { cause: new Error('self-signed certificate in certificate chain') });
+    const both = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new AggregateError([Object.assign(new Error('connect ECONNREFUSED 1.2.3.4:443'), { code: 'ECONNREFUSED' })], ''), {}) });
+    for (const [boom, want] of [[tls, 'fetch failed (self-signed certificate in certificate chain)'], [both, 'fetch failed (connect ECONNREFUSED 1.2.3.4:443)']] as const) {
+      const { http } = testHttp({ [IND]: boom }, { retries: 0 });
+      await expect(http.getFile({ url: IND, expect: 'csv', hostFallback: false })).rejects.toMatchObject({ kind: 'network', message: expect.stringContaining(want) });
+    }
+  });
+
   it('reports a timeout', async () => {
     const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
     const { http } = testHttp({ [IND]: timeout }, { retries: 0 });
