@@ -292,6 +292,11 @@ describe('historical', () => {
     expect(parseKotakTimestamp('2026-08-20 09:15:00')).toBe(Date.UTC(2026, 7, 20, 3, 45)); // zone-less = IST
     expect(parseKotakTimestamp('2026-08-20')).toBe(Date.UTC(2026, 7, 19, 18, 30));
     expect(parseKotakTimestamp(1787197500)).toBe(1787197500000);
+    expect(parseKotakTimestamp(1787197500000)).toBe(1787197500000); // ms
+    expect(parseKotakTimestamp('1787197500000000')).toBe(1787197500000); // µs
+    expect(parseKotakTimestamp(1787197500000000000)).toBe(1787197500000); // ns
+    expect(parseKotakTimestamp(12)).toBeUndefined(); // 1970: not a real quote time
+    expect(parseKotakTimestamp('25/10/2026 15:29:59')).toBeUndefined();
     // The sample's 7th column (13667775 on a cash stock) is the unpopulated "Phase 1" OI slot: ignored.
     expect(parseCandles(HISTORICAL)).toEqual([
       { ts: Date.UTC(2026, 7, 20, 3, 45), open: 12009.9, high: 12019.35, low: 12001.25, close: 12001.5, volume: 163275 },

@@ -264,6 +264,26 @@ describe('KotakLiveMarket quotes', () => {
     expect(ticks).toHaveLength(2);
   });
 
+  it('refresh(): a quote time in ms, µs or an unknown format never throws (user log: "Invalid time value")', async () => {
+    const h = harness({}, () => [
+      quoteRow('nse_cm', '26000', 25010.5, T0, { lstup_time: String(T0 * 1000) }), // µs
+      quoteRow('nse_cm', '2885', 1402.3, T0, { lstup_time: '25/10/2026 15:29:59' }),
+    ]);
+    const ticks: LiveQuote[] = [];
+    h.market.onTick((q) => ticks.push(q));
+    const got = await h.market.refresh([SPOT, { symbol: 'reliance', kind: 'SPOT' }]);
+    expect(got.get(keyId(SPOT))).toMatchObject({ ltp: 25010.5, ts: T0 });
+    expect(got.get(keyId({ symbol: 'RELIANCE', kind: 'SPOT' }))).toMatchObject({ ltp: 1402.3, ts: T0 }); // receive time
+    expect(ticks).toHaveLength(2);
+  });
+
+  it('a patch time it cannot place (NaN, far future) is replaced by the receive time', () => {
+    const h = harness();
+    const merge = (ts: number) => (h.market as unknown as { merge(p: LiveQuotePatch, how: { book: boolean; stream: boolean }): LiveQuote | undefined }).merge({ key: SPOT, ts, ltp: 25000 }, { book: false, stream: true });
+    expect(merge(Number.NaN)?.ts).toBe(T0);
+    expect(merge(T0 * 1e6)?.ts).toBe(T0);
+  });
+
   it('refresh() of keys the master does not list fails with NoLiveData and makes no call', async () => {
     const h = harness();
     await expect(h.market.refresh([ce(25025)])).rejects.toThrow(/Not in the instrument master/);

@@ -42,6 +42,7 @@ Every material change, why it was made, the files it touches, the tests that cov
 | C-25 | **Tamper-evident operations journal:**<br>• SHA-256 hash chain per file;<br>• `verify()`;<br>• weekly check OPS-5;<br>• the secret redaction rebuilds the chain. | `ops/journal.ts`, `ops/weekly-audit.ts` | `ops.test.ts` "journal hash chain" |
 | C-26 | **Alerts:**<br>• error-level operations events (watchdog CRITICAL, login PAUSED, audit FAIL, restart loop) reach the operator accounts as in-app notifications;<br>• an optional ALERT_WEBHOOK_URL (Slack/Discord/ntfy);<br>• de-duplicated, rate-capped. | `ops/alerts.ts`, `ops/index.ts`, `ops/login-monitor.ts`, `index.ts` | `ops.test.ts` "alerts" |
 | C-27 | Backup / restore drill run; the backup now includes `.auth-secret` | ROLLBACK_AND_RECOVERY.md | `evidence/final/restore-drill.log` |
+| C-28 | **Fix from the first live run on the owner's PC** (`Invalid time value` every minute in the tick listener, index spot quotes and universe update):<br>• the REST quote time `lstup_time` was always read as epoch seconds; Kotak's value in another unit (ms/µs) became a date beyond what JavaScript can represent, and the session-date lookup threw;<br>• quote times are now read as s, ms, µs or ns and must fall in 2000–2100, else the receive time is used;<br>• the quote cache replaces any time it cannot place (NaN, more than a day ahead) with the receive time. | `live/kotak/rest.ts`, `live/live-market.ts` | `live-market.test.ts`, `kotak-rest.test.ts` (fails on the old code with the same error) |
 
 ## Explicitly not changed
 

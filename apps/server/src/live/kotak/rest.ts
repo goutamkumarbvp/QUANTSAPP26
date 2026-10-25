@@ -59,7 +59,7 @@ export interface KotakQuote {
   /** Instrument token, or the index name for indices (an index can also come back by number). */
   token: string;
   displaySymbol?: string;
-  /** lstup_time (epoch ms). */
+  /** lstup_time, as epoch ms (Kotak sends seconds, ms or finer units; see parseKotakTimestamp). */
   ts?: number;
   ltp?: number;
   ltq?: number;
@@ -141,7 +141,6 @@ export function parseQuote(row: unknown): KotakQuote | null {
   const cash = segment === 'nse_cm' || segment === 'bse_cm';
   const ohlc = isObj(row.ohlc) ? row.ohlc : {};
   const depth = isObj(row.depth) ? row.depth : {};
-  const lstup = pos(row.lstup_time);
   const bids = parseDepth(depth.buy);
   const asks = parseDepth(depth.sell);
   return compact<KotakQuote>({
@@ -149,7 +148,7 @@ export function parseQuote(row: unknown): KotakQuote | null {
     segment,
     token,
     displaySymbol: text(row.display_symbol),
-    ts: lstup !== undefined ? Math.round(lstup * 1000) : undefined,
+    ts: parseKotakTimestamp(row.lstup_time),
     ltp: pos(row.ltp),
     ltq: pos(row.last_traded_quantity),
     open: pos(ohlc.open),
@@ -481,18 +480,34 @@ export function splitDateRange(from: string, to: string, maxDays: number): { fro
 
 /**
  * Candle timestamp → epoch ms. ISO with '+0530' (no colon, which Date.parse rejects) is
- * normalised to '+05:30'; a zone-less timestamp is read as IST; numbers are epoch s or ms.
+ * normalised to '+05:30'; a zone-less timestamp is read as IST; numbers are epoch s, ms, µs or ns.
+ * A value outside 2000..2100 is not trusted and gives undefined.
  */
 export function parseKotakTimestamp(v: unknown): number | undefined {
-  if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : undefined;
+  if (typeof v === 'number') return plausibleMs(epochToMs(v));
   if (typeof v !== 'string' || !v.trim()) return undefined;
   let s = v.trim().replace(' ', 'T');
   if (/^\d+$/.test(s)) return parseKotakTimestamp(Number(s));
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s += 'T00:00:00';
   s = s.replace(/(T[\d:.]+[+-]\d{2})(\d{2})$/, '$1:$2');
   if (!/(Z|[+-]\d{2}:\d{2})$/i.test(s)) s += '+05:30';
-  const t = Date.parse(s);
-  return Number.isFinite(t) ? t : undefined;
+  return plausibleMs(Date.parse(s));
+}
+
+/** Epoch number in seconds, ms, µs or ns (told apart by size) → ms. */
+function epochToMs(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return NaN;
+  if (v < 1e11) return v * 1000;
+  if (v < 1e14) return v;
+  if (v < 1e17) return v / 1e3;
+  return v / 1e6;
+}
+
+/** Years 2000..2100 only: anything else is a unit or format we do not know, and is dropped. */
+const MIN_PLAUSIBLE_MS = Date.UTC(2000, 0, 1);
+const MAX_PLAUSIBLE_MS = Date.UTC(2100, 0, 1);
+function plausibleMs(t: number): number | undefined {
+  return Number.isFinite(t) && t >= MIN_PLAUSIBLE_MS && t < MAX_PLAUSIBLE_MS ? Math.round(t) : undefined;
 }
 
 function candleFrom(ts: unknown, o: unknown, h: unknown, l: unknown, c: unknown, v: unknown): KotakCandle | null {

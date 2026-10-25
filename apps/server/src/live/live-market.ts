@@ -170,6 +170,9 @@ export interface MergeRules {
   streamFreshMs: number;
 }
 
+const PLAUSIBLE_FROM_MS = Date.UTC(2000, 0, 1);
+const DAY_AHEAD_MS = 86_400_000;
+
 /** Order-book fields: replaced together by a book-carrying update. */
 export const BOOK_FIELDS = ['bid', 'ask', 'bidQty', 'askQty', 'depth', 'totalBuyQty', 'totalSellQty'] as const;
 const BOOK = new Set<string>(BOOK_FIELDS);
@@ -395,7 +398,11 @@ export class KotakLiveMarket implements LiveMarket {
     const key = canonicalKey(patch.key);
     const id = keyId(key);
     const prev = this.cells.get(id);
-    const next = mergeCell(prev, { ...patch, key }, { ...how, sameDay: (a, b) => this.dayOf(a) === this.dayOf(b), bookMaxAgeMs: this.bookMaxAgeMs, streamFreshMs: this.streamFreshMs });
+    // A source time we cannot place (not a number, before 2000, or more than a day ahead) would
+    // break the session-date lookup: use the receive time instead.
+    const now = this.now();
+    const ts = Number.isFinite(patch.ts) && patch.ts >= PLAUSIBLE_FROM_MS && patch.ts <= now + DAY_AHEAD_MS ? patch.ts : now;
+    const next = mergeCell(prev, { ...patch, key, ts }, { ...how, sameDay: (a, b) => this.dayOf(a) === this.dayOf(b), bookMaxAgeMs: this.bookMaxAgeMs, streamFreshMs: this.streamFreshMs });
     if (next === prev) return prev && prev.q.ltp !== undefined ? copyQuote(prev.q) : undefined;
     this.cells.set(id, next);
     if (next.q.ltp === undefined) return undefined;
