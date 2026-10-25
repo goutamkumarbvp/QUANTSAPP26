@@ -236,6 +236,12 @@ export class WeeklyAudit {
     const line = `Weekly audit ${report.verdict}: ${summary.PASS} pass, ${summary.FIXED} fixed, ${summary.WARN} warn, ${summary.FAIL} fail, ${summary.SKIPPED} skipped`;
     this.t.journal.add({ source: 'audit', level: summary.FAIL ? 'error' : summary.WARN ? 'warn' : 'info', type: 'AUDIT_FINISHED', message: line });
     (summary.FAIL || summary.WARN ? this.log.warn : this.log.info)(`weekly audit: ${line}`);
+    // Name what needs attention, so the terminal says it without opening the report.
+    for (const it of items) {
+      if (it.status !== 'FAIL' && it.status !== 'WARN') continue;
+      const detail = it.detail.length > 300 ? `${it.detail.slice(0, 300)}…` : it.detail;
+      this.log.warn(`weekly audit: ${it.status} ${it.id} ${it.title}: ${detail}`);
+    }
     return report;
   }
 

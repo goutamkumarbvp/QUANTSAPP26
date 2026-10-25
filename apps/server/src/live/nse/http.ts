@@ -255,6 +255,7 @@ export class NseHttp {
   private async getFileFrom(url: string, req: FileRequest): Promise<FileResult> {
     const label = fileLabel(url);
     let warmed = false;
+    let retriedBody = false;
     for (;;) {
       const res = await this.sendWithRetry(url, this.headers(url, 'file', req.referer));
       if (res.status === 404) return { status: 'not-published', url, httpStatus: 404 };
@@ -271,6 +272,17 @@ export class NseHttp {
       if (res.status < 200 || res.status >= 300) throw new NseError(`${label}: HTTP ${res.status}`, 'http', url, res.status);
       const kind = sniff(res.body);
       if (req.expect === 'zip' ? kind !== 'zip' : kind !== 'text' && kind !== 'zip') {
+        // BSE in particular answers a burst of downloads with an empty body or an HTML page for files
+        // it does publish (seen on the owner's PC; the same files loaded minutes later). Retry once,
+        // after a pause and fresh cookies, before calling the file missing.
+        if ((kind === 'empty' || kind === 'html') && !retriedBody) {
+          retriedBody = true;
+          this.log.debug?.(`${label}: got ${describeKind(kind)}, retrying once after a pause`);
+          await this.sleep(Math.min(this.maxBackoffMs, this.backoffMs * 4));
+          this.jar.clear(url);
+          await this.warmUp(req.warmupUrl ?? siteHome(url)).catch(() => {});
+          continue;
+        }
         throw new NseError(`${label}: got ${describeKind(kind)} instead of the ${req.expect} file (not published or moved)`, 'format', res.url, res.status);
       }
       return { status: 'ok', url: res.url, body: res.body, contentType: res.headers.get('content-type') ?? '' };

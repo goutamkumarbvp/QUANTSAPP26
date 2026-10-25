@@ -142,6 +142,21 @@ describe('NseHttp files', () => {
     expect(legacyArchiveUrl('https://www.bseindia.com/x.csv')).toBeUndefined();
   });
 
+  it('BSE answering an empty body or an HTML page is retried once after a pause (owner\'s PC: loaded minutes later)', async () => {
+    const url = 'https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_20260430_F_0000.CSV';
+    const home = 'https://www.bseindia.com/';
+    for (const first of [text(''), html(200)]) {
+      const { http, calls, clock } = testHttp({ [url]: [first, text(fixture('bse-fo-20260430.csv'))], [home]: html(200) });
+      const res = await http.getCsv({ url, header: 'TradDt', hostFallback: false });
+      expect(res.status).toBe('ok');
+      expect(calls.filter((c) => c.url === url)).toHaveLength(2);
+      expect(clock.sleeps).toContain(8000);
+    }
+    // Still not a file on the second try: reported as before.
+    const { http } = testHttp({ [url]: text(''), [home]: html(200) });
+    await expect(http.getCsv({ url, header: 'TradDt', hostFallback: false })).rejects.toMatchObject({ kind: 'format', message: expect.stringContaining('an empty body') });
+  });
+
   it('sends Referer and Origin of www.bseindia.com for BSE files', async () => {
     const url = 'https://www.bseindia.com/download/Bhavcopy/Derivative/BhavCopy_BSE_FO_0_0_0_20260430_F_0000.CSV';
     const { http, calls } = testHttp({ [url]: text(fixture('bse-fo-20260430.csv')) });

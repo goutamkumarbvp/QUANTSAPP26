@@ -463,8 +463,9 @@ function auditSetup(opts: { dbLeak?: boolean; orderMethod?: boolean; offline?: b
     clearCaches: () => 3,
     brokerClientMethods: () => ['constructor', 'quotes', 'optionChain', 'historical', ...(opts.orderMethod ? ['placeOrder'] : [])],
   };
-  const audit = new WeeklyAudit(t, { now: () => now, timers: manualTimers(), log: { info: () => undefined, warn: () => undefined } });
-  return { dir, audit, loads, forgotten, db, journal };
+  const warnings: string[] = [];
+  const audit = new WeeklyAudit(t, { now: () => now, timers: manualTimers(), log: { info: () => undefined, warn: (m: string) => warnings.push(m) } });
+  return { dir, audit, loads, forgotten, db, journal, warnings };
 }
 
 describe('weekly audit', () => {
@@ -529,6 +530,13 @@ describe('weekly audit', () => {
     const l = r.items.find((i) => i.id === 'LEDGER-1')!;
     expect(l.status).toBe('FAIL');
     expect(l.detail).toContain('db.json.corrupt-1760000000000');
+  });
+
+  it('the terminal names each FAIL and WARN item, not only the counts', async () => {
+    const { audit, warnings } = auditSetup({ orderMethod: true });
+    const r = await audit.run('manual');
+    expect(r.verdict).toBe('FAILING');
+    expect(warnings).toContainEqual(expect.stringMatching(/^weekly audit: FAIL SAFE-1 .*: the Kotak client has order-like methods: placeOrder$/));
   });
 
   it('does not wait on downloads when the last backfill found NSE/BSE unreachable', async () => {
