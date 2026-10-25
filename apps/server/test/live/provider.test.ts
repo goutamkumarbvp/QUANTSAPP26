@@ -213,7 +213,8 @@ describe('LiveProvider end to end (fake fetch + fake socket)', () => {
     expect(logins()).toBe(1);
     fail = false;
     await h.timers.advance(40_000); // 60 s back-off (the session's own hold)
-    await flush();
+    // The login writes its state file (real I/O): give it time under a loaded test run, bounded.
+    for (let i = 0; i < 50 && !h.p.health().loggedIn; i++) await flush();
     expect(logins()).toBe(2);
     expect(h.p.health().loggedIn).toBe(true);
   });
