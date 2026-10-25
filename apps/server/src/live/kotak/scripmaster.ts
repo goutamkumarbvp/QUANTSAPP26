@@ -216,7 +216,7 @@ export function decodeStrike(raw: string): number | undefined {
 
 /** File URL of one segment: basename contains the segment name ('nse_cm' ≠ 'nse_com'); the
  *  highest '-vN' variant wins (nse_cm/bse_cm come as 'transformed-v1/*-v1.csv'). */
-export function pickScripFile(urls: readonly string[], segment: Segment): string | undefined {
+export function pickScripFile(urls: readonly string[], segment: Segment | 'mcx_fo'): string | undefined {
   const version = (base: string) => Number(/-v(\d+)\.csv$/i.exec(base)?.[1] ?? 0);
   const cands = urls
     .map((u) => ({ u, base: (u.split(/[?#]/)[0].split('/').pop() ?? '').toLowerCase() }))

@@ -1316,3 +1316,56 @@ export interface OpsActionResponse {
   message: string;
   status: OpsStatusResponse;
 }
+
+// ---- MCX (commodity) option chain: live Kotak quotes only; a value Kotak does not send is null ----
+
+export interface McxLeg {
+  token: string;
+  tradingSymbol: string;
+  ltp: number | null;
+  change: number | null;
+  changePct: number | null;
+  oi: number | null;
+  volume: number | null;
+  bid: number | null;
+  ask: number | null;
+  /** Black-76 implied volatility (decimal) from the LTP and the future price; null when it cannot be solved. */
+  iv: number | null;
+  delta: number | null;
+  /** Exchange time of the quote (epoch ms), else null. */
+  ts: number | null;
+}
+
+export interface McxChainRow {
+  strike: number;
+  ce: McxLeg | null;
+  pe: McxLeg | null;
+}
+
+export interface McxChainResponse {
+  symbol: string;
+  expiry: string;
+  /** Option expiries of the commodity, nearest first. */
+  expiries: string[];
+  lotSize: number;
+  /** The futures contract the options are written on (MCX options settle into futures). */
+  future: { expiry: string; tradingSymbol: string; ltp: number | null; changePct: number | null; ts: number | null };
+  atmStrike: number | null;
+  rows: McxChainRow[];
+  /** Over the strikes shown. */
+  totals: { ceOi: number; peOi: number; pcr: number | null };
+  maxPain: number | null;
+  /** Latest exchange time among the quotes, else null. */
+  asOf: number | null;
+  market: { open: boolean; note: string };
+  /** Kotak instrument-master date the contracts come from. */
+  masterDate: string;
+  /** Why some values are blank (quote calls that failed, no future price …). */
+  gaps: string[];
+}
+
+export interface McxSymbolsResponse {
+  masterDate: string;
+  symbols: { symbol: string; lotSize: number; optionExpiries: string[]; futureExpiries: string[] }[];
+  warnings: string[];
+}

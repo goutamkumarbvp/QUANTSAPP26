@@ -460,6 +460,18 @@ export async function buildApp(
 
   app.get<{ Params: { symbol: string } }>('/api/chain/:symbol', async (req) => buildOptionChain(md, req.params.symbol, qs(req).expiry || undefined, { at: at(req) }));
 
+  // MCX commodity options (live Kotak quotes only).
+  const mcx = () => {
+    if (!md.mcx) throw new NoLiveData('MCX option chain is not available with this data provider');
+    return md.mcx;
+  };
+  app.get('/api/mcx/symbols', async () => mcx().symbols());
+  app.get<{ Params: { symbol: string } }>('/api/mcx/chain/:symbol', async (req) => {
+    const expiry = qs(req).expiry || undefined;
+    if (expiry !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) throw Object.assign(new Error('expiry must be YYYY-MM-DD'), { statusCode: 400 });
+    return mcx().chain(req.params.symbol, expiry);
+  });
+
   app.get<{ Params: { symbol: string } }>('/api/futures/:symbol', async (req) => {
     const t = at(req);
     return t !== undefined ? futuresQuotesAt(md, req.params.symbol, t) : futuresQuotes(md, req.params.symbol);

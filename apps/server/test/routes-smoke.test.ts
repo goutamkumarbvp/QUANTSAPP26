@@ -148,6 +148,9 @@ const ROUTES: RouteCase[] = [
   G('/api/clock', '/api/clock', { full200: true }),
   G('/api/quotes', '/api/quotes?symbols=NIFTY,BANKNIFTY,RELIANCE', { full200: true, liveOnly: true }),
   G('/api/indices', '/api/indices', { full200: true, liveOnly: true }),
+  // MCX: the fake provider has no MCX source → 503 with the reason; a malformed expiry is a 400.
+  G('/api/mcx/symbols', '/api/mcx/symbols', { liveOnly: true }),
+  G('/api/mcx/chain/:symbol', '/api/mcx/chain/CRUDEOIL?expiry=2026-11-16', { liveOnly: true }),
   G('/api/expiries/:symbol', '/api/expiries/NIFTY', { full200: true }),
   G('/api/chain/:symbol', '/api/chain/NIFTY', { full200: true, liveOnly: true }),
   G('/api/futures/:symbol', '/api/futures/NIFTY', { full200: true, liveOnly: true }),

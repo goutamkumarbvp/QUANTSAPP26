@@ -17,6 +17,7 @@
  * restart mid-session, ended after 15:30), the stock-option sweep, EOD backfill + daily schedule.
  * healthReport() is JSON-safe and carries no secrets.
  */
+import { McxService } from './kotak/mcx';
 import { MARKET_CLOSE_MIN, istParts } from '@q26/core';
 import { ExchangeCalendar, isIsoDate } from './calendar';
 import { LiveClock } from './clock';
@@ -298,6 +299,8 @@ interface JobSpec {
 
 export class LiveProvider implements MarketDataProvider {
   readonly ref: ScripMaster;
+  /** MCX commodity option chain (separate from the NSE/BSE universe). */
+  readonly mcx: McxService;
   readonly calendar: ExchangeCalendar;
   readonly clock: LiveClock;
   readonly live: KotakLiveMarket;
@@ -373,6 +376,20 @@ export class LiveProvider implements MarketDataProvider {
       dataDir: config.dataDir,
       fetch: deps.kotakFetch,
       logger: this.log,
+      filePaths: async () => {
+        if (!rest) throw new NoLiveData(kotakError ?? 'Kotak credentials missing');
+        return (await rest.scripMasterPaths()).files;
+      },
+    });
+
+    this.mcx = new McxService({
+      dataDir: config.dataDir,
+      fetch: deps.kotakFetch,
+      logger: this.log,
+      rest,
+      restUnavailable: kotakError,
+      now: this.now,
+      r: config.riskFreeRate,
       filePaths: async () => {
         if (!rest) throw new NoLiveData(kotakError ?? 'Kotak credentials missing');
         return (await rest.scripMasterPaths()).files;

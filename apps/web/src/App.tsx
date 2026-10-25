@@ -10,6 +10,7 @@ import { useLiveConnection } from './lib/ws';
 const Home = lazy(() => import('./pages/Home'));
 const Tools = lazy(() => import('./pages/Tools'));
 const OptionChainPage = lazy(() => import('./pages/OptionChain'));
+const McxChain = lazy(() => import('./pages/McxChain'));
 const Watchlist = lazy(() => import('./pages/Watchlist'));
 const Synopsis = lazy(() => import('./pages/Synopsis'));
 const FiiDii = lazy(() => import('./pages/FiiDii'));
@@ -77,6 +78,7 @@ export function App() {
             <Route path="/" element={<Home />} />
             <Route path="/tools" element={<Tools />} />
             <Route path="/option-chain" element={<OptionChainPage />} />
+            <Route path="/mcx-chain" element={<McxChain />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/synopsis" element={<Synopsis />} />
             <Route path="/fii-dii" element={<FiiDii />} />

@@ -17,6 +17,7 @@ export const NAV: NavGroup[] = [
       { to: '/', label: 'Home', icon: '⌂', desc: 'Indices, movers, build-up and flows at a glance' },
       { to: '/watchlist', label: 'Watchlist', icon: '☆', desc: 'Track underlyings, futures and option contracts' },
       { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up' },
+      { to: '/mcx-chain', label: 'MCX Option Chain', icon: '⛽', desc: 'Commodity options (crude, gold, silver …) on live Kotak quotes' },
       { to: '/synopsis', label: 'Synopsis', icon: '▦', desc: 'Heat-map of the whole F&O market' },
       { to: '/fii-dii', label: 'FII / DII', icon: '₹', desc: 'Institutional cash-market flows' },
       { to: '/participants', label: 'Participant OI', icon: '👥', desc: 'Client, DII, FII and Pro positions' },

@@ -9,6 +9,7 @@
  * Time is real IST time: dates are 'YYYY-MM-DD', a session minute is minutes since 09:15
  * (0..375), timestamps are epoch milliseconds.
  */
+import type { McxService } from './kotak/mcx';
 import type { FiiDiiDay, Greeks, MarketClockInfo, ParticipantDay } from '@q26/core';
 
 /* ------------------------------------------------------------------------------------------ */
@@ -448,6 +449,8 @@ export interface MarketDataProvider {
    * they are streamed in the 'user' tier, above the index chains and ad-hoc watches. Null clears it.
    */
   setUserContracts(fn: (() => Iterable<UserContract>) | null): void;
+  /** MCX commodity option chain; absent on providers without Kotak MCX access. */
+  mcx?: Pick<McxService, 'symbols' | 'chain'>;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
