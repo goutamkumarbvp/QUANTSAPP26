@@ -11,6 +11,9 @@
   "engines": {
     "node": ">=20.12"
   },
+  "allowScripts": {
+    "esbuild": true
+  },
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w @q26/server\" \"npm run dev -w @q26/web\"",
     "build": "npm run build -w @q26/web && npm run build -w @q26/server",
