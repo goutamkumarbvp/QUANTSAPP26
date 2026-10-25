@@ -53,6 +53,8 @@ There is no back-catalogue of synthetic history. History comes from:
 
 ## Quick start
 
+**One click:** Windows: double-click `START-Q26.bat`. macOS/Linux: `./start-q26.sh`. The first run creates `.env` (fill it in), installs and builds; then the dashboard opens at http://localhost:8787.
+
 Requires Node.js ≥ 20.12 (the server loads `.env` with `process.loadEnvFile`).
 
 ```bash
