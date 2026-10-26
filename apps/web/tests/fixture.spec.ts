@@ -81,6 +81,21 @@ test('order flow: labelled an estimate from live ticks; feed-gap volume and part
   await clean(page, watch);
 });
 
+test('order book: Order & Trade chart — 1-min candles with buyer vs seller initiated quantity and a direction read', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/order-book', /Order Book Analytics/);
+  const card = page.locator('section', { hasText: 'Order & Trade chart' });
+  await expect(card.getByText(/Order & Trade chart — NIFTY/)).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByText(/^Read · last \d+ min$/)).toBeVisible();
+  await expect(card.getByText(/Buyers in control|Sellers in control|Buying absorbed|Selling absorbed|Balanced/).first()).toBeVisible();
+  await expect(card.getByText(/Spike = at least 3× the median/)).toBeVisible();
+  await expect(card.locator('canvas').first()).toBeVisible();
+  await card.getByRole('tab', { name: 'Two panes' }).click();
+  await card.scrollIntoViewIfNeeded();
+  await shot(page, info, 'order-trade-chart');
+  await clean(page, watch);
+});
+
 test('IV chart: ATM IV solved from live premiums; IV rank blank with its reason', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/vol/iv-chart', /IV Chart/);

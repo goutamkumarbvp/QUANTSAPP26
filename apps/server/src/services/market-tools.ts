@@ -175,6 +175,9 @@ interface FlowMin {
   gapVolume: number;
   /** The minute's volume is a lower bound (MinuteRecord.partial). */
   partial: boolean;
+  open: number | null;
+  high: number | null;
+  low: number | null;
   close: number | null;
 }
 
@@ -191,7 +194,7 @@ function flowOf(r: MinuteRecord): FlowMin {
   const sell = isNum(r.sellVolume) && r.sellVolume > 0 ? r.sellVolume : 0;
   const unclassified = Math.max(0, (isNum(r.volume) ? r.volume : 0) - buy - sell);
   const gapVolume = isNum(r.gapVolume) && r.gapVolume > 0 ? r.gapVolume : 0;
-  return { ts: r.ts, volume: buy + sell + unclassified, buyVolume: buy, sellVolume: sell, unclassified, gapVolume, partial: r.partial === true, close: r.traded ? r.close : null };
+  return { ts: r.ts, volume: buy + sell + unclassified, buyVolume: buy, sellVolume: sell, unclassified, gapVolume, partial: r.partial === true, open: r.traded ? r.open : null, high: r.traded ? r.high : null, low: r.traded ? r.low : null, close: r.traded ? r.close : null };
 }
 
 /**
@@ -1012,6 +1015,9 @@ export class MarketTools {
         delta,
         cumDelta: cum,
         buyPct: classified > 0 ? r1((f.buyVolume / classified) * 100) : null,
+        open: f.open,
+        high: f.high,
+        low: f.low,
         close: f.close,
       };
     });

@@ -202,6 +202,11 @@ describe('order flow (recorded quote-rule estimate)', () => {
       [150, 75, 75, 0, 0, -75],
     ]);
     for (const m of of.minutes) expect(m.buyVolume + m.sellVolume + m.unclassified).toBe(m.volume);
+    // Each minute is also a 1-minute candle (Order & Trade chart): first, highest, lowest and last trade (the 11:00:05 tick is only the volume baseline, not a trade).
+    expect(of.minutes.map((m) => [m.open, m.high, m.low, m.close])).toEqual([
+      [25_100.1, 25_100.1, 25_099.9, 25_099.9],
+      [25_100.1, 25_100.1, 25_100, 25_100],
+    ]);
     expect(of.session).toMatchObject({ volume: 600, buyVolume: 225, sellVolume: 300, unclassified: 75, unclassifiedPct: 12.5, buyPct: 42.9, sentiment: 'Sellers dominant' });
     expect(of.session.volume).toBe(300_600 - 300_000); // Δ cumulative session volume since recording began
     expect(of.minutes[0].buyPct).toBe(40); // 150 / (150 + 225) of the classified volume

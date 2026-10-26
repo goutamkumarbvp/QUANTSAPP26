@@ -1037,7 +1037,10 @@ export interface OrderFlowMinute {
   cumDelta: number;
   /** Buy share of the classified volume (%); null when nothing was classified. */
   buyPct: number | null;
-  /** Last trade price of the minute; null when the minute had no trade. */
+  /** Open / high / low / last trade price of the minute (1-minute candle); null when the minute had no trade. */
+  open: number | null;
+  high: number | null;
+  low: number | null;
   close: number | null;
 }
 

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
 import { FlowSplit } from '../components/trend';
+import { OrderTradeChart } from '../components/OrderTradeChart';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
 import { ExpirySelect, pickStrike, StrikeSelect, SymbolSelect } from '../components/pickers';
@@ -31,6 +32,9 @@ export default function OrderBook() {
   const ready = type === 'FUT' || k !== undefined;
   const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000, ready);
   const flow = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, '', 5], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 5 })}`, 2000, ready);
+  // The whole session, minute by minute, for the Order & Trade chart.
+  const trade = useLive<OrderFlowResponse>(['order-trade', symbol, type, expiry, k], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 375 })}`, 5000, ready);
+  const tradeData = trade.isPlaceholderData || isNoLiveData(trade.error) ? undefined : trade.data;
   const c = useChartColors();
   // Depth of another contract (kept while the new one loads) is never shown as this one's.
   const d = q.isPlaceholderData || isNoLiveData(q.error) ? undefined : q.data;
@@ -67,7 +71,7 @@ export default function OrderBook() {
   };
   return (
     <div className="space-y-3">
-      <PageHeader title="Order Book Analytics" subtitle="Five-level market depth with order-flow metrics — imbalance, micro-price, VWAP, spread">
+      <PageHeader title="Order Book Analytics" subtitle="Five-level market depth with order-flow metrics, and the Order & Trade chart: buyer vs seller initiated quantity per minute against the price">
         <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setStrike(undefined); }} />
         <Segmented value={type} onChange={setType} options={[{ value: 'FUT', label: 'Future' }, { value: 'CE', label: 'Call' }, { value: 'PE', label: 'Put' }]} />
         <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} futures={type === 'FUT'} />
@@ -176,6 +180,13 @@ export default function OrderBook() {
           </>
         )}
       </Loadable>
+      <div className="mt-3">
+        {tradeData ? (
+          <OrderTradeChart d={tradeData} />
+        ) : trade.error ? (
+          <Card title="Order & Trade chart"><ErrorState error={trade.error} compact title="No order & trade data" /></Card>
+        ) : null}
+      </div>
       <OrderTicket spec={ticket} onClose={() => setTicket(null)} />
     </div>
   );
