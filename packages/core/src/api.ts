@@ -314,7 +314,18 @@ export interface DailyPcrPoint {
 export interface PcrResponse extends DataGaps {
   symbol: string;
   expiry: string | null;
-  intraday: { ts: number; pcr: number | null; spot: number | null; ceOi: number | null; peOi: number | null }[];
+  intraday: {
+    ts: number;
+    pcr: number | null;
+    spot: number | null;
+    ceOi: number | null;
+    peOi: number | null;
+    /** Today's OI change vs the previous close, summed over the same strikes (null without the official previous-close OI). */
+    ceChange: number | null;
+    peChange: number | null;
+    /** Change-in-OI PCR = peChange / ceChange; null when the call OI change is too small to divide by (under 0.1% of call OI). */
+    changePcr: number | null;
+  }[];
   daily: DailyPcrPoint[];
   coverage: { intraday: string; daily: string };
 }

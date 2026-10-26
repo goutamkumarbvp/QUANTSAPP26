@@ -23,7 +23,7 @@ import {
 import { black76Price, timeToExpiry } from '../src/live/pricing';
 import type { SymbolRow } from '../src/live/store/history';
 import { NoLiveData, keyId, type DailyOption, type InstrumentKey, type OptKind } from '../src/live/types';
-import { Analytics, IV_WINDOW, RECORDED_CHAIN_COVERAGE, SURFACE_MONEYNESS, inWindows, sumFiiDii } from '../src/services/analytics';
+import { Analytics, IV_WINDOW, RECORDED_CHAIN_COVERAGE, SURFACE_MONEYNESS, changePcrOf, inWindows, sumFiiDii } from '../src/services/analytics';
 import { buildOptionChain, futKey, optKey, sessionsBack, spotKey } from '../src/services/live';
 import { Pricer } from '../src/services/pricer';
 import { FakeProvider, loadSampleBook } from './support/fake-provider';
@@ -221,6 +221,14 @@ describe('multi-strike series', () => {
 });
 
 describe('OI trend, PCR and max pain', () => {
+  it('change-in-OI PCR = put OI added ÷ call OI added; blank when unknown or the call change is too small', () => {
+    expect(changePcrOf(10_000, 25_000, 1_000_000)).toBe(2.5);
+    expect(changePcrOf(-20_000, 10_000, 1_000_000)).toBe(-0.5); // call unwinding
+    expect(changePcrOf(500, 25_000, 1_000_000)).toBeNull(); // under 0.1% of call OI
+    expect(changePcrOf(null, 25_000, 1_000_000)).toBeNull();
+    expect(changePcrOf(10_000, null, 1_000_000)).toBeNull();
+  });
+
   it('OI trend reads the recorded chain minutes; OI change needs the official previous-close OI', () => {
     const { p, an, w1 } = setup();
     let r = an.oiTrend('NIFTY', w1, PREV, 60);
@@ -263,6 +271,12 @@ describe('OI trend, PCR and max pain', () => {
     expect(both.intraday).toHaveLength(7);
     expect(both.daily).toHaveLength(2);
     expect(both.coverage.intraday).toMatch(/streamed strikes \(±8 %\)/);
+    // Change-in-OI PCR: today's put OI added ÷ call OI added over the same strikes (vs the official previous close).
+    for (const pt of both.intraday) {
+      expect(typeof pt.ceChange === 'number' && typeof pt.peChange === 'number').toBe(true);
+      expect(pt.changePcr).toBe(changePcrOf(pt.ceChange, pt.peChange, pt.ceOi));
+    }
+    expect(both.intraday.some((pt) => typeof pt.changePcr === 'number')).toBe(true);
     const today = an.pcr('NIFTY', undefined, undefined, 5, 5);
     expect(today.intraday).toEqual([]);
     expect(today.expiry).toBeNull();

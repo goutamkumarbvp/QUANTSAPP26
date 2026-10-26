@@ -220,7 +220,7 @@ describe('Put-Call Ratio', () => {
   const key = ['pcr', 'NIFTY', undefined, 5, ''];
   const data: PcrResponse = {
     symbol: 'NIFTY', expiry: '2026-10-20',
-    intraday: [{ ts: T0 + 5 * 60_000, pcr: 1.1, spot: 24100, ceOi: 1, peOi: 2 }, { ts: T0 + 10 * 60_000, pcr: null, spot: null, ceOi: null, peOi: null }],
+    intraday: [{ ts: T0 + 5 * 60_000, pcr: 1.1, spot: 24100, ceOi: 1, peOi: 2, ceChange: 40_000, peChange: 98_000, changePcr: 2.45 }, { ts: T0 + 10 * 60_000, pcr: null, spot: null, ceOi: null, peOi: null, ceChange: null, peChange: null, changePcr: null }],
     daily: [{ date: '2026-10-15', pcr: 0.9, close: null, expiry: '2026-10-20' }, { date: '2026-10-16', pcr: 1.2, close: 24000, expiry: '2026-10-20' }],
     coverage: { intraday: 'Recorded chain totals: streamed strikes (±8 %)', daily: 'Official F&O bhavcopy: every strike of the nearest expiry' },
   };
@@ -230,6 +230,17 @@ describe('Put-Call Ratio', () => {
     expect(out).toContain('official F&amp;O files'.replace('&amp;', '&'));
     expect(out).toContain('Official F&O bhavcopy: every strike of the nearest expiry');
     expect(out).toContain('2 official sessions loaded');
+  });
+  it("change-in-OI PCR (today only): the ratio and both OI changes; blank with the reason without the previous close", () => {
+    const out = decode(render(<Pcr />, [[key, data]]));
+    expect(out).not.toMatch(BAD);
+    expect(out).toContain('Change-in-OI PCR — today only');
+    expect(out).toContain('2.45');
+    expect(out).toContain('more puts written');
+    const none = { ...data, intraday: data.intraday.map((p) => ({ ...p, ceChange: null, peChange: null, changePcr: null })), gaps: { 'intraday.change': 'Official F&O file for 2026-10-16 not loaded (or has no NIFTY 2026-10-20 rows): OI change vs the previous close is blank' } };
+    const blank = decode(render(<Pcr />, [[key, none]]));
+    expect(blank).toContain('OI change vs the previous close is blank');
+    expect(blank).not.toContain('more puts written');
   });
   it('intraday blank with the recording reason while the daily part still shows', () => {
     const out = decode(render(<Pcr />, [[key, { ...data, intraday: [], gaps: { intraday: 'No recorded data for 2026-10-12 — recording started 2026-10-14' } }]]));

@@ -354,7 +354,9 @@ describe('official, OI and strategy-tool routes', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ symbol: 'NIFTY', expiry: b.expiries.NIFTY[0] });
     expect(res.body.intraday.length).toBeGreaterThan(20);
-    expect(res.body.intraday[0]).toEqual({ ts: expect.any(Number), pcr: expect.any(Number), spot: expect.any(Number), ceOi: expect.any(Number), peOi: expect.any(Number) });
+    // No official previous-close file in this book: the OI changes and the change PCR are blank (null), not 0.
+    expect(res.body.intraday[0]).toEqual({ ts: expect.any(Number), pcr: expect.any(Number), spot: expect.any(Number), ceOi: expect.any(Number), peOi: expect.any(Number), ceChange: null, peChange: null, changePcr: null });
+    expect(res.body.gaps?.['intraday.change']).toMatch(/OI change vs the previous close is blank/);
     expect(res.body.coverage).toEqual({ intraday: expect.stringMatching(/streamed strikes/), daily: expect.any(String) });
     expect(res.body.gaps?.daily).toEqual(expect.any(String));
   });

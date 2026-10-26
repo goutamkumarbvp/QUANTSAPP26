@@ -265,6 +265,17 @@ class BucketCache<V> {
   }
 }
 
+/**
+ * Change-in-OI PCR: put OI added today / call OI added today (both vs the previous close). Null when either
+ * change is unknown, or the call change is too small to divide by (under 0.1% of call OI: the ratio would spike).
+ */
+export function changePcrOf(ceChange: number | null, peChange: number | null, ceOi: number | null): number | null {
+  if (ceChange === null || peChange === null) return null;
+  const floor = isNum(ceOi) && ceOi > 0 ? ceOi * 0.001 : 1;
+  if (Math.abs(ceChange) < floor) return null;
+  return Math.round((peChange / ceChange) * 1000) / 1000;
+}
+
 export class Analytics {
   private readonly snapCache = new BucketCache<OptionSnapshotRow[]>(4);
   private readonly futCache = new BucketCache<FuturesBuildUpRow[]>(4);
@@ -1044,7 +1055,7 @@ export class Analytics {
     return {
       symbol: s,
       expiry: trend?.expiry ?? null,
-      intraday: (trend?.points ?? []).map((p) => ({ ts: p.ts, pcr: p.pcr, spot: p.spot, ceOi: p.ceOi, peOi: p.peOi })),
+      intraday: (trend?.points ?? []).map((p) => ({ ts: p.ts, pcr: p.pcr, spot: p.spot, ceOi: p.ceOi, peOi: p.peOi, ceChange: p.ceChange, peChange: p.peChange, changePcr: changePcrOf(p.ceChange, p.peChange, p.ceOi) })),
       daily,
       coverage: { intraday: `Recorded chain totals: ${RECORDED_CHAIN_COVERAGE}`, daily: 'Official F&O bhavcopy: every strike of the nearest expiry' },
       ...gaps.out(),

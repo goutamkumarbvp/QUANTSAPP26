@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
-import { pcrSentiment, type PcrResponse } from '@q26/core';
+import { formatTimeIST, pcrSentiment, type PcrResponse } from '@q26/core';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, Gaps, Loadable, PageHeader, Stat } from '../../components/ui';
 import { qs } from '../../lib/api';
-import { formatDate, formatFixed, formatIndian, isNum } from '../../lib/format';
+import { formatCompact, formatDate, formatFixed, formatIndian, isNum } from '../../lib/format';
 import { useLive } from '../../lib/hooks';
 import { useApp, useTicks } from '../../lib/store';
 
@@ -51,6 +51,25 @@ export default function Pcr() {
       ],
     };
   }, [q.data, interval, c]);
+  // Change-in-OI PCR: today's put OI added ÷ call OI added (vs the previous close), from 09:15.
+  const changeChart = useMemo(() => {
+    const pts = q.data?.intraday ?? [];
+    const step = interval * MIN;
+    return {
+      ...baseOption(c),
+      xAxis: timeAxis(c),
+      yAxis: [
+        { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => v.toFixed(2) } },
+        { type: 'value', scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => formatCompact(v, 1) } },
+      ],
+      dataZoom: [{ type: 'inside' }],
+      series: [
+        { name: 'Change PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: line(pts, step, (p) => p.changePcr), markLine: { symbol: 'none', silent: true, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
+        { name: 'Put OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.up }, data: line(pts, step, (p) => p.peChange) },
+        { name: 'Call OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.down }, data: line(pts, step, (p) => p.ceChange) },
+      ],
+    };
+  }, [q.data, interval, c]);
   const daily = useMemo(() => {
     const d = q.data?.daily ?? [];
     return {
@@ -72,9 +91,11 @@ export default function Pcr() {
   const last = withPcr[withPcr.length - 1];
   const first = withPcr[0];
   const pcrs = withPcr.map((p) => p.pcr as number);
+  const withChange = (q.data?.intraday ?? []).filter((p) => isNum(p.ceChange) && isNum(p.peChange));
+  const lastChange = withChange[withChange.length - 1];
   return (
     <div className="space-y-3">
-      <PageHeader title="Put-Call Ratio" subtitle="PCR = total put OI ÷ total call OI. Rising PCR = put writing (support building); falling = call writing.">
+      <PageHeader title="Put-Call Ratio" subtitle="PCR = total put OI ÷ total call OI; Change PCR = today's put OI added ÷ call OI added. Rising = put writing (support building); falling = call writing.">
         <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setExpiry(undefined); }} />
         <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} />
         <SessionDate value={date} onChange={setDate} max={today} />
@@ -96,6 +117,20 @@ export default function Pcr() {
               <div className="mt-2 space-y-1">
                 <Coverage text={d.coverage.intraday} />
                 <Gaps gaps={subset(d.gaps, (k) => k.startsWith('intraday.'))} />
+              </div>
+            </Card>
+            <Card title="Change-in-OI PCR — today only (put OI added ÷ call OI added, since the previous close)">
+              {lastChange && (
+                <div className="mb-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <Stat label="Change PCR now" value={formatFixed(lastChange.changePcr, 2)} tone={isNum(lastChange.changePcr) ? (lastChange.changePcr >= 1 ? 'up' : 'down') : undefined} reason="Call OI change too small to divide by" sub={isNum(lastChange.changePcr) ? (lastChange.changePcr >= 1 ? 'more puts written' : 'more calls written') : undefined} />
+                  <Stat label="Put OI added today" value={formatCompact(lastChange.peChange, 2)} tone={(lastChange.peChange as number) >= 0 ? 'up' : 'down'} />
+                  <Stat label="Call OI added today" value={formatCompact(lastChange.ceChange, 2)} tone={(lastChange.ceChange as number) >= 0 ? 'down' : 'up'} />
+                  <Stat label="As of" value={formatTimeIST(lastChange.ts)} />
+                </div>
+              )}
+              <Chart option={changeChart} height={320} blank={withChange.length ? undefined : d.gaps?.['intraday.change'] ?? d.gaps?.intraday ?? 'No recorded chain minutes for this session'} />
+              <div className="mt-2 space-y-1">
+                <Coverage text="Same strikes on both sides of the ratio: the recorded strikes that also have an official previous-close OI. A negative value means one side's OI fell (unwinding). The ratio is blank while the call OI change is under 0.1% of call OI." />
               </div>
             </Card>
             <Card title="End-of-day PCR (nearest expiry) — official F&O files, last 60 sessions">
