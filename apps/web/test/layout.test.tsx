@@ -94,3 +94,14 @@ describe('Layout: feed status chip and banner', () => {
     expect(html).toContain('no live price yet'); // the other indices have no quote yet
   });
 });
+
+describe('server not answering', () => {
+  it('shows a waiting screen with what to check (it retries by itself), not a dead error', async () => {
+    const { ServerWaiting } = await import('../src/App');
+    const html = renderToStaticMarkup(<ServerWaiting tries={3} reason="Failed to fetch" />);
+    expect(html).toContain('Waiting for the Q26 server… (try 3)');
+    expect(html).toContain('opens by itself as soon as the server answers');
+    expect(html).toContain('START-Q26');
+    expect(html).toContain('ipconfig');
+  });
+});

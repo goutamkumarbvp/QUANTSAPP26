@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
 import { ErrorBox, Spinner } from './components/ui';
-import { ensureSession } from './lib/api';
+import { ApiError, ensureSession } from './lib/api';
 import { useApp } from './lib/store';
 import { useLiveConnection } from './lib/ws';
 
@@ -66,16 +66,61 @@ const Learn = page(() => import('./pages/Learn'));
 const Settings = page(() => import('./pages/Settings'));
 const NotFound = page(() => import('./pages/NotFound'));
 
+/** Longest pause between two tries while the server does not answer. */
+const SERVER_RETRY_MAX_MS = 10_000;
+
+/** Shown while the server does not answer: what is happening and what to check. Retries by itself. */
+export function ServerWaiting({ tries, reason }: { tries: number; reason: string }) {
+  return (
+    <div className="mx-auto max-w-xl space-y-3 rounded-lg border border-line bg-panel p-4 text-sm" role="status">
+      <Spinner label={`Waiting for the Q26 server… (try ${tries})`} />
+      <p>The browser cannot reach the Q26 server ({reason}). The page opens by itself as soon as the server answers.</p>
+      <ul className="list-disc space-y-1 pl-5 text-muted">
+        <li>On the PC: the <b>START-Q26</b> window must be open and show “Q26 Options on :8787”. The first start takes a minute or two.</li>
+        <li>If that window closed or shows an error, start <b>START-Q26.bat</b> again (the error text there says what is wrong).</li>
+        <li>On a phone: use the PC's address (<code>http://&lt;PC IPv4&gt;:8787</code> from <code>ipconfig</code>), the same Wi-Fi, and allow Node.js through Windows Firewall on private networks.</li>
+      </ul>
+    </div>
+  );
+}
+
 export function App() {
   const setUser = useApp((s) => s.setUser);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  const [waiting, setWaiting] = useState<{ tries: number; reason: string } | null>(null);
+
+  // The server not answering at all (not started yet, stopped, wrong address, firewall) is retried until
+  // it answers, then the app opens by itself; an answer that is an error is shown as before.
   useEffect(() => {
-    ensureSession()
-      .then((u) => setUser(u))
-      .catch((e) => setError(e))
-      .finally(() => setReady(true));
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = (tries: number) => {
+      ensureSession()
+        .then((u) => {
+          if (stopped) return;
+          setUser(u);
+          setWaiting(null);
+          setReady(true);
+        })
+        .catch((e) => {
+          if (stopped) return;
+          if (e instanceof ApiError) {
+            setError(e);
+            setWaiting(null);
+            setReady(true);
+            return;
+          }
+          setWaiting({ tries, reason: e instanceof Error ? e.message : String(e) });
+          timer = setTimeout(() => attempt(tries + 1), Math.min(SERVER_RETRY_MAX_MS, 2000 * 2 ** Math.min(tries, 3)));
+        });
+    };
+    attempt(1);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }, [setUser]);
 
   useEffect(() => {
@@ -92,7 +137,9 @@ export function App() {
           <ErrorBox error={`Could not reach the server: ${error instanceof Error ? error.message : String(error)}`} />
         </div>
       ) : null}
-      {!ready ? (
+      {waiting ? (
+        <ServerWaiting tries={waiting.tries} reason={waiting.reason} />
+      ) : !ready ? (
         <Spinner label="Starting…" />
       ) : (
         <ErrorBoundary resetKey={location.pathname}>
