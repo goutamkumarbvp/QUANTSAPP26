@@ -35,7 +35,7 @@ import { maxPain, SESSION_MINUTES } from '@q26/core';
 import { chainAtmIv } from './pricing';
 import type { IntradayWriter, LiveBarSource } from './store/intraday';
 import { keyId } from './types';
-import type { ChainMinute, ChainRowLive, InstrumentKey, LiveMarket, LiveQuote, MinuteRecord, Pricing, RawChain, ReferenceData, SessionClock, TradingCalendar } from './types';
+import type { ChainMinute, ChainRowLive, InstrumentKey, LiveMarket, LiveQuote, MinuteRecord, Pricing, RawChain, ReferenceData, SessionClock, TickMeta, TradingCalendar } from './types';
 
 const MINUTE_MS = 60_000;
 
@@ -181,7 +181,7 @@ export class Recorder implements LiveBarSource {
 
   /** Subscribe to ticks and start the flush timer (idempotent). */
   start(): void {
-    if (!this.unsubscribe) this.unsubscribe = this.opts.live.onTick((q) => this.onTick(q));
+    if (!this.unsubscribe) this.unsubscribe = this.opts.live.onTick((q, meta) => this.onTick(q, meta));
     if (this.timer === null) this.timer = this.timers.setInterval(() => this.flushDue(), this.opts.flushIntervalMs ?? 1000);
   }
 
@@ -252,7 +252,12 @@ export class Recorder implements LiveBarSource {
 
   /* ---------------------------------- ticks ---------------------------------- */
 
-  onTick(q: LiveQuote): void {
+  /**
+   * `meta.stream === false` (a REST snapshot, not a tick): its prices and volume are recorded, but the
+   * volume is never split into buyer / seller initiated — between two snapshots many trades happened at
+   * unknown bid/ask, so it is booked unclassified. Only live ticks are classified.
+   */
+  onTick(q: LiveQuote, meta?: TickMeta): void {
     const { calendar, clock } = this.opts;
     const now = clock.now();
     const today = calendar.session(now).date;
@@ -268,9 +273,10 @@ export class Recorder implements LiveBarSource {
     }
     const inst = this.inst(q.key);
 
-    // State: classification uses the quote seen BEFORE this tick.
-    const prevBid = inst.bid;
-    const prevAsk = inst.ask;
+    // State: classification uses the quote seen BEFORE this tick (stream ticks only, see above).
+    const tick = meta?.stream !== false;
+    const prevBid = tick ? inst.bid : undefined;
+    const prevAsk = tick ? inst.ask : undefined;
     const open = calendar.ts(today, 0);
     // Feed gap: no tick of this instrument since before the start of the previous minute (counted
     // from the open: the pre-open's last tick is not a gap), e.g. a dropped feed, a reconnect or a

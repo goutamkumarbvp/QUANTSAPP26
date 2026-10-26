@@ -2,8 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { SynopsisResponse, SynopsisRow } from '@q26/core';
 import { Chart, useChartColors } from '../components/Chart';
-import { DataTable } from '../components/DataTable';
-import { BuildUpBadge, Card, Chg, Coverage, Dash, Gaps, Loadable, PageHeader, Segmented, Val } from '../components/ui';
+import { Card, Coverage, Gaps, Loadable, PageHeader, Segmented } from '../components/ui';
 import { formatCompact, formatFixed, formatIndian, formatPct, formatSigned, isNum } from '../lib/format';
 import { useLive } from '../lib/hooks';
 import { useApp } from '../lib/store';
@@ -19,7 +18,6 @@ function mappable(r: SynopsisRow, metric: Metric): r is SynopsisRow & { turnover
 export default function Synopsis() {
   const q = useLive<SynopsisResponse>(['synopsis'], '/synopsis', 10000);
   const [metric, setMetric] = useState<Metric>('changePct');
-  const [mode, setMode] = useState<'map' | 'table'>('map');
   const setSymbol = useApp((s) => s.setSymbol);
   const navigate = useNavigate();
   const c = useChartColors();
@@ -56,50 +54,25 @@ export default function Synopsis() {
     <div className="space-y-3">
       <PageHeader title="Synopsis" subtitle="The F&O stock universe in one heat-map — sized by turnover, coloured by price, OI or IV change">
         <Segmented value={metric} onChange={setMetric} options={(Object.keys(LABEL) as Metric[]).map((m) => ({ value: m, label: LABEL[m] }))} />
-        <Segmented value={mode} onChange={setMode} options={[{ value: 'map', label: 'Heat-map' }, { value: 'table', label: 'Table' }]} />
       </PageHeader>
       <Loadable q={q} hint="Needs live stock prices and the near-month futures; stock options refresh about every 90 seconds.">
         {(d) => (
           <>
             <div className="space-y-1">
               <Coverage text={d.coverage} />
-              {mode === 'map' && d.rows.length > mapped.length && (
-                <Coverage text={`${d.rows.length - mapped.length} of ${d.rows.length} stocks are not on the map: no turnover (size) or no ${LABEL[metric]} (colour) yet. They are in the table.`} />
+              {d.rows.length > mapped.length && (
+                <Coverage text={`${d.rows.length - mapped.length} of ${d.rows.length} stocks are not on the map: no turnover (size) or no ${LABEL[metric]} (colour) yet. Their futures are in the Futures build-up view.`} />
               )}
               <Gaps gaps={d.gaps} />
             </div>
-            {mode === 'map' ? (
-              <Card pad={false}>
-                <Chart
-                  option={option}
-                  height="70vh"
-                  blank={mapped.length ? undefined : d.rows.length ? `No stock has both a turnover and ${LABEL[metric]} yet` : 'No stock has a live price yet'}
-                  onEvents={{ click: (p: unknown) => { const r = (p as { data?: { row?: SynopsisRow } }).data?.row; if (r) { setSymbol(r.symbol); navigate('/option-chain'); } } }}
-                />
-              </Card>
-            ) : (
-              <Card pad={false}>
-                <DataTable
-                  rows={d.rows}
-                  rowKey={(r) => r.symbol}
-                  initialSort={{ key: metric, dir: 'desc' }}
-                  onRowClick={(r) => { setSymbol(r.symbol); navigate('/option-chain'); }}
-                  empty="No stock has a live price yet"
-                  columns={[
-                    { key: 'symbol', label: 'Symbol', value: (r) => r.symbol, render: (r) => <span className="font-semibold">{r.symbol}</span> },
-                    { key: 'sector', label: 'Sector', value: (r) => r.sector, hideSm: true },
-                    { key: 'ltp', label: 'LTP', num: true, value: (r) => r.ltp, render: (r) => formatIndian(r.ltp) },
-                    { key: 'changePct', label: '% Chg', num: true, value: (r) => r.changePct, render: (r) => <Chg value={r.changePct} pct reason="Needs the previous close" /> },
-                    { key: 'oiChangePct', label: 'OI % Chg', num: true, value: (r) => r.oiChangePct, render: (r) => <Chg value={r.oiChangePct} pct reason="Needs live futures OI and the previous session's OI" /> },
-                    { key: 'iv', label: <span title="ATM IV solved from live option premiums">IV</span>, num: true, value: (r) => r.iv, render: (r) => <Val value={r.iv} format={(x) => formatFixed(x, 2)} reason="ATM IV needs live option premiums" />, hideSm: true },
-                    { key: 'ivChange', label: 'IV Chg', num: true, value: (r) => r.ivChange, render: (r) => <Chg value={r.ivChange} reason="Needs the previous session's official option closes" /> },
-                    { key: 'pcr', label: <span title="Put/call OI over strikes with OI on both sides">PCR</span>, num: true, value: (r) => r.pcr, render: (r) => <Val value={r.pcr} format={(x) => formatFixed(x, 2)} reason={d.gaps?.pcr ?? 'Needs strikes with OI on both sides'} />, hideSm: true },
-                    { key: 'turnover', label: 'Turnover', num: true, value: (r) => r.turnover, render: (r) => (r.turnover === null ? <Dash reason={d.gaps?.turnover ?? 'Needs the session volume and the exchange’s average traded price'} /> : `₹${formatCompact(r.turnover)}`), hideSm: true },
-                    { key: 'bu', label: 'Build-up', value: (r) => r.buildUp, render: (r) => <BuildUpBadge value={r.buildUp} short reason="Needs a live price and OI change vs the previous session" /> },
-                  ]}
-                />
-              </Card>
-            )}
+            <Card pad={false}>
+              <Chart
+                option={option}
+                height="70vh"
+                blank={mapped.length ? undefined : d.rows.length ? `No stock has both a turnover and ${LABEL[metric]} yet` : 'No stock has a live price yet'}
+                onEvents={{ click: (p: unknown) => { const r = (p as { data?: { row?: SynopsisRow } }).data?.row; if (r) { setSymbol(r.symbol); navigate('/option-chain'); } } }}
+              />
+            </Card>
           </>
         )}
       </Loadable>

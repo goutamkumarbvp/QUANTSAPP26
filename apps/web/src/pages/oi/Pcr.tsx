@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { formatTimeIST, pcrSentiment, type PcrResponse } from '@q26/core';
 import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
-import { Card, Coverage, Gaps, Loadable, PageHeader, Stat } from '../../components/ui';
+import { Card, Coverage, Gaps, Loadable, PageHeader, Segmented, Stat } from '../../components/ui';
 import { qs } from '../../lib/api';
 import { formatCompact, formatDate, formatFixed, formatIndian, isNum } from '../../lib/format';
 import { useLive } from '../../lib/hooks';
@@ -21,6 +21,7 @@ export default function Pcr() {
   const today = useTicks((s) => s.clock?.date);
   const [expiry, setExpiry] = useState<string>();
   const [interval, setIntervalMin] = useState(5);
+  const [view, setView] = useState<'pcr' | 'oi'>('pcr');
   const [date, setDate] = useState('');
   const q = useLive<PcrResponse>(['pcr', symbol, expiry, interval, date], `/oi/pcr/${symbol}${qs({ expiry, interval, date, days: 60 })}`, date ? false : 10000);
   const c = useChartColors();
@@ -31,16 +32,21 @@ export default function Pcr() {
       ...baseOption(c),
       xAxis: timeAxis(c),
       yAxis: [
-        { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => v.toFixed(2) } },
+        { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => (view === 'pcr' ? v.toFixed(2) : formatCompact(v, 1)) } },
         { type: 'value', scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => formatIndian(v, 0) } },
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: gapLine(pts, step, (p) => p.pcr), markLine: { symbol: 'none', silent: true, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
+        ...(view === 'pcr'
+          ? [{ name: 'PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: gapLine(pts, step, (p) => p.pcr), markLine: { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } }]
+          : [
+              { name: 'Call OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.down }, data: gapLine(pts, step, (p) => p.ceOi) },
+              { name: 'Put OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.up }, data: gapLine(pts, step, (p) => p.peOi) },
+            ]),
         { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(pts, step, (p) => p.spot) },
       ],
     };
-  }, [q.data, interval, c]);
+  }, [q.data, interval, c, view]);
   // Change-in-OI PCR: today's put OI added ÷ call OI added (vs the previous close), from 09:15.
   const changeChart = useMemo(() => {
     const pts = q.data?.intraday ?? [];
@@ -85,7 +91,7 @@ export default function Pcr() {
   const lastChange = withChange[withChange.length - 1];
   return (
     <div className="space-y-3">
-      <PageHeader title="Put-Call Ratio" subtitle="PCR = total put OI ÷ total call OI; Change PCR = today's put OI added ÷ call OI added. Rising = put writing (support building); falling = call writing.">
+      <PageHeader title="PCR & OI Trend" subtitle="Call vs put open interest through the day: PCR = total put OI ÷ total call OI; Change PCR = today's put OI added ÷ call OI added. Rising = put writing (support building); falling = call writing.">
         <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setExpiry(undefined); }} />
         <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} />
         <SessionDate value={date} onChange={setDate} max={today} />
@@ -102,7 +108,7 @@ export default function Pcr() {
                 <Stat label="Recorded range" value={`${formatFixed(Math.min(...pcrs), 2)} – ${formatFixed(Math.max(...pcrs), 2)}`} />
               </div>
             )}
-            <Card title="Intraday PCR vs spot">
+            <Card title={view === 'pcr' ? 'Intraday PCR vs spot' : 'Total call vs put OI through the day'} actions={<Segmented size="xs" value={view} onChange={setView} options={[{ value: 'pcr', label: 'PCR' }, { value: 'oi', label: 'Total OI' }]} />}>
               <Chart option={intraday} height={340} blank={withPcr.length ? undefined : d.gaps?.intraday ?? 'No recorded chain minutes for this session'} />
               <div className="mt-2 space-y-1">
                 <Coverage text={d.coverage.intraday} />
@@ -115,7 +121,7 @@ export default function Pcr() {
                   <Stat label="Change PCR now" value={formatFixed(lastChange.changePcr, 2)} tone={isNum(lastChange.changePcr) ? (lastChange.changePcr >= 1 ? 'up' : 'down') : undefined} reason="Call OI change too small to divide by" sub={isNum(lastChange.changePcr) ? (lastChange.changePcr >= 1 ? 'more puts written' : 'more calls written') : undefined} />
                   <Stat label="Put OI added today" value={formatCompact(lastChange.peChange, 2)} tone={(lastChange.peChange as number) >= 0 ? 'up' : 'down'} />
                   <Stat label="Call OI added today" value={formatCompact(lastChange.ceChange, 2)} tone={(lastChange.ceChange as number) >= 0 ? 'down' : 'up'} />
-                  <Stat label="As of" value={formatTimeIST(lastChange.ts)} />
+                  <Stat label="Net put − call added" value={formatCompact((lastChange.peChange as number) - (lastChange.ceChange as number), 2)} tone={(lastChange.peChange as number) >= (lastChange.ceChange as number) ? 'up' : 'down'} sub={`as of ${formatTimeIST(lastChange.ts)}`} />
                 </div>
               )}
               <Chart option={changeChart} height={320} blank={withChange.length ? undefined : d.gaps?.['intraday.change'] ?? d.gaps?.intraday ?? 'No recorded chain minutes for this session'} />

@@ -72,10 +72,10 @@ test('opening range breakout: complete range from recorded minutes and the first
 
 test('order flow: labelled an estimate from live ticks; feed-gap volume and partial minutes are shown apart', async ({ page }, info) => {
   const watch = watchErrors(page);
-  await open(page, '/order-flow', /Order Flow \(1-minute\)/);
+  await open(page, '/order-book', /Order Flow & Book/);
   await expect(page.getByText(/is estimated from live ticks \(quote rule\)/).first()).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText('Buyers dominant').first()).toBeVisible();
-  await expect(page.getByText(/Feed gap \+1\.2K \(not in the split\)/)).toBeVisible();
+  await expect(page.getByText(/feed gap: 1\.2K not counted/).first()).toBeVisible();
   await expect(page.getByText(/partial \(lower bound\)/).first()).toBeVisible();
   await shot(page, info, 'order-flow');
   await clean(page, watch);
@@ -83,7 +83,7 @@ test('order flow: labelled an estimate from live ticks; feed-gap volume and part
 
 test('order book: Order & Trade chart — 1-min candles with buyer vs seller initiated quantity and a direction read', async ({ page }, info) => {
   const watch = watchErrors(page);
-  await open(page, '/order-book', /Order Book Analytics/);
+  await open(page, '/order-book', /Order Flow & Book/);
   const card = page.locator('section', { hasText: 'Order & Trade chart' });
   await expect(card.getByText(/Order & Trade chart — NIFTY/)).toBeVisible({ timeout: 20_000 });
   await expect(card.getByText(/^Read · last \d+ min$/)).toBeVisible();
@@ -111,7 +111,7 @@ test('MCX option chain: commodity options priced on their future (test contracts
 
 test('PCR: change-in-OI PCR for today (put OI added ÷ call OI added) from the open', async ({ page }, info) => {
   const watch = watchErrors(page);
-  await open(page, '/oi/pcr', /Put-Call Ratio/);
+  await open(page, '/oi/pcr', /PCR & OI Trend/);
   // Today's test chain is recorded for the monthly expiry (the weekly stays unrecorded today).
   await page.getByRole('combobox', { name: 'Expiry' }).selectOption('2026-10-27');
   await expect(page.getByText(/Change-in-OI PCR — today only/)).toBeVisible({ timeout: 20_000 });

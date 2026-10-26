@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
 import { ErrorBox, Spinner } from './components/ui';
@@ -12,16 +12,13 @@ const Tools = lazy(() => import('./pages/Tools'));
 const OptionChainPage = lazy(() => import('./pages/OptionChain'));
 const McxChain = lazy(() => import('./pages/McxChain'));
 const Watchlist = lazy(() => import('./pages/Watchlist'));
-const Synopsis = lazy(() => import('./pages/Synopsis'));
+const FnoMarket = lazy(() => import('./pages/FnoMarket'));
 const FiiDii = lazy(() => import('./pages/FiiDii'));
 const Participants = lazy(() => import('./pages/Participants'));
 const StrikeOI = lazy(() => import('./pages/oi/StrikeOI'));
 const MultiStrike = lazy(() => import('./pages/oi/MultiStrike'));
-const OiTrend = lazy(() => import('./pages/oi/OiTrend'));
 const Pcr = lazy(() => import('./pages/oi/Pcr'));
 const MaxPain = lazy(() => import('./pages/oi/MaxPain'));
-const FuturesOI = lazy(() => import('./pages/oi/FuturesOI'));
-const Breadth = lazy(() => import('./pages/oi/Breadth'));
 const IvChart = lazy(() => import('./pages/vol/IvChart'));
 const IvTable = lazy(() => import('./pages/vol/IvTable'));
 const Skew = lazy(() => import('./pages/vol/Skew'));
@@ -40,7 +37,6 @@ const Scanners = lazy(() => import('./pages/Scanners'));
 const Unusual = lazy(() => import('./pages/Unusual'));
 const OrderBook = lazy(() => import('./pages/OrderBook'));
 const Orb = lazy(() => import('./pages/Orb'));
-const OrderFlow = lazy(() => import('./pages/OrderFlow'));
 const Algo = lazy(() => import('./pages/Algo'));
 const Calculators = lazy(() => import('./pages/Calculators'));
 const Learn = lazy(() => import('./pages/Learn'));
@@ -80,16 +76,18 @@ export function App() {
             <Route path="/option-chain" element={<OptionChainPage />} />
             <Route path="/mcx-chain" element={<McxChain />} />
             <Route path="/watchlist" element={<Watchlist />} />
-            <Route path="/synopsis" element={<Synopsis />} />
+            <Route path="/fno-market" element={<FnoMarket />} />
+            {/* Merged tabs: the old addresses still work. */}
+            <Route path="/synopsis" element={<Navigate to="/fno-market?view=heatmap" replace />} />
             <Route path="/fii-dii" element={<FiiDii />} />
             <Route path="/participants" element={<Participants />} />
             <Route path="/oi/strikes" element={<StrikeOI />} />
             <Route path="/oi/multi-strike" element={<MultiStrike />} />
-            <Route path="/oi/trend" element={<OiTrend />} />
+            <Route path="/oi/trend" element={<Navigate to="/oi/pcr" replace />} />
             <Route path="/oi/pcr" element={<Pcr />} />
             <Route path="/oi/max-pain" element={<MaxPain />} />
-            <Route path="/oi/futures" element={<FuturesOI />} />
-            <Route path="/oi/breadth" element={<Breadth />} />
+            <Route path="/oi/futures" element={<Navigate to="/fno-market?view=futures" replace />} />
+            <Route path="/oi/breadth" element={<Navigate to="/fno-market?view=breadth" replace />} />
             <Route path="/vol/iv-chart" element={<IvChart />} />
             <Route path="/vol/ivp" element={<IvTable />} />
             <Route path="/vol/skew" element={<Skew />} />
@@ -108,7 +106,7 @@ export function App() {
             <Route path="/unusual" element={<Unusual />} />
             <Route path="/order-book" element={<OrderBook />} />
             <Route path="/orb" element={<Orb />} />
-            <Route path="/order-flow" element={<OrderFlow />} />
+            <Route path="/order-flow" element={<Navigate to="/order-book" replace />} />
             <Route path="/algo" element={<Algo />} />
             <Route path="/calculators" element={<Calculators />} />
             <Route path="/learn" element={<Learn />} />

@@ -6,7 +6,6 @@ import { TrendBadge } from '../components/trend';
 import { Chart, baseOption, axis, useChartColors } from '../components/Chart';
 import { AsOf, BuildUpBadge, Card, Chg, Coverage, Dash, flowTone, Gaps, Loadable, NoData, PageHeader, Val } from '../components/ui';
 import { useLive } from '../lib/hooks';
-import { NAV } from '../lib/nav';
 import { useApp, useTicks } from '../lib/store';
 import { formatCompact, formatDate, formatExpiry, formatFixed, formatIndian, formatSessionTime, isNum } from '../lib/format';
 
@@ -169,7 +168,7 @@ function ChainRow({ c, onOpen }: { c: DashboardChain; onOpen: (symbol: string) =
       <td className={`num ${f ? flowTone(f.sentiment) : 'text-muted'}`} title={f ? `${f.method} · minute ${formatSessionTime(f.ts)}` : undefined}>
         {f ? (
           <>
-            <Link to="/order-flow" onClick={() => onOpen(c.symbol)} className="hover:underline">
+            <Link to="/order-book" onClick={() => onOpen(c.symbol)} className="hover:underline">
               {f.sentiment === 'Feed gap' ? 'feed gap' : f.buyPct === null ? 'not classified' : `${formatFixed(f.buyPct, 0)}% buy`}
             </Link>
             <div className="text-2xs text-muted">
@@ -189,7 +188,6 @@ function ChainRow({ c, onOpen }: { c: DashboardChain; onOpen: (symbol: string) =
 export default function Home() {
   const q = useLive<DashboardResponse>(['dashboard'], '/dashboard', 5000);
   const setSymbol = useApp((s) => s.setSymbol);
-  const quick = NAV.flatMap((g) => g.items).filter((i) => ['/option-chain', '/orb', '/order-flow', '/algo', '/builder', '/optimizer', '/oi/strikes', '/straddle'].includes(i.to));
   return (
     <div className="space-y-3">
       <PageHeader title="Market Overview" subtitle="Indices, derivatives snapshot, movers and institutional flows" />
@@ -214,15 +212,6 @@ export default function Home() {
                 <NoData compact title="No live index prices" reason={g.indices} />
               )}
               {d.indices.length > 0 && g.indices ? <Gaps gaps={g} only={['indices']} /> : null}
-
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-                {quick.map((t) => (
-                  <Link key={t.to} to={t.to} className="card flex flex-col items-center gap-1 px-2 py-3 text-center text-xs hover:border-accent/60">
-                    <span className="text-xl">{t.icon}</span>
-                    <span className="font-medium">{t.label}</span>
-                  </Link>
-                ))}
-              </div>
 
               <Card title="Derivatives snapshot" pad={false}>
                 <div className="overflow-x-auto">

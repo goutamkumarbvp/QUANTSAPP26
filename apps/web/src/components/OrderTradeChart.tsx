@@ -1,8 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { flowDirection, flowSpikes, formatTimeIST, type Candle, type OrderFlowResponse } from '@q26/core';
 import { Chart, axis, baseOption, gapLine, useChartColors } from './Chart';
-import { Link } from 'react-router-dom';
-import { FlowSplit } from './trend';
 import { Card, Coverage, cx, Segmented, Stat } from './ui';
 import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
 
@@ -19,7 +17,6 @@ const MIN = 60_000;
 /** Buyer initiated = green, seller initiated = red (fixed, the same in light and dark theme). */
 const GREEN = '#16a34a';
 const RED = '#dc2626';
-type Unit = 'qty' | 'lots';
 
 const TONE: Record<string, 'up' | 'down' | 'warn' | undefined> = { buyers: 'up', sellers: 'down', 'buying-absorbed': 'warn', 'selling-absorbed': 'warn', balanced: undefined };
 const LABEL: Record<string, string> = { buyers: 'Buyers in control', sellers: 'Sellers in control', 'buying-absorbed': 'Buying absorbed', 'selling-absorbed': 'Selling absorbed', balanced: 'Balanced' };
@@ -51,9 +48,9 @@ function useFormingCandle(live: PriceSource['live'], lastTs: number | null): [nu
   return [f.ts, f.o, f.c, f.l, f.h];
 }
 
-export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: PriceSource }) {
+/** `unit`: quantities in units or in lots (lots only when the contract's lot size is known). */
+export function OrderTradeChart({ d, price, unit = 'qty' }: { d: OrderFlowResponse; price?: PriceSource; unit?: 'qty' | 'lots' }) {
   const c = useChartColors();
-  const [unit, setUnit] = useState<Unit>('qty');
   const [lookback, setLookback] = useState(15);
   const lot = d.lotSize && d.lotSize > 0 ? d.lotSize : null;
   const u = unit === 'lots' && lot ? lot : 1;
@@ -78,9 +75,9 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
   const option = useMemo(() => {
     const m = d.minutes;
     const sc = spotCandles;
-    // Pixel layout of the panes (the chart is 640 px high): price, volume, and buyer vs seller
-    // initiated quantity SUPERIMPOSED on ONE scale, so their sizes compare at a glance.
-    const grids = [{ top: 34, height: 250 }, { top: 290, height: 50 }, { top: 362, height: 250 }];
+    // Pixel layout of the panes (the chart is 760 px high): price, volume, buyer vs seller initiated
+    // quantity SUPERIMPOSED on ONE scale (sizes compare at a glance), and the cumulative delta.
+    const grids = [{ top: 34, height: 250 }, { top: 290, height: 50 }, { top: 362, height: 240 }, { top: 622, height: 100 }];
     const n = grids.length;
     const times = [...m.map((x) => x.ts), ...sc.map((x) => x[0] as number), ...(forming ? [forming[0]] : [])];
     const xMin = times.length ? Math.min(...times) - MIN / 2 : undefined;
@@ -95,11 +92,12 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
     }));
     const qtyAxis = (i: number) => ({ type: 'value', gridIndex: i, scale: false, min: 0, ...axis(c), axisLabel: { color: c.muted, fontSize: 10, formatter: (v: number) => formatCompact(v, 1) }, splitNumber: 3 });
     // Pane captions in the top-left corner of each pane.
-    const captions = [topCaption, `Volume — ${d.instrument}`, `Buyer (green) vs seller (red) initiated — ${d.instrument}, same scale (${unitLabel})`].map((text, i) => ({ text, left: 14, top: i === 0 ? grids[0].top - 2 : grids[i].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
+    const captions = [topCaption, `Volume — ${d.instrument}`, `Buyer (green) vs seller (red) initiated — ${d.instrument}, same scale (${unitLabel})`, `Cumulative delta (buyer − seller initiated since the open, ${unitLabel})`].map((text, i) => ({ text, left: 14, top: i === 0 ? grids[0].top - 2 : grids[i].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
     const yAxis: Record<string, unknown>[] = [
       { type: 'value', gridIndex: 0, scale: true, ...axis(c), axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => formatIndian(v, 0) } },
       { type: 'value', gridIndex: 1, min: 0, ...axis(c, { splitLine: { show: false } }), axisLabel: { show: false } },
       qtyAxis(2),
+      { type: 'value', gridIndex: 3, scale: true, ...axis(c), axisLabel: { color: c.muted, fontSize: 10, formatter: (v: number) => formatCompact(v, 1) }, splitNumber: 2 },
     ];
     const own = m.filter((x) => isNum(x.open) && isNum(x.close) && isNum(x.low) && isNum(x.high)).map((x) => [x.ts, x.open, x.close, x.low, x.high]);
     const candles = useSpot ? [...sc, ...(forming ? [forming] : [])] : own;
@@ -128,6 +126,18 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
         },
         { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapLine(m, MIN, (x) => x.buyVolume / u) },
         { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapLine(m, MIN, (x) => x.sellVolume / u) },
+        {
+          name: 'Cumulative delta',
+          type: 'line',
+          xAxisIndex: 3,
+          yAxisIndex: 3,
+          symbol: 'none',
+          lineStyle: { width: 1.5, color: c.accent },
+          itemStyle: { color: c.accent },
+          areaStyle: { color: c.accent, opacity: 0.08 },
+          markLine: { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 0 }] },
+          data: gapLine(m, MIN, (x) => x.cumDelta / u),
+        },
       ],
     };
   }, [d.minutes, d.instrument, c, spikes, u, unitLabel, spotCandles, forming, useSpot, topCaption, price?.live]);
@@ -138,9 +148,7 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
       title={`Order & Trade chart — ${price && useSpot ? `${price.label} price · ` : ''}${d.instrument} order flow (1-minute)`}
       actions={
         <>
-          <Segmented size="xs" value={unit} onChange={setUnit} options={[{ value: 'qty', label: 'Qty' }, { value: 'lots', label: 'Lots' }]} />
           <Segmented size="xs" value={lookback} onChange={setLookback} options={[5, 15, 30].map((v) => ({ value: v, label: `${v}m` }))} />
-          <Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>
         </>
       }
     >
@@ -157,13 +165,7 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
           <p className={cx('text-sm', TONE[dir.read] === 'up' && 'text-up', TONE[dir.read] === 'down' && 'text-down', TONE[dir.read] === 'warn' && 'text-warn')}>{dir.text}</p>
         </div>
       )}
-      {d.currentMinute && (
-        <div className="mb-2 max-w-md">
-          <div className="mb-1 text-2xs text-muted">Minute in progress {formatTimeIST(d.currentMinute.ts)} ({d.currentMinute.elapsedSec}s so far)</div>
-          <FlowSplit flow={d.currentMinute} />
-        </div>
-      )}
-      <Chart option={option} height={660} blank={d.minutes.length ? undefined : 'No recorded minute of this contract yet this session'} />
+      <Chart option={option} height={760} blank={d.minutes.length ? undefined : 'No recorded minute of this contract yet this session'} />
       {recent.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1 text-2xs">
           <span className="text-muted">Latest spikes:</span>

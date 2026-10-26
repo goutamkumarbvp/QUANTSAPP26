@@ -173,7 +173,8 @@ export interface LiveMarket {
   refresh(keys: InstrumentKey[]): Promise<Map<string, LiveQuote>>;
   /** Live chain of one expiry; throws NoLiveData when it cannot be built. */
   chain(symbol: string, expiry: string): Promise<RawChain>;
-  onTick(listener: (q: LiveQuote) => void): () => void;
+  /** `meta.stream`: the update came from the live tick stream (false: a REST snapshot). */
+  onTick(listener: (q: LiveQuote, meta?: TickMeta) => void): () => void;
   health(): FeedHealth;
 }
 
@@ -428,6 +429,11 @@ export interface Candle {
   gapVolume?: number;
   /** Recorded bars: some minute's volume is a lower bound (MinuteRecord.partial). */
   partial?: true;
+}
+
+/** How a quote update arrived. Only stream ticks are tick-by-tick; REST quotes are snapshots. */
+export interface TickMeta {
+  stream: boolean;
 }
 
 export interface MarketDataProvider {

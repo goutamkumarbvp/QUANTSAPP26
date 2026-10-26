@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
-import { type Candle, type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
+import { formatExpiry, type Candle, type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
+import { FlowMethodNote, FlowSummary, MinuteTable, type FlowUnit } from '../components/FlowDetails';
 import { OrderTradeChart, type PriceSource } from '../components/OrderTradeChart';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
-import { ExpirySelect, pickStrike, StrikeSelect, SymbolSelect } from '../components/pickers';
+import { ExpirySelect, pickStrike, SessionDate, StrikeSelect, SymbolSelect } from '../components/pickers';
 import { AsOf, Card, Chg, cx, Dash, ErrorState, Gaps, Loadable, PageHeader, Segmented, Stat, Val } from '../components/ui';
 import { errorText, isNoLiveData, qs } from '../lib/api';
 import { formatCompact, formatIndian, isNum } from '../lib/format';
@@ -16,28 +17,64 @@ function pair(a: number | null, b: number | null, f: (x: number) => string = (x)
   return isNum(a) || isNum(b) ? `${isNum(a) ? f(a) : '—'} / ${isNum(b) ? f(b) : '—'}` : null;
 }
 
+/**
+ * Order Flow & Book: one page per contract for everything built from its live ticks — the Order & Trade
+ * chart (the security's price, buyer vs seller initiated quantity per minute, cumulative delta), the
+ * last-minute / session split, five-level market depth (live only) and the minute table. A past session
+ * (date picker) replays its recorded minutes; depth exists only live.
+ */
 export default function OrderBook() {
   const symbol = useApp((s) => s.symbol);
   const setSymbol = useApp((s) => s.setSymbol);
-  const [type, setType] = useState<'FUT' | 'CE' | 'PE'>('FUT');
+  const today = useTicks((s) => s.clock?.date);
+  const [type, setTypeRaw] = useState<'FUT' | 'CE' | 'PE'>('FUT');
   const [expiry, setExpiry] = useState<string>();
   const [strike, setStrike] = useState<number>();
+  const [date, setDate] = useState('');
+  const [unit, setUnit] = useState<FlowUnit>('qty');
+  // Past sessions list their own contracts (from the response); today's come from the live chain.
+  const [pastExpiry, setPastExpiry] = useState<string>();
+  const [pastStrike, setPastStrike] = useState<number>();
+  const isPast = !!date && !!today && date < today;
   const [ticket, setTicket] = useState<TicketSpec | null>(null);
+  const setType = (t: 'FUT' | 'CE' | 'PE') => {
+    // Futures and options list different expiries: start each from its own nearest one.
+    if ((t === 'FUT') !== (type === 'FUT')) {
+      setExpiry(undefined);
+      setStrike(undefined);
+      setPastExpiry(undefined);
+      setPastStrike(undefined);
+    }
+    setTypeRaw(t);
+  };
+  const changeDate = (v: string) => {
+    setDate(v);
+    setPastExpiry(undefined);
+    setPastStrike(undefined);
+  };
   // The chain only lists the strikes to choose from.
   const chain = useChain(symbol, expiry, { refetch: 30000, enabled: type !== 'FUT' });
   const chainData = chain.data?.symbol === symbol ? chain.data : undefined;
   const k = type === 'FUT' ? undefined : pickStrike(chainData, strike);
   // For options wait for the strike, so the book and the flow are for the same contract.
   const ready = type === 'FUT' || k !== undefined;
-  const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000, ready);
-  // The whole session, minute by minute, for the Order & Trade chart (also its current-minute readout).
-  const trade = useLive<OrderFlowResponse>(['order-trade', symbol, type, expiry, k], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 375 })}`, 2000, ready);
+  // Market depth exists only live.
+  const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000, ready && !isPast);
+  // The whole session, minute by minute: the Order & Trade chart, the summary and the minute table.
+  const reqExpiry = isPast ? pastExpiry : expiry;
+  const reqStrike = type === 'FUT' ? undefined : isPast ? pastStrike : k;
+  const trade = useLive<OrderFlowResponse>(
+    ['order-trade', symbol, type, reqExpiry, reqStrike, ...(isPast ? [date] : [])],
+    `/order-flow/${symbol}${qs({ type, expiry: reqExpiry, strike: reqStrike, date: isPast ? date : undefined, limit: 375 })}`,
+    isPast ? false : 2000,
+    isPast || ready,
+  );
   const tradeData = trade.isPlaceholderData || isNoLiveData(trade.error) ? undefined : trade.data;
-  // The security itself on top of the chart: its recorded 1-minute candles and its live price.
-  const spot = useLive<Candle[]>(['order-trade-spot', symbol], `/candles/${symbol}${qs({ interval: '1', days: 1 })}`, 5000);
+  // The security itself on top of the chart (today): its recorded 1-minute candles and its live price.
+  const spot = useLive<Candle[]>(['order-trade-spot', symbol], `/candles/${symbol}${qs({ interval: '1', days: 1 })}`, 5000, !isPast);
   const spotLive = useTicks((s) => s.quotes[symbol]);
   useSubscribe([symbol]);
-  const price: PriceSource = {
+  const price: PriceSource | undefined = isPast ? undefined : {
     label: symbol,
     candles: spot.isPlaceholderData ? undefined : spot.data,
     error: spot.error ? errorText(spot.error) : undefined,
@@ -78,12 +115,41 @@ export default function OrderBook() {
   };
   return (
     <div className="space-y-3">
-      <PageHeader title="Order Book Analytics" subtitle="Five-level market depth with order-flow metrics, and the Order & Trade chart: buyer vs seller initiated quantity per minute against the price">
-        <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setStrike(undefined); }} />
+      <PageHeader title="Order Flow & Book" subtitle="Every live tick of one contract: the Order & Trade chart (price, buyer vs seller initiated quantity per minute, cumulative delta), the session split, market depth and the minute table">
+        <SymbolSelect value={symbol} onChange={(s) => { setSymbol(s); setStrike(undefined); setPastExpiry(undefined); setPastStrike(undefined); }} />
         <Segmented value={type} onChange={setType} options={[{ value: 'FUT', label: 'Future' }, { value: 'CE', label: 'Call' }, { value: 'PE', label: 'Put' }]} />
-        <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} futures={type === 'FUT'} />
-        {type !== 'FUT' && <StrikeSelect chain={chainData} value={k} onChange={setStrike} error={chain.error} loading={chain.isLoading} />}
+        {isPast ? (
+          <>
+            <select aria-label="Expiry" className="input w-auto" value={tradeData?.expiry ?? ''} onChange={(e) => { setPastExpiry(e.target.value); setPastStrike(undefined); }}>
+              {(tradeData?.expiries ?? []).map((x) => <option key={x} value={x}>{formatExpiry(x)}</option>)}
+            </select>
+            {type !== 'FUT' && (
+              <select aria-label="Strike" className="input w-auto" value={tradeData?.strike ?? ''} onChange={(e) => setPastStrike(Number(e.target.value))}>
+                {(tradeData?.strikes ?? []).map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+            )}
+          </>
+        ) : (
+          <>
+            <ExpirySelect symbol={symbol} value={expiry} onChange={setExpiry} futures={type === 'FUT'} />
+            {type !== 'FUT' && <StrikeSelect chain={chainData} value={k} onChange={setStrike} error={chain.error} loading={chain.isLoading} />}
+          </>
+        )}
+        <SessionDate value={date} onChange={changeDate} max={today} />
+        <Segmented value={unit} onChange={setUnit} options={tradeData?.lotSize ? [{ value: 'qty', label: 'Qty' }, { value: 'lots', label: 'Lots' }] : [{ value: 'qty', label: 'Qty' }]} />
       </PageHeader>
+      <FlowMethodNote />
+      {tradeData ? (
+        <>
+          <OrderTradeChart d={tradeData} price={price} unit={unit} />
+          <FlowSummary d={tradeData} unit={unit} />
+        </>
+      ) : trade.error ? (
+        <Card title="Order & Trade chart"><ErrorState error={trade.error} compact title="No order flow for this contract" /></Card>
+      ) : null}
+      {isPast ? (
+        <div className="rounded-lg border border-line px-3 py-2 text-xs text-muted" role="status">Market depth is live only: it is not recorded, so a past session ({date}) shows its recorded minutes only.</div>
+      ) : (
       <Loadable q={{ data: d, isLoading: q.isLoading || (q.isPlaceholderData && !isNoLiveData(q.error)), error: q.error }} hint="The depth stream for this contract is requested from the feed when the page opens; the first book can take a few seconds. Nothing is shown until the feed has sent real depth.">
         {(d) => (
           <>
@@ -159,13 +225,8 @@ export default function OrderBook() {
           </>
         )}
       </Loadable>
-      <div className="mt-3">
-        {tradeData ? (
-          <OrderTradeChart d={tradeData} price={price} />
-        ) : trade.error ? (
-          <Card title="Order & Trade chart"><ErrorState error={trade.error} compact title="No order & trade data" /></Card>
-        ) : null}
-      </div>
+      )}
+      {tradeData && <MinuteTable d={tradeData} unit={unit} />}
       <OrderTicket spec={ticket} onClose={() => setTicket(null)} />
     </div>
   );

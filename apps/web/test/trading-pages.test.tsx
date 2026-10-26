@@ -239,7 +239,7 @@ describe('Order book', () => {
     expect(html).toContain('partial (lower bound)');
     expect(html).toContain('unclassified 75');
     expect(html).toContain('Minute in progress');
-    expect(html).toContain('(25s so far)');
+    expect(html).toContain('25s so far');
     expect(html).toContain('No recorded minute of this contract yet this session'); // no completed minute: blank chart, with the reason
     expect(html).not.toMatch(BAD);
   });

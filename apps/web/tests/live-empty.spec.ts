@@ -12,13 +12,15 @@ const ROUTES: [string, RegExp][] = [
   ['/tools', /All Tools/],
   ['/option-chain', /Option Chain/],
   ['/watchlist', /Watchlist/],
+  ['/fno-market', /Synopsis/],
+  // Merged tabs: the old addresses redirect to the tab that now holds their data.
   ['/synopsis', /Synopsis/],
   ['/fii-dii', /FII \/ DII Activity/],
   ['/participants', /Participant-wise OI/],
   ['/oi/strikes', /Open Interest Analysis/],
   ['/oi/multi-strike', /Multi-Strike OI/],
-  ['/oi/trend', /OI Trend/],
-  ['/oi/pcr', /Put-Call Ratio/],
+  ['/oi/trend', /PCR & OI Trend/],
+  ['/oi/pcr', /PCR & OI Trend/],
   ['/oi/max-pain', /Max Pain/],
   ['/oi/futures', /Futures OI/],
   ['/oi/breadth', /Build-up Breadth/],
@@ -38,9 +40,9 @@ const ROUTES: [string, RegExp][] = [
   ['/alerts', /Alerts/],
   ['/scanners', /F&O Scanners/],
   ['/unusual', /Unusual Option Activity/],
-  ['/order-book', /Order Book Analytics/],
+  ['/order-book', /Order Flow & Book/],
   ['/orb', /Opening Range Breakout/],
-  ['/order-flow', /Order Flow \(1-minute\)/],
+  ['/order-flow', /Order Flow & Book/],
   ['/learn/opening-range-order-flow', /Opening range breakout/],
   ['/algo', /Algo Strategies/],
   ['/learn/algo-premium-ladder', /premium ladder short strangle/],
@@ -61,7 +63,7 @@ const NO_DATA_ON_LOAD = new Set([
 ]);
 
 /** Desktop screenshots of key pages for the run's review (E2E_SHOTS_DIR). */
-const SHOTS: Record<string, string> = { '/': 'home', '/option-chain': 'option-chain', '/positions': 'positions', '/scanners': 'scanners', '/vol/iv-chart': 'iv-chart', '/order-flow': 'order-flow' };
+const SHOTS: Record<string, string> = { '/': 'home', '/option-chain': 'option-chain', '/positions': 'positions', '/scanners': 'scanners', '/vol/iv-chart': 'iv-chart', '/order-book': 'order-book', '/fno-market': 'fno-market' };
 
 const CREDENTIALS_MISSING = /Kotak credentials missing/;
 

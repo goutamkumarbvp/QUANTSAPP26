@@ -34,7 +34,7 @@ import {
   type SFeedSub,
 } from './kotak/sfeed/client';
 import { NoLiveData, keyId } from './types';
-import type { ChainRowLive, FeedHealth, InstrumentKey, Listing, LiveMarket, LiveQuote, RawChain, ReferenceData, Segment, TradingCalendar, WatchLevel } from './types';
+import type { ChainRowLive, FeedHealth, InstrumentKey, Listing, LiveMarket, LiveQuote, RawChain, ReferenceData, Segment, TickMeta, TradingCalendar, WatchLevel } from './types';
 
 /* ------------------------------------------------------------------------------------------ */
 /* Types                                                                                        */
@@ -313,7 +313,7 @@ export class KotakLiveMarket implements LiveMarket {
   private readonly restUnavailable: string;
 
   private readonly cells = new Map<string, QuoteCell>();
-  private readonly listeners = new Set<(q: LiveQuote) => void>();
+  private readonly listeners = new Set<(q: LiveQuote, meta?: TickMeta) => void>();
 
   // Subscriptions
   private feed: SFeedClient | null = null;
@@ -384,7 +384,7 @@ export class KotakLiveMarket implements LiveMarket {
     return c && c.q.ltp !== undefined && dates.has(this.dayOf(c.q.ts)) ? copyQuote(c.q) : undefined;
   }
 
-  onTick(listener: (q: LiveQuote) => void): () => void {
+  onTick(listener: (q: LiveQuote, meta?: TickMeta) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -408,7 +408,7 @@ export class KotakLiveMarket implements LiveMarket {
     if (next.q.ltp === undefined) return undefined;
     for (const fn of this.listeners) {
       try {
-        fn(copyQuote(next.q));
+        fn(copyQuote(next.q), { stream: how.stream });
       } catch (e) {
         this.log.warn(`live: tick listener failed: ${errMsg(e)}`);
       }

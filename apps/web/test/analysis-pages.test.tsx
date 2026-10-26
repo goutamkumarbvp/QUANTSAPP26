@@ -14,7 +14,6 @@ import {
   type MarketClockInfo,
   type MaxPainResponse,
   type MultiStrikeResponse,
-  type OiTrendResponse,
   type OptionChain,
   type OrbHistoryResponse,
   type OrbResponse,
@@ -41,7 +40,6 @@ import Breadth from '../src/pages/oi/Breadth';
 import FuturesOI from '../src/pages/oi/FuturesOI';
 import MaxPain from '../src/pages/oi/MaxPain';
 import MultiStrike from '../src/pages/oi/MultiStrike';
-import OiTrend from '../src/pages/oi/OiTrend';
 import Pcr from '../src/pages/oi/Pcr';
 import StrikeOI from '../src/pages/oi/StrikeOI';
 import Cone from '../src/pages/vol/Cone';
@@ -51,7 +49,7 @@ import Skew from '../src/pages/vol/Skew';
 import Surface from '../src/pages/vol/Surface';
 import FiiDii from '../src/pages/FiiDii';
 import Orb from '../src/pages/Orb';
-import OrderFlow from '../src/pages/OrderFlow';
+import OrderBook from '../src/pages/OrderBook';
 import Participants from '../src/pages/Participants';
 import Recap from '../src/pages/Recap';
 import Scanners from '../src/pages/Scanners';
@@ -199,23 +197,6 @@ describe('Multi-Strike OI', () => {
   it('503 shows the reason (recording started …)', () => expectBlank(render(<MultiStrike />, [[key, noLive('No recorded data for 2026-10-12 — recording started 2026-10-14')]]), 'recording started 2026-10-14'));
 });
 
-describe('OI Trend', () => {
-  const key = ['oi-trend', 'NIFTY', undefined, 5, ''];
-  const pt = (m: number, over: Partial<OiTrendResponse['points'][number]> = {}) => ({ ts: T0 + m * 60_000, spot: 24100, ceOi: 1e6, peOi: 1.2e6, ceChange: null, peChange: null, pcr: 1.2, maxPain: 24100, atmIv: 13, ...over });
-  const data: OiTrendResponse = {
-    symbol: 'NIFTY', expiry: '2026-10-20', date: '2026-10-19', points: [pt(5), pt(10), pt(40, { spot: null, pcr: null, ceOi: null })],
-    coverage: 'Recorded chain totals: streamed strikes (±8 %): the strikes the recorder tracked', gaps: { change: 'Official F&O file for 2026-10-16 not loaded' },
-  };
-  it('change in OI is blank with its reason; totals say they cover streamed strikes', () => {
-    const out = decode(render(<OiTrend />, [[key, data]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('streamed strikes (±8 %)');
-    expect(out).toContain('Official F&O file for 2026-10-16 not loaded');
-    expect(out).toContain('Nothing to chart'); // change view with no change at all: blank, not a spot-only chart
-  });
-  it('503', () => expectBlank(render(<OiTrend />, [[key, noLive('No recorded NIFTY 2026-10-20 chain minutes on 2026-10-19')]]), 'No recorded NIFTY 2026-10-20 chain minutes on 2026-10-19'));
-});
-
 describe('Put-Call Ratio', () => {
   const key = ['pcr', 'NIFTY', undefined, 5, ''];
   const data: PcrResponse = {
@@ -224,6 +205,14 @@ describe('Put-Call Ratio', () => {
     daily: [{ date: '2026-10-15', pcr: 0.9, close: null, expiry: '2026-10-20' }, { date: '2026-10-16', pcr: 1.2, close: 24000, expiry: '2026-10-20' }],
     coverage: { intraday: 'Recorded chain totals: streamed strikes (±8 %)', daily: 'Official F&O bhavcopy: every strike of the nearest expiry' },
   };
+  it('one tab for the OI trend: PCR / total OI views, and the net put − call addition (OI Trend merged here)', () => {
+    const out = decode(render(<Pcr />, [[key, data]]));
+    expect(out).toContain('PCR &amp; OI Trend'.replace('&amp;', '&'));
+    expect(out).toMatch(/role="tab"[^>]*>PCR</);
+    expect(out).toMatch(/role="tab"[^>]*>Total OI</);
+    expect(out).toContain('Net put − call added');
+    expect(out).toContain('58.0K'); // 98,000 − 40,000
+  });
   it('daily PCR is labelled as official; a day without a close is a gap', () => {
     const out = decode(render(<Pcr />, [[key, data]]));
     expect(out).not.toMatch(BAD);
@@ -540,22 +529,23 @@ describe('Unusual Option Activity', () => {
 
 /* ------------------------------------------------------------------ order flow / ORB */
 
-describe('Order Flow', () => {
-  const key = ['order-flow', 'NIFTY', 'FUT', undefined, undefined, '', 60];
+// Order Flow was merged into the Order Flow & Book page: the same checks, on that page.
+describe('Order Flow & Book (order flow)', () => {
+  const key = ['order-trade', 'NIFTY', 'FUT', undefined, undefined];
   const sum = (over: Partial<OrderFlowResponse['session']> = {}): OrderFlowResponse['session'] => ({ buyVolume: 600, sellVolume: 200, unclassified: 200, volume: 1000, gapVolume: 0, partialMinutes: 0, delta: 400, buyPct: 75, unclassifiedPct: 20, sentiment: 'Buyers dominant', ...over });
   const data: OrderFlowResponse = {
     symbol: 'NIFTY', instrument: 'NIFTY 27 Oct FUT', type: 'FUT', expiry: '2026-10-27', date: '2026-10-19', live: true, lotSize: null, method: ORDER_FLOW_METHOD,
     lastMinute: { ...sum({ buyVolume: 0, sellVolume: 0, unclassified: 0, volume: 0, gapVolume: 1500, partialMinutes: 1, delta: 0, buyPct: null, unclassifiedPct: null, sentiment: 'Feed gap' }), ts: T0, close: null },
     currentMinute: null, last5: sum({ gapVolume: 1500 }), session: sum({ partialMinutes: 2 }),
     minutes: [
-      { ts: T0, volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, gapVolume: 1500, partial: true, delta: 0, cumDelta: 0, buyPct: null, close: null },
-      { ts: T0 + 60_000, volume: 300, buyVolume: 100, sellVolume: 100, unclassified: 100, gapVolume: null, partial: false, delta: 0, cumDelta: 0, buyPct: 50, close: 24100 },
+      { ts: T0, volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, gapVolume: 1500, partial: true, delta: 0, cumDelta: 0, buyPct: null, open: null, high: null, low: null, close: null },
+      { ts: T0 + 60_000, volume: 300, buyVolume: 100, sellVolume: 100, unclassified: 100, gapVolume: null, partial: false, delta: 0, cumDelta: 0, buyPct: 50, open: 24100, high: 24100, low: 24100, close: 24100 },
     ],
     signal: '09:15–09:16: the feed had a gap before this minute', coverage: '2 recorded minutes 09:15–09:17', expiries: ['2026-10-27'], strikes: [],
     gaps: { feedGaps: '1 minute (09:15) follow a feed gap: 1.50K traded during the gaps', partial: 'Recording of NIFTY 27 Oct FUT started inside 09:15' },
   };
   it('labelled as an estimate; unclassified share shown; a feed gap is never a buy/sell split; unknown lot size is stated', () => {
-    const out = decode(render(<OrderFlow />, [[key, data]]));
+    const out = decode(render(<OrderBook />, [[key, data]]));
     expect(out).not.toMatch(BAD);
     expect(out).toContain(ORDER_FLOW_METHOD);
     expect(out).toContain('Unclassified');
@@ -565,22 +555,21 @@ describe('Order Flow', () => {
     expect(out).toContain('Nothing in this minute could be classified as buy or sell');
     expect(out).not.toContain('Simulated');
   });
-  it('delta chart: cumulative delta on its own axis; the x axis runs to the last minute', () => {
-    render(<OrderFlow />, [[key, data]]);
-    const cum = charts.find((c) => JSON.stringify(c.option).includes('Cumulative delta'))!.option as { yAxis: unknown[]; xAxis: { max: number; axisLabel: { showMaxLabel: boolean } }; series: { name: string; yAxisIndex: number }[] };
-    expect(cum.yAxis).toHaveLength(2);
-    expect(cum.series.find((x) => x.name.startsWith('Delta'))!.yAxisIndex).toBe(0);
-    expect(cum.series.find((x) => x.name.startsWith('Cumulative'))!.yAxisIndex).toBe(1);
-    expect(cum.xAxis.max).toBeGreaterThanOrEqual(data.minutes.at(-1)!.ts);
-    expect(cum.xAxis.axisLabel.showMaxLabel).toBe(true);
+  it('Order & Trade chart: buyer and seller initiated on ONE axis, cumulative delta on its own pane; the x axis runs to the last minute', () => {
+    render(<OrderBook />, [[key, data]]);
+    const ot = charts.find((c) => JSON.stringify(c.option).includes('Cumulative delta'))!.option as { yAxis: unknown[]; xAxis: { max: number }[]; series: { name: string; yAxisIndex: number; xAxisIndex: number }[] };
+    const axisOf = (name: string) => ot.series.find((x) => x.name === name)!.yAxisIndex;
+    expect(axisOf('Buyer initiated')).toBe(axisOf('Seller initiated'));
+    expect(axisOf('Cumulative delta')).not.toBe(axisOf('Buyer initiated'));
+    expect(ot.xAxis[0].max).toBeGreaterThanOrEqual(data.minutes.at(-1)!.ts);
   });
   it('a window with no trades is "No trades", not a 50/50 bar', () => {
     const none = sum({ volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, delta: 0, buyPct: null, unclassifiedPct: null, sentiment: 'No trades' });
-    const out = decode(render(<OrderFlow />, [[key, { ...data, lotSize: 75, minutes: [], lastMinute: { ...none, ts: T0, close: null }, last5: none, session: none }]]));
+    const out = decode(render(<OrderBook />, [[key, { ...data, lotSize: 75, minutes: [], lastMinute: { ...none, ts: T0, close: null }, last5: none, session: none }]]));
     expect(out).toContain('aria-label="No trades"');
     expect(out).not.toContain('Buyers ');
   });
-  it('503: contract not recorded', () => expectBlank(render(<OrderFlow />, [[key, noLive('NIFTY 27 Oct FUT has no recorded minutes yet this session')]]), 'has no recorded minutes yet this session'));
+  it('503: contract not recorded', () => expectBlank(render(<OrderBook />, [[key, noLive('NIFTY 27 Oct FUT has no recorded minutes yet this session')]]), 'has no recorded minutes yet this session'));
 });
 
 describe('Opening Range Breakout', () => {

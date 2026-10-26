@@ -152,19 +152,28 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
   start and the date of each official file loaded. A banner under the header explains blanks while the feed is
   not live.
 
-## Features (38 screens)
+## Features (33 tabs, no tab repeats another's data)
 
-| Area | Screens |
+| Area | Tabs |
 |---|---|
-| Market | Home dashboard, Watchlist, Option Chain, Synopsis heat-map, FII/DII, Participant-wise OI |
-| Trend & flow | Opening range breakout (trend detector), 1-minute order flow (buyer vs seller volume estimate) |
-| Open interest | OI analysis, Multi-strike OI, OI trend, PCR, Max pain, Futures OI & build-up, Build-up breadth |
+| Market | Home dashboard, Watchlist, Option Chain, MCX Option Chain, F&O Market (heat-map · futures build-up · sector breadth) |
+| Order flow & trend | Order Flow & Book (Order & Trade chart: the security's price, buyer vs seller initiated quantity per minute on one scale, cumulative delta; session split; 5-level depth; minute table; past sessions), Opening range breakout |
+| Open interest | OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
+| Institutions | FII/DII cash flows, Participant-wise OI (official end-of-day data) |
+| Scanners | 23 F&O scanners (incl. 3 opening-range scans), Unusual option activity |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
-| Trade | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts |
-| Algo | Algo Strategies — Strategy 2 (₹20 premium ladder) and Strategy 3 (₹50 premium ladder) |
-| Scanners | 23 F&O scanners (incl. 3 opening-range scans), Unusual option activity, Order-book analytics |
+| Trade | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts, Algo Strategies (Strategy 2 · ₹20 and Strategy 3 · ₹50 premium ladders) |
 | More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
+
+Old addresses of merged tabs (`/order-flow`, `/oi/trend`, `/synopsis`, `/oi/futures`, `/oi/breadth`) redirect to
+the tab that now holds their data.
+
+**Data rule.** Every market value comes from the broker or the exchange: Kotak live ticks (SFeed) first,
+Kotak REST quotes only for contracts outside the stream (real snapshots, labelled as such and never used
+to classify buyer / seller initiated quantity), Kotak 1-minute history for active contracts, and the
+official NSE/BSE end-of-day files for daily history. Nothing is simulated, interpolated or carried forward:
+a value that is not available is blank with the reason.
 
 Highlights:
 

@@ -29,18 +29,18 @@ const SPOT: InstrumentKey = { symbol: 'NIFTY', kind: 'SPOT' };
 const opt = (kind: OptKind, strike: number): InstrumentKey => ({ symbol: 'NIFTY', kind, expiry: EXP, strike });
 
 class FakeLive {
-  private readonly listeners = new Set<(q: LiveQuote) => void>();
+  private readonly listeners = new Set<(q: LiveQuote, meta?: { stream: boolean }) => void>();
   readonly latest = new Map<string, LiveQuote>();
-  onTick(l: (q: LiveQuote) => void): () => void {
+  onTick(l: (q: LiveQuote, meta?: { stream: boolean }) => void): () => void {
     this.listeners.add(l);
     return () => this.listeners.delete(l);
   }
   quote(k: InstrumentKey): LiveQuote | undefined {
     return this.latest.get(keyId(k));
   }
-  emit(q: LiveQuote): void {
+  emit(q: LiveQuote, meta?: { stream: boolean }): void {
     this.latest.set(keyId(q.key), q);
-    for (const l of this.listeners) l(q);
+    for (const l of this.listeners) l(q, meta);
   }
   get listening(): number {
     return this.listeners.size;
@@ -104,6 +104,22 @@ describe('Recorder: minute bars', () => {
       { ts: t(10, 0), open: 100.5, high: 101, low: 99, close: 100.8, traded: true, volume: 31, buyVolume: 10, sellVolume: 15, unclassified: 6, oi: 5100, bid: 100.5, ask: 101.5, totalBuyQty: 7000, totalSellQty: 8000, atp: 100.1, partial: true },
     ]);
     expect(rec.liveBar(FUT)).toMatchObject({ ts: t(10, 1), open: 101.6, volume: 9, buyVolume: 9, sellVolume: 0, unclassified: 0 });
+  });
+
+  it('REST snapshots are recorded but never classified: only live stream ticks split buyer / seller initiated', () => {
+    const { rec, live, clk } = setup();
+    const snap = (ts: number, f: Partial<LiveQuote> & { ltp: number }) => {
+      clk.now = ts + 100;
+      live.emit({ key: FUT, ts, ...f }, { stream: false });
+    };
+    snap(t(10, 0, 5), { ltp: 100, volume: 1000, bid: 99.5, ask: 100.5 }); // baseline only
+    snap(t(10, 0, 20), { ltp: 100.5, volume: 1400, bid: 100, ask: 101 }); // would be "buy 400" by the quote rule
+    snap(t(10, 0, 40), { ltp: 99, volume: 1700, bid: 98.5, ask: 99.5 }); // would be "sell 300"
+    expect(rec.liveBar(FUT)).toMatchObject({ volume: 700, buyVolume: 0, sellVolume: 0, unclassified: 700, close: 99 });
+    // A stream tick right after is classified as usual.
+    clk.now = t(10, 0, 50) + 100;
+    live.emit({ key: FUT, ts: t(10, 0, 50), ltp: 99.6, volume: 1710, bid: 99.4, ask: 99.8 }, { stream: true });
+    expect(rec.liveBar(FUT)).toMatchObject({ volume: 710, buyVolume: 10, unclassified: 700 });
   });
 
   it('leaves volume unclassified when the prior quote is unknown or crossed; indices carry no volume at all', () => {
