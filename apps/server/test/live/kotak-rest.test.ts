@@ -156,7 +156,7 @@ describe('quotes', () => {
     expect(q.depth).toEqual({ bids: [{ price: 801.6, qty: 1733 }], asks: [{ price: 801.65, qty: 550, orders: 1 }] });
   });
 
-  it('chunks ≤50 per call on the general lane and reports failed chunks', async () => {
+  it('chunks ≤40 per call on the general lane and reports failed chunks', async () => {
     const syms = Array.from({ length: 120 }, (_, i) => `nse_fo|${1000 + i}`);
     const { rest, calls } = stub((path, _o, n) => {
       if (n === 1) return new KotakError('Kotak quotes failed: Invalid instrument/code', 'api', 200, 1009);
@@ -164,11 +164,24 @@ describe('quotes', () => {
       return toks.map((t) => ({ ...QUOTE_OPTION, exchange_token: t }));
     });
     const r = await rest.quotes([...syms, syms[0]]);
-    expect(calls.map((c) => c.path.split('/')[4].split(',').length)).toEqual([50, 50, 20]);
+    expect(calls.map((c) => c.path.split('/')[4].split(',').length)).toEqual([40, 40, 40]);
     expect(calls.every((c) => c.opts.kind === 'market' && c.opts.lane === 'general' && c.opts.endpoint === 'quotes nse_fo')).toBe(true);
-    expect(r.quotes.size).toBe(70);
+    expect(r.quotes.size).toBe(80);
     expect(r.quotes.get('nse_fo|1000')?.ltp).toBe(801.6);
-    expect(r.errors).toEqual([{ neosymbols: syms.slice(50, 100), error: expect.stringContaining('Invalid instrument') }]);
+    expect(r.errors).toEqual([{ neosymbols: syms.slice(40, 80), error: expect.stringContaining('Invalid instrument') }]);
+  });
+
+  it('a call Kotak refuses for its size ("Neo symbol max value to 50", HTTP 400) is split and asked again', async () => {
+    const syms = Array.from({ length: 40 }, (_, i) => `mcx_fo|${566000 + i}`);
+    const { rest, calls } = stub((path) => {
+      const toks = path.split('/')[4].split(',').map((s) => s.split('|')[1]);
+      if (toks.length > 15) return new KotakError('Kotak script-details/1.0/quotes failed: Please set the Neo symbol max value to 50.', 'api', 400);
+      return toks.map((t) => ({ ...QUOTE_OPTION, exchange_token: t }));
+    });
+    const r = await rest.quotes(syms);
+    expect(r.errors).toEqual([]);
+    expect(r.quotes.size).toBe(40);
+    expect(calls.map((c) => c.path.split('/')[4].split(',').length)).toEqual([40, 20, 20, 10, 10, 10, 10]);
   });
 
   it('throws when every chunk fails, and accepts a {data:[...]} envelope', async () => {

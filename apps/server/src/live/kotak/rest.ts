@@ -50,7 +50,16 @@ function compact<T extends object>(o: T): T {
 /* Quotes                                                                                       */
 /* ------------------------------------------------------------------------------------------ */
 
-export const QUOTES_MAX_PER_CALL = 50;
+/**
+ * Instruments per quotes call. The documentation says ≤ 50, but Kotak answers a call of exactly 50 with
+ * HTTP 400 "Please set the Neo symbol max value to 50" (seen live on mcx_fo), so calls stay well below it.
+ */
+export const QUOTES_MAX_PER_CALL = 40;
+
+/** Kotak refused a quotes call for its size (HTTP 400 "… Neo symbol max value …"): the call is split and retried. */
+export function isQuotesSizeError(e: unknown): boolean {
+  return e instanceof KotakError && e.httpStatus === 400 && /max value|neo ?symbol/i.test(e.message);
+}
 
 export interface KotakQuote {
   /** `${segment}|${token}` exactly as requested (index name unencoded, e.g. 'nse_cm|Nifty 50'). */
@@ -588,7 +597,7 @@ export function parseScripMasterPaths(body: unknown): ScripMasterPaths {
 export class KotakRest {
   constructor(private readonly session: KotakRequester) {}
 
-  /** Quotes of any number of instruments, ≤50 per call (official quotes.md). */
+  /** Quotes of any number of instruments, QUOTES_MAX_PER_CALL per call. */
   async quotes(neosymbols: string[], signal?: AbortSignal): Promise<QuotesResult> {
     const unique = [...new Set(neosymbols)];
     unique.forEach(splitNeo);
@@ -596,18 +605,28 @@ export class KotakRest {
     for (let i = 0; i < unique.length; i += QUOTES_MAX_PER_CALL) chunks.push(unique.slice(i, i + QUOTES_MAX_PER_CALL));
     // A 403 ("not enough privileges") holds only quotes of the same segments, never other endpoints.
     const endpoint = (c: string[]) => `quotes ${[...new Set(c.map((s) => splitNeo(s).segment))].sort().join(',')}`;
-    const settled = await Promise.allSettled(
-      chunks.map((c) => this.session.request(quotesPath(c), { kind: 'market', lane: 'general', signal, endpoint: endpoint(c) }).then(parseQuotes)),
-    );
     const quotes = new Map<string, KotakQuote>();
     const errors: QuotesResult['errors'] = [];
-    settled.forEach((r, i) => {
-      if (r.status === 'fulfilled') for (const q of r.value) quotes.set(q.neosymbol, q);
-      else errors.push({ neosymbols: chunks[i], error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
-    });
-    if (chunks.length && errors.length === chunks.length) {
-      const first = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected')?.reason;
-      throw first instanceof Error ? first : new KotakError(errors[0].error, 'api');
+    let firstError: unknown;
+    let answered = 0;
+    // One call; a call refused for its size is split in two and both halves asked (down to one symbol).
+    const fetchChunk = async (c: string[]): Promise<void> => {
+      try {
+        for (const q of parseQuotes(await this.session.request(quotesPath(c), { kind: 'market', lane: 'general', signal, endpoint: endpoint(c) }))) quotes.set(q.neosymbol, q);
+        answered++;
+      } catch (e) {
+        if (isQuotesSizeError(e) && c.length > 1) {
+          const half = Math.ceil(c.length / 2);
+          await Promise.all([fetchChunk(c.slice(0, half)), fetchChunk(c.slice(half))]);
+          return;
+        }
+        firstError ??= e;
+        errors.push({ neosymbols: c, error: e instanceof Error ? e.message : String(e) });
+      }
+    };
+    await Promise.all(chunks.map(fetchChunk));
+    if (chunks.length && answered === 0) {
+      throw firstError instanceof Error ? firstError : new KotakError(errors[0].error, 'api');
     }
     return { quotes, errors };
   }
