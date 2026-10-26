@@ -5,6 +5,7 @@ import type { McxChainResponse, McxLeg, McxSymbolsResponse } from '@q26/core';
 import { Card, Chg, cx, ErrorState, Loadable, PageHeader, Spinner, Stat, Val } from '../components/ui';
 import { api, qs } from '../lib/api';
 import { formatCompact, formatDateTime, formatExpiry, formatFixed, formatPrice, isNum } from '../lib/format';
+import { adaptivePoll } from '../lib/hooks';
 
 /**
  * MCX commodity option chain: live Kotak quotes only. MCX options settle into futures, so the price,
@@ -46,7 +47,7 @@ export default function McxChain() {
   const chain = useQuery({
     queryKey: ['mcx-chain', symbol, expiry ?? ''],
     queryFn: () => api<McxChainResponse>(`/mcx/chain/${encodeURIComponent(symbol)}${qs({ expiry })}`),
-    refetchInterval: 5000,
+    refetchInterval: adaptivePoll(5000),
     placeholderData: keepPreviousData,
     enabled: !!symbol,
   });

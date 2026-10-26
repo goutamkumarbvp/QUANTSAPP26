@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, type ComponentType } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
@@ -7,42 +7,64 @@ import { ensureSession } from './lib/api';
 import { useApp } from './lib/store';
 import { useLiveConnection } from './lib/ws';
 
-const Home = lazy(() => import('./pages/Home'));
-const Tools = lazy(() => import('./pages/Tools'));
-const OptionChainPage = lazy(() => import('./pages/OptionChain'));
-const McxChain = lazy(() => import('./pages/McxChain'));
-const Top10 = lazy(() => import('./pages/Top10'));
-const Watchlist = lazy(() => import('./pages/Watchlist'));
-const FnoMarket = lazy(() => import('./pages/FnoMarket'));
-const FiiDii = lazy(() => import('./pages/FiiDii'));
-const Participants = lazy(() => import('./pages/Participants'));
-const StrikeOI = lazy(() => import('./pages/oi/StrikeOI'));
-const MultiStrike = lazy(() => import('./pages/oi/MultiStrike'));
-const Pcr = lazy(() => import('./pages/oi/Pcr'));
-const MaxPain = lazy(() => import('./pages/oi/MaxPain'));
-const IvChart = lazy(() => import('./pages/vol/IvChart'));
-const IvTable = lazy(() => import('./pages/vol/IvTable'));
-const Skew = lazy(() => import('./pages/vol/Skew'));
-const Surface = lazy(() => import('./pages/vol/Surface'));
-const Cone = lazy(() => import('./pages/vol/Cone'));
-const Builder = lazy(() => import('./pages/Builder'));
-const Templates = lazy(() => import('./pages/Templates'));
-const Optimizer = lazy(() => import('./pages/Optimizer'));
-const Straddle = lazy(() => import('./pages/Straddle'));
-const StrategyChart = lazy(() => import('./pages/StrategyChart'));
-const Recap = lazy(() => import('./pages/Recap'));
-const Positions = lazy(() => import('./pages/Positions'));
-const Strategies = lazy(() => import('./pages/Strategies'));
-const Alerts = lazy(() => import('./pages/Alerts'));
-const Scanners = lazy(() => import('./pages/Scanners'));
-const Unusual = lazy(() => import('./pages/Unusual'));
-const OrderBook = lazy(() => import('./pages/OrderBook'));
-const Orb = lazy(() => import('./pages/Orb'));
-const Algo = lazy(() => import('./pages/Algo'));
-const Calculators = lazy(() => import('./pages/Calculators'));
-const Learn = lazy(() => import('./pages/Learn'));
-const Settings = lazy(() => import('./pages/Settings'));
-const NotFound = lazy(() => import('./pages/NotFound'));
+/** Every page's code loader, so the tabs can be fetched ahead of the first click. */
+const loaders: Array<() => Promise<unknown>> = [];
+function page<T extends ComponentType<object>>(load: () => Promise<{ default: T }>) {
+  loaders.push(load);
+  return lazy(load);
+}
+
+/**
+ * Loads every tab's code once the browser is idle after start-up (one chunk at a time), so a tab switch
+ * renders at once instead of showing a spinner while its code downloads. Already-loaded chunks cost nothing.
+ */
+export function preloadPages(): void {
+  const idle = (fn: () => void) => ('requestIdleCallback' in window ? window.requestIdleCallback(fn, { timeout: 3000 }) : setTimeout(fn, 500));
+  const next = (i: number) => {
+    if (i >= loaders.length) return;
+    loaders[i]()
+      .catch(() => undefined)
+      .finally(() => idle(() => next(i + 1)));
+  };
+  idle(() => next(0));
+}
+
+const Home = page(() => import('./pages/Home'));
+const Tools = page(() => import('./pages/Tools'));
+const OptionChainPage = page(() => import('./pages/OptionChain'));
+const McxChain = page(() => import('./pages/McxChain'));
+const Top10 = page(() => import('./pages/Top10'));
+const Watchlist = page(() => import('./pages/Watchlist'));
+const FnoMarket = page(() => import('./pages/FnoMarket'));
+const FiiDii = page(() => import('./pages/FiiDii'));
+const Participants = page(() => import('./pages/Participants'));
+const StrikeOI = page(() => import('./pages/oi/StrikeOI'));
+const MultiStrike = page(() => import('./pages/oi/MultiStrike'));
+const Pcr = page(() => import('./pages/oi/Pcr'));
+const MaxPain = page(() => import('./pages/oi/MaxPain'));
+const IvChart = page(() => import('./pages/vol/IvChart'));
+const IvTable = page(() => import('./pages/vol/IvTable'));
+const Skew = page(() => import('./pages/vol/Skew'));
+const Surface = page(() => import('./pages/vol/Surface'));
+const Cone = page(() => import('./pages/vol/Cone'));
+const Builder = page(() => import('./pages/Builder'));
+const Templates = page(() => import('./pages/Templates'));
+const Optimizer = page(() => import('./pages/Optimizer'));
+const Straddle = page(() => import('./pages/Straddle'));
+const StrategyChart = page(() => import('./pages/StrategyChart'));
+const Recap = page(() => import('./pages/Recap'));
+const Positions = page(() => import('./pages/Positions'));
+const Strategies = page(() => import('./pages/Strategies'));
+const Alerts = page(() => import('./pages/Alerts'));
+const Scanners = page(() => import('./pages/Scanners'));
+const Unusual = page(() => import('./pages/Unusual'));
+const OrderBook = page(() => import('./pages/OrderBook'));
+const Orb = page(() => import('./pages/Orb'));
+const Algo = page(() => import('./pages/Algo'));
+const Calculators = page(() => import('./pages/Calculators'));
+const Learn = page(() => import('./pages/Learn'));
+const Settings = page(() => import('./pages/Settings'));
+const NotFound = page(() => import('./pages/NotFound'));
 
 export function App() {
   const setUser = useApp((s) => s.setUser);
@@ -55,6 +77,10 @@ export function App() {
       .catch((e) => setError(e))
       .finally(() => setReady(true));
   }, [setUser]);
+
+  useEffect(() => {
+    if (ready) preloadPages();
+  }, [ready]);
 
   useLiveConnection(ready);
   const location = useLocation();

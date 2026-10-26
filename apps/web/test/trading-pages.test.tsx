@@ -143,7 +143,7 @@ const clk = (k: string) => [k];
 /* ------------------------------------------------------------------ option chain */
 
 describe('Option chain', () => {
-  const seeds = (c: OptionChain | ApiError, at: number | 'live' = 'live'): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', at], expiries], [['chain', 'NIFTY', '', at], c]];
+  const seeds = (c: OptionChain | ApiError, at: number | 'live' = 'live'): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', at], expiries], [['chain', 'NIFTY', expiries.options[0], at], c]];
 
   it('live chain: spot line, ATM strike and ITM shading, IV source marker, bid/ask', () => {
     const html = render(<OptionChainPage />, seeds(chainOf({ coverage: 'PCR over 5 strikes' })));
@@ -494,16 +494,16 @@ describe('Strategy Wizard', () => {
 
 describe('Strategy Optimizer', () => {
   it('renders without a result and without NaN', () => {
-    const html = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], chainOf()]]);
+    const html = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', expiries.options[0], 'live'], chainOf()]]);
     expect(html).toContain('Find best strategies');
     expect(html).not.toMatch(BAD);
   });
 
   it('the disabled button says why, as text', () => {
-    const noSpot = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], chainOf({ spot: null })]]);
+    const noSpot = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', expiries.options[0], 'live'], chainOf({ spot: null })]]);
     expect(noSpot).toMatch(/<button class="btn-primary" disabled=""/);
     expect(noSpot).toContain('role="note">Enter a target price (there is no live NIFTY spot to pre-fill it from)</span>');
-    const down = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', '', 'live'], new ApiError('No live NIFTY option chain', 503, 'NO_LIVE_DATA')]]);
+    const down = render(<Optimizer />, [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [['chain', 'NIFTY', expiries.options[0], 'live'], new ApiError('No live NIFTY option chain', 503, 'NO_LIVE_DATA')]]);
     expect(down).toContain('The option chain is not available: No live NIFTY option chain');
   });
 });

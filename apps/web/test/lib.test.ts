@@ -3,6 +3,7 @@ import { FEED_STALE_MS, type FeedStatus, type MarketClockInfo } from '@q26/core'
 import { ApiError, api, errorText, isClientError, isNoLiveData, RequestTimeoutError } from '../src/lib/api';
 import { feedView, STALE_TICK_MS } from '../src/lib/feed';
 import * as fmt from '../src/lib/format';
+import { adaptivePoll, NO_LIVE_POLL_MS } from '../src/lib/hooks';
 import { shouldRetry } from '../src/lib/query';
 
 /** The error a call rejects with. */
@@ -175,6 +176,21 @@ describe('query retry policy', () => {
     expect(shouldRetry(1, new TypeError('Failed to fetch'))).toBe(false);
     expect(shouldRetry(0, new ApiError('boom', 500))).toBe(true);
     expect(shouldRetry(0, new ApiError('unavailable', 503))).toBe(true); // a 503 without the NO_LIVE_DATA code is an outage
+  });
+});
+
+describe('adaptive polling', () => {
+  const st = (error: unknown) => ({ state: { error, data: undefined } });
+  it('keeps the page interval while answers arrive', () => {
+    expect(adaptivePoll(1000)(st(null))).toBe(1000);
+    expect(adaptivePoll(2000)(st(new ApiError('boom', 500)))).toBe(2000);
+  });
+  it('slows down while the server says the data is not live, never below the page interval', () => {
+    expect(adaptivePoll(1000)(st(new ApiError('closed', 503, 'NO_LIVE_DATA')))).toBe(NO_LIVE_POLL_MS);
+    expect(adaptivePoll(60_000)(st(new ApiError('closed', 503, 'NO_LIVE_DATA')))).toBe(60_000);
+  });
+  it('a query that does not poll stays off', () => {
+    expect(adaptivePoll(false)(st(new ApiError('closed', 503, 'NO_LIVE_DATA')))).toBe(false);
   });
 });
 

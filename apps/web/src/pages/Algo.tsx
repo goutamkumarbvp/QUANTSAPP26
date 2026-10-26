@@ -18,7 +18,7 @@ import { SessionDate } from '../components/pickers';
 import { Card, cx, Dash, ErrorBox, ErrorState, Field, Gaps, Loadable, NoData, PageHeader, Pill, Segmented, Select, Spinner, Stat, Toggle, Val } from '../components/ui';
 import { api, qs } from '../lib/api';
 import { formatDate, formatDateTime, formatExpiry, formatINR, formatIndian, formatSessionTime, isNum, pnlClass } from '../lib/format';
-import { useLive } from '../lib/hooks';
+import { adaptivePoll, useLive } from '../lib/hooks';
 import { useTicks } from '../lib/store';
 
 type Params = Record<string, string | number | boolean>;
@@ -318,7 +318,7 @@ function DayBacktest({ algoId, params, date, setDate }: { algoId: string; params
   const q = useQuery({
     queryKey: ['algo-bt-day', algoId, key, date],
     queryFn: () => api<AlgoBacktestDay>(`/algos/${algoId}/backtest`, { body: { params, date: date || undefined } }),
-    refetchInterval: date ? false : 15_000,
+    refetchInterval: adaptivePoll(date ? false : 15_000),
     retry: false,
   });
   return (

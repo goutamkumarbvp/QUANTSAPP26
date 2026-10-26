@@ -7,7 +7,7 @@ import { pickStrike, StrikeSelect, SymbolSelect } from '../components/pickers';
 import { AsOf, Card, Chg, Dash, Empty, ErrorBox, ErrorState, Field, Loadable, PageHeader, Segmented, Val } from '../components/ui';
 import { api, isNoLiveData } from '../lib/api';
 import { formatCompact, formatExpiry, formatIndian } from '../lib/format';
-import { useChain, useExpiries } from '../lib/hooks';
+import { useChain, useExpiries, adaptivePoll } from '../lib/hooks';
 import { useApp } from '../lib/store';
 
 /** Row label before (or without) a priced quote: the instrument itself. */
@@ -61,7 +61,7 @@ export default function Watchlist() {
   const [ticket, setTicket] = useState<TicketSpec | null>(null);
   const [error, setError] = useState<unknown>(null);
   const active = lists.data?.find((w) => w.id === activeId) ?? lists.data?.[0];
-  const quotes = useQuery({ queryKey: ['watch-quotes', active?.id, active?.items.length], queryFn: () => api<WatchQuote[]>(`/watchlists/${active!.id}/quotes`), enabled: !!active, refetchInterval: 2000 });
+  const quotes = useQuery({ queryKey: ['watch-quotes', active?.id, active?.items.length], queryFn: () => api<WatchQuote[]>(`/watchlists/${active!.id}/quotes`), enabled: !!active, refetchInterval: adaptivePoll(2000) });
   // The server says nothing is live: the last prices are not kept on screen.
   const priced = isNoLiveData(quotes.error) ? undefined : quotes.data;
   const save = async (items: WatchItem[]) => {

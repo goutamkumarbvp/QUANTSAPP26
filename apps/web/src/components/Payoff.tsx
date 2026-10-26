@@ -26,7 +26,7 @@ import {
 } from '@q26/core';
 import { api, errorText, isNoLiveData, qs } from '../lib/api';
 import { formatINR, formatIndian, formatFixed, isNum } from '../lib/format';
-import { useExpiries, useLive, useMeta, useSymbolInfo } from '../lib/hooks';
+import { useExpiries, useLive, useMeta, useSymbolInfo, adaptivePoll } from '../lib/hooks';
 import { Chart, axis, baseOption, useChartColors, pnlVisualMap } from './Chart';
 import { AsOf, Gaps, NoData, Spinner, Stat } from './ui';
 
@@ -119,7 +119,7 @@ export function useStrategyView(
     queries: wanted.map((e) => ({
       queryKey: ['chain', symbol, e, opts.at ?? 'live'],
       queryFn: () => api<OptionChain>(`/chain/${encodeURIComponent(symbol)}${qs({ expiry: e || undefined, at: opts.at })}`),
-      refetchInterval: opts.at ? (false as const) : 3000,
+      refetchInterval: adaptivePoll(opts.at ? false : 3000),
       placeholderData: keepPreviousData,
     })),
   });

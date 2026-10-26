@@ -8,6 +8,7 @@ import { api, isNoLiveData } from '../lib/api';
 import { formatFixed, formatINR, formatIndian, formatSessionTime, isNum } from '../lib/format';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useBuilder, useTicks } from '../lib/store';
+import { adaptivePoll } from '../lib/hooks';
 
 const MIN = 60_000;
 
@@ -23,7 +24,7 @@ export default function StrategyChart() {
     queryKey: ['strategy-chart', JSON.stringify(body)],
     queryFn: () => api<StrategyChartPoint[]>('/strategy-chart', { body }),
     enabled: legs.length > 0,
-    refetchInterval: date ? false : 10000,
+    refetchInterval: adaptivePoll(date ? false : 10000),
     placeholderData: keepPreviousData,
   });
   const c = useChartColors();
