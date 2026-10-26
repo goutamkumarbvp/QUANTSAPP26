@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
@@ -161,6 +162,9 @@ function requireUser(req: FastifyRequest): StoredUser {
   return req.user;
 }
 
+/** JSON answers at least this long are gzipped when the client accepts it. */
+export const GZIP_MIN_BYTES = 2048;
+
 const RATE_WINDOW_MS = 60_000;
 /** Client keys kept by the rate limiter at most (oldest windows are dropped first). */
 const RATE_MAX_KEYS = 20_000;
@@ -251,7 +255,24 @@ export async function buildApp(
     // Behind a reverse proxy (TRUST_PROXY): req.ip is the real client, so the limits apply per client.
     ...(svc.config.trustProxy !== undefined ? { trustProxy: svc.config.trustProxy } : {}),
   });
-  await app.register(cors, { origin: true });
+  // Browsers may call the API only from the app's own page (same host) or WS_ALLOWED_ORIGINS: another
+  // website open in the same browser cannot read the answers or drive the sign-in routes.
+  await app.register(cors, {
+    delegator: (req, cb) => cb(null, { origin: wsOriginAllowed(req.headers.origin, req.headers.host, svc.config.wsAllowedOrigins) }),
+  });
+  // Defensive headers on every answer, and gzip for larger JSON answers (chains, order flow: 5–10x smaller).
+  app.addHook('onSend', async (req, reply, payload) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('x-frame-options', 'DENY');
+    reply.header('referrer-policy', 'no-referrer');
+    if (typeof payload !== 'string' || payload.length < GZIP_MIN_BYTES || reply.hasHeader('content-encoding')) return payload;
+    if (!String(reply.getHeader('content-type') ?? '').startsWith('application/json')) return payload;
+    if (!/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) return payload;
+    reply.header('content-encoding', 'gzip');
+    reply.header('vary', 'accept-encoding');
+    reply.removeHeader('content-length');
+    return gzipSync(payload, { level: 5 });
+  });
   await app.register(websocket);
 
   app.addHook('onResponse', async (req, reply) => {

@@ -5,6 +5,7 @@ import { feedView, STALE_TICK_MS } from '../src/lib/feed';
 import * as fmt from '../src/lib/format';
 import { adaptivePoll, NO_LIVE_POLL_MS } from '../src/lib/hooks';
 import { shouldRetry } from '../src/lib/query';
+import { trackSymbols } from '../src/lib/ws';
 
 /** The error a call rejects with. */
 const failure = (p: Promise<unknown>): Promise<ApiError> =>
@@ -191,6 +192,15 @@ describe('adaptive polling', () => {
   });
   it('a query that does not poll stays off', () => {
     expect(adaptivePoll(false)(st(new ApiError('closed', 503, 'NO_LIVE_DATA')))).toBe(false);
+  });
+});
+
+describe('live symbol subscriptions', () => {
+  it('one component leaving never drops a symbol another still wants', () => {
+    trackSymbols(['NIFTY', 'RELIANCE'], 1); // A
+    trackSymbols(['RELIANCE', 'TCS'], 1); // B
+    expect(trackSymbols(['NIFTY', 'RELIANCE'], -1).sort()).toEqual(['RELIANCE', 'TCS']); // A leaves
+    expect(trackSymbols(['RELIANCE', 'TCS'], -1)).toEqual([]); // B leaves
   });
 });
 

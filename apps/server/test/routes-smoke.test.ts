@@ -17,7 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { istTs, maxPain, type OptionChain, type Quote, type ServerMessage } from '@q26/core';
-import { buildApp } from '../src/app';
+import { gunzipSync } from 'node:zlib';
+import { buildApp, GZIP_MIN_BYTES } from '../src/app';
 import { loadConfig } from '../src/config';
 import { futKey, optKey, spotKey } from '../src/services/live';
 import { createServices, type Services } from '../src/services';
@@ -500,6 +501,34 @@ describe('validation, auth and ownership', () => {
 });
 
 /* ------------------------------------------------------------------------------------------ */
+
+describe('browser hardening: CORS, headers, compression', () => {
+  it('answers CORS only for the same host or WS_ALLOWED_ORIGINS, never for another website', async () => {
+    const { app } = await setup();
+    const same = await app.inject({ method: 'GET', url: '/api/meta', headers: { host: 'localhost:8787', origin: 'http://localhost:8787' } });
+    expect(same.headers['access-control-allow-origin']).toBe('http://localhost:8787');
+    const evil = await app.inject({ method: 'GET', url: '/api/meta', headers: { host: 'localhost:8787', origin: 'https://evil.example' } });
+    expect(evil.headers['access-control-allow-origin']).toBeUndefined();
+    const pre = await app.inject({ method: 'OPTIONS', url: '/api/auth/guest', headers: { host: 'localhost:8787', origin: 'https://evil.example', 'access-control-request-method': 'POST' } });
+    expect(pre.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('sends defensive headers and gzips large JSON only when the client accepts it', async () => {
+    const { app } = await setup();
+    const plain = await app.inject({ method: 'GET', url: '/api/chain/NIFTY' });
+    expect(plain.statusCode).toBe(200);
+    expect(plain.headers['x-content-type-options']).toBe('nosniff');
+    expect(plain.headers['x-frame-options']).toBe('DENY');
+    expect(plain.headers['content-encoding']).toBeUndefined();
+    expect(plain.body.length).toBeGreaterThan(GZIP_MIN_BYTES);
+    const zipped = await app.inject({ method: 'GET', url: '/api/chain/NIFTY', headers: { 'accept-encoding': 'gzip, deflate, br' } });
+    expect(zipped.headers['content-encoding']).toBe('gzip');
+    expect(zipped.rawPayload.length).toBeLessThan(plain.rawPayload.length / 3);
+    expect(JSON.parse(gunzipSync(zipped.rawPayload).toString('utf8'))).toEqual(plain.json());
+    const small = await app.inject({ method: 'GET', url: '/api/health', headers: { 'accept-encoding': 'gzip' } });
+    expect(small.headers['content-encoding']).toBeUndefined();
+  });
+});
 
 describe('websocket fan-out', () => {
   async function connect(app: FastifyInstance) {

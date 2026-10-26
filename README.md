@@ -114,7 +114,7 @@ logged in, and serves only official EOD files and already-recorded history):
 | `NO_COLOR` | — | Set to turn off colours in the terminal |
 | `ALERT_WEBHOOK_URL` | — | Optional webhook (Slack / Discord / ntfy) that receives the operations alerts (watchdog CRITICAL, login PAUSED, audit FAIL). Operators always get them as in-app notifications too |
 | `TRUST_PROXY` | — | Address(es) of your reverse proxy (or `true`), so rate limits apply per real client |
-| `WS_ALLOWED_ORIGINS` | — | Extra browser origins allowed to open the market-data socket (default: this server's own host name) |
+| `WS_ALLOWED_ORIGINS` | — | Extra browser origins allowed to call the API (CORS) and open the market-data socket (default: only this server's own host name) |
 
 ### Network allowlist
 
