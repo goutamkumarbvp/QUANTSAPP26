@@ -152,7 +152,7 @@ export default function Orb() {
         <Segmented value={rule} onChange={setRule} options={[{ value: 'close', label: '1-min close beyond' }, { value: 'touch', label: 'Any touch' }]} />
       </div>
 
-      <Loadable q={q} hint="The opening range is built from the 1-minute bars this app recorded from 09:15 (or Kotak 1-minute history for the last sessions); nothing is guessed when they are missing.">
+      <Loadable q={q} hint="The opening range is built from the 1-minute bars this app recorded from the open — 09:15 (MCX 09:00) — (or Kotak 1-minute history for the last sessions); nothing is guessed when they are missing.">
         {(d) => {
           const e = d.evaluation;
           const first = e.breaks[0];

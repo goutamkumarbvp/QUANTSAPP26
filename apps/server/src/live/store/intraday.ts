@@ -20,7 +20,7 @@ import path from 'node:path';
 import { istParts } from '@q26/core';
 import { isIsoDate } from '../calendar';
 import { keyId } from '../types';
-import type { ChainMinute, ChainRowLive, InstrumentKey, IntradayStore, LiveQuote, MinuteRecord, OptKind, RawChain } from '../types';
+import type { ChainMinute, ChainRowLive, InstrumentKey, IntradayStore, LiveQuote, MinuteRecord, OptKind, RawChain, ReferenceData } from '../types';
 
 const MINUTE_MS = 60_000;
 
@@ -197,6 +197,39 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   /** The recorder registers itself here to serve liveBar(). */
   setLiveSource(src: LiveBarSource | null): void {
     this.live = src;
+  }
+
+  private ref: Partial<Pick<ReferenceData, 'quoteKey' | 'underlyingFuture'>> | null = null;
+
+  /**
+   * Instrument master hooks for MCX commodities: their SPOT is recorded as a future (quoteKey), and
+   * their options are written on the future they settle into (underlyingFuture).
+   */
+  setRef(ref: Partial<Pick<ReferenceData, 'quoteKey' | 'underlyingFuture'>> | null): void {
+    this.ref = ref;
+  }
+
+  /** A commodity (its SPOT stands for a future). */
+  private isFutureSpot(symbol: string): boolean {
+    try {
+      return this.ref?.quoteKey?.({ symbol, kind: 'SPOT' }).kind === 'FUT';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The recorded instrument a key stands for on `date`: a commodity's SPOT is the nearest future
+   * (expiring on or after the date) recorded that day — the near month of that session, also after a
+   * later rollover; any other key is itself.
+   */
+  private recordedKey(key: InstrumentKey, date: string): InstrumentKey {
+    if (key.kind !== 'SPOT' || !this.isFutureSpot(key.symbol)) return key;
+    const futs = this.listDir(path.join(this.dateDir(date), 'bars', encodeSymbol(key.symbol)))
+      .map((f) => parseInstrumentFile(key.symbol, f))
+      .filter((k): k is InstrumentKey => !!k && k.kind === 'FUT' && (k.expiry as string) >= date)
+      .sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string));
+    return futs[0] ?? this.ref!.quoteKey!(key);
   }
 
   /* ---------------------------------- paths ---------------------------------- */
@@ -408,11 +441,17 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
   /* ---------------------------------- reads ---------------------------------- */
 
   bars(key: InstrumentKey, date: string): MinuteRecord[] {
-    return this.loadBars(this.barPath(key, date)).map((r) => ({ ...r }));
+    return this.loadBars(this.barPath(this.recordedKey(key, date), date)).map((r) => ({ ...r }));
   }
 
   liveBar(key: InstrumentKey): MinuteRecord | null {
-    return this.live?.liveBar(key) ?? null;
+    let k = key;
+    try {
+      if (key.kind === 'SPOT' && this.ref?.quoteKey) k = this.ref.quoteKey(key);
+    } catch {
+      k = key;
+    }
+    return this.live?.liveBar(k) ?? null;
   }
 
   /**
@@ -420,7 +459,8 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
    * the minute that is still running at `ts` is not returned.
    */
   at(key: InstrumentKey, ts: number): MinuteRecord | undefined {
-    const list = this.loadBars(this.barPath(key, istParts(ts).date));
+    const date = istParts(ts).date;
+    const list = this.loadBars(this.barPath(this.recordedKey(key, date), date));
     const i = lastAtOrBefore(list, ts - MINUTE_MS);
     return i >= 0 ? { ...list[i] } : undefined;
   }
@@ -455,7 +495,14 @@ export class IntradayFiles implements IntradayStore, IntradayWriter {
     const chain: RawChain = { symbol, expiry, ts, rows: [...rows.values()].sort((a, b) => a.strike - b.strike) };
     const spot = this.quoteAt({ symbol, kind: 'SPOT' }, ts);
     if (spot) chain.spot = spot;
-    const same = futures.find((f) => f.expiry === expiry);
+    // The future the options are written on: same expiry (NSE/BSE), the one it settles into (MCX).
+    let fe = expiry;
+    try {
+      fe = this.ref?.underlyingFuture?.(symbol, expiry) ?? expiry;
+    } catch {
+      fe = expiry;
+    }
+    const same = futures.find((f) => f.expiry === fe);
     const ordered = [...(same ? [same] : []), ...futures.filter((f) => f !== same && (f.expiry as string) >= date).sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string))];
     for (const f of ordered) {
       const q = this.quoteAt(f, ts);

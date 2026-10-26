@@ -1,6 +1,7 @@
 /**
  * Wire types shared by the API server and the web client.
  */
+import type { ExchangeCode } from './dates';
 import type { BuildUp } from './oi';
 import type { InstrumentType, Leg, Side } from './payoff';
 import type { FlowSummary, MinuteBar, OrbEvaluation, OrbRule, OrbTrend } from './orb';
@@ -48,15 +49,20 @@ export interface MarketClockInfo {
   status: MarketStatusCode;
   /** Minutes since 09:15 (0..375). */
   sessionMinute: number;
+  /** MCX session state (09:00–23:30/23:55 IST) when the server lists MCX commodities. */
+  mcxStatus?: MarketStatusCode;
   /** Live data health (sent by /api/clock, /api/meta, /api/health and the websocket). */
   feed?: FeedStatus;
 }
 
+/** What an underlying is: an index, a stock, or an MCX commodity (options written on its futures). */
+export type UnderlyingKind = 'index' | 'stock' | 'commodity';
+
 export interface SymbolInfo {
   symbol: string;
   name: string;
-  kind: 'index' | 'stock';
-  exchange: 'NSE' | 'BSE';
+  kind: UnderlyingKind;
+  exchange: ExchangeCode;
   sector: string;
   /** Current lot size from the instrument master. */
   lotSize: number;
@@ -345,7 +351,7 @@ export interface FuturesBuildUpRow {
   symbol: string;
   name: string;
   sector: string;
-  kind: 'index' | 'stock';
+  kind: UnderlyingKind;
   expiry: string;
   ltp: number | null;
   changePct: number | null;
@@ -432,7 +438,7 @@ export interface IvChartResponse extends DataGaps {
 
 export interface IvTableRow extends DataGaps {
   symbol: string;
-  kind: 'index' | 'stock';
+  kind: UnderlyingKind;
   sector: string;
   ltp: number | null;
   changePct: number | null;
@@ -958,7 +964,7 @@ export interface OrbResponse extends DataGaps {
 export interface OrbScanRow {
   symbol: string;
   name: string;
-  kind: 'index' | 'stock';
+  kind: UnderlyingKind;
   sector: string;
   ltp: number;
   changePct: number | null;
@@ -1159,6 +1165,8 @@ export interface DashboardResponse extends DataGaps {
   clock: MarketClockInfo;
   /** Index quotes with a live-session price (indices without one are listed in `gaps.indices`). */
   indices: Quote[];
+  /** MCX commodity quotes (near-month future) with a live-session price (`gaps.commodities` names the others). */
+  commodities: Quote[];
   /** Stocks up the most / down the most today (live spot change; only stocks with one). */
   gainers: DashboardMover[];
   losers: DashboardMover[];
@@ -1329,59 +1337,6 @@ export interface OpsActionResponse {
   ok: boolean;
   message: string;
   status: OpsStatusResponse;
-}
-
-// ---- MCX (commodity) option chain: live Kotak quotes only; a value Kotak does not send is null ----
-
-export interface McxLeg {
-  token: string;
-  tradingSymbol: string;
-  ltp: number | null;
-  change: number | null;
-  changePct: number | null;
-  oi: number | null;
-  volume: number | null;
-  bid: number | null;
-  ask: number | null;
-  /** Black-76 implied volatility (decimal) from the LTP and the future price; null when it cannot be solved. */
-  iv: number | null;
-  delta: number | null;
-  /** Exchange time of the quote (epoch ms), else null. */
-  ts: number | null;
-}
-
-export interface McxChainRow {
-  strike: number;
-  ce: McxLeg | null;
-  pe: McxLeg | null;
-}
-
-export interface McxChainResponse {
-  symbol: string;
-  expiry: string;
-  /** Option expiries of the commodity, nearest first. */
-  expiries: string[];
-  lotSize: number;
-  /** The futures contract the options are written on (MCX options settle into futures). */
-  future: { expiry: string; tradingSymbol: string; ltp: number | null; changePct: number | null; ts: number | null };
-  atmStrike: number | null;
-  rows: McxChainRow[];
-  /** Over the strikes shown. */
-  totals: { ceOi: number; peOi: number; pcr: number | null };
-  maxPain: number | null;
-  /** Latest exchange time among the quotes, else null. */
-  asOf: number | null;
-  market: { open: boolean; note: string };
-  /** Kotak instrument-master date the contracts come from. */
-  masterDate: string;
-  /** Why some values are blank (quote calls that failed, no future price …). */
-  gaps: string[];
-}
-
-export interface McxSymbolsResponse {
-  masterDate: string;
-  symbols: { symbol: string; lotSize: number; optionExpiries: string[]; futureExpiries: string[] }[];
-  warnings: string[];
 }
 
 // ---- NIFTY heavyweights desk (GET /api/top10): futures + options + flow of each stock, live ----

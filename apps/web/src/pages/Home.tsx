@@ -190,7 +190,7 @@ export default function Home() {
   const setSymbol = useApp((s) => s.setSymbol);
   return (
     <div className="space-y-3">
-      <PageHeader title="Market Overview" subtitle="Indices, derivatives snapshot, movers and institutional flows" />
+      <PageHeader title="Market Overview" subtitle="Indices, MCX commodities, derivatives snapshot, movers and institutional flows" />
       {/* Login monitor, 24×7 watchdog and weekly audit: independent of the market data below. */}
       <OperationsPanel />
       <Loadable q={q}>
@@ -212,6 +212,23 @@ export default function Home() {
                 <NoData compact title="No live index prices" reason={g.indices} />
               )}
               {d.indices.length > 0 && g.indices ? <Gaps gaps={g} only={['indices']} /> : null}
+              {/* MCX commodities: price = near-month future; MCX trades 09:00–23:30 (23:55 in US winter). */}
+              <div>
+                <div className="mb-1 flex items-baseline justify-between text-2xs text-muted">
+                  <span className="font-semibold uppercase tracking-wide">Commodities · MCX</span>
+                  <span>near-month future · 09:00–23:30/23:55 IST</span>
+                </div>
+                {(d.commodities ?? []).length ? (
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                    {(d.commodities ?? []).map((x) => (
+                      <IndexCard key={x.symbol} q={x} />
+                    ))}
+                  </div>
+                ) : (
+                  <NoData compact title="No live MCX prices" reason={g.commodities ?? 'No MCX commodity is listed'} />
+                )}
+                {(d.commodities ?? []).length > 0 && g.commodities ? <Gaps gaps={g} only={['commodities']} /> : null}
+              </div>
 
               <Card title="Derivatives snapshot" pad={false}>
                 <div className="overflow-x-auto">

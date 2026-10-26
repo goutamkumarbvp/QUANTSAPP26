@@ -222,7 +222,7 @@ export const KNOWN_INDEX_TOKENS: Readonly<Record<string, string>> = {
   'nse_cm|26074': 'NIFTY MID SELECT',
 };
 
-const SEGMENTS = new Set<string>(['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo']);
+const SEGMENTS = new Set<string>(['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo', 'mcx_fo']);
 const asSegment = (s: string): Segment | undefined => (SEGMENTS.has(s) ? (s as Segment) : undefined);
 const subKey = (s: SFeedSub): string => `${s.intent}|${s.segment}|${s.token}`;
 const isValidSub = (s: SFeedSub): boolean =>
@@ -285,7 +285,7 @@ export function toQuotePatch(p: SFeedIndexPacket | SFeedMarketPicturePacket | SF
   set('volume', nonNegative(p.volume));
   set('totalBuyQty', nonNegative(p.totalBuyQty));
   set('totalSellQty', nonNegative(p.totalSellQty));
-  if (segment === 'nse_fo' || segment === 'bse_fo') set('oi', nonNegative(p.oi));
+  if (segment === 'nse_fo' || segment === 'bse_fo' || segment === 'mcx_fo') set('oi', nonNegative(p.oi));
   set('turnover', p.turnover === null ? undefined : positive(p.turnover));
   set('upperCircuit', positive(p.upperCircuit));
   set('lowerCircuit', positive(p.lowerCircuit));

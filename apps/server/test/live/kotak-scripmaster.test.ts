@@ -79,13 +79,25 @@ function bseFo(expiry = (d: string) => bseExpiry(d)): string {
 
 const bseCm = () => scripCsv([cmRow({ seg: 'bse_cm', token: 500325, group: 'A', name: 'RELIANCE', trd: 'RELIANCE', desc: 'RELIANCE INDUSTRIES LTD.' })]);
 
-type Files = Partial<Record<'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo', Reply>>;
+/** TEST mcx_fo file: CRUDEOIL futures (Nov, Dec) and Nov options settling into the Nov future. */
+function mcxFo(): string {
+  const exp = (d: string) => Date.parse(`${d}T18:00:00Z`) / 1000; // plain Unix seconds, 23:30 IST
+  return scripCsv([
+    foRow({ seg: 'mcx_fo', token: 450001, inst: 'FUTCOM', name: 'CRUDEOIL', trd: 'CRUDEOIL26NOVFUT', opt: 'XX', expiry: exp('2026-11-19'), strike: -1, lot: 100 }),
+    foRow({ seg: 'mcx_fo', token: 450002, inst: 'FUTCOM', name: 'CRUDEOIL', trd: 'CRUDEOIL26DECFUT', opt: 'XX', expiry: exp('2026-12-17'), strike: -1, lot: 100 }),
+    ...[5400, 5450, 5500, 5550, 5600].flatMap((k, i) =>
+      (['CE', 'PE'] as const).map((t, j) => foRow({ seg: 'mcx_fo', token: 451000 + i * 2 + j, inst: 'OPTFUT', name: 'CRUDEOIL', trd: `CRUDEOIL26NOV${k}${t}`, opt: t, expiry: exp('2026-11-16'), strike: k * 100, lot: 100 })),
+    ),
+  ]);
+}
+
+type Files = Partial<Record<'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo' | 'mcx_fo', Reply>>;
 
 function harness(dataDir: string, files: Files, opts: { day?: string; extra?: Partial<ScripMasterOptions> } = {}) {
   const paths = filePaths(opts.day ?? DATE).data.filesPaths;
   let pathCalls = 0;
   const ff = fakeFetch((c) => {
-    const seg = (['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo'] as const).find((s) => c.url.includes(`/${s}`));
+    const seg = (['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo', 'mcx_fo'] as const).find((s) => c.url.includes(`/${s}`));
     if (!seg || c.url.includes('nse_com')) throw new Error(`unexpected download ${c.url}`);
     return files[seg] ?? { status: 404, text: '404: Not Found' };
   });
@@ -101,13 +113,58 @@ function harness(dataDir: string, files: Files, opts: { day?: string; extra?: Pa
   return { sm, ff, pathCalls: () => pathCalls };
 }
 
-const ALL: Files = { nse_cm: { text: nseCm() }, bse_cm: { text: bseCm() }, nse_fo: { text: nseFo() }, bse_fo: { text: bseFo() } };
+const ALL: Files = { nse_cm: { text: nseCm() }, bse_cm: { text: bseCm() }, nse_fo: { text: nseFo() }, bse_fo: { text: bseFo() }, mcx_fo: { text: mcxFo() } };
 
 let dir = '';
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'q26-scrip-'));
 });
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+describe('ScripMaster: MCX commodities', () => {
+  it('lists an MCX commodity as an ordinary underlying: spot = near-month future, options on the future they settle into', async () => {
+    const { sm } = harness(dir, ALL);
+    await sm.refresh(DATE);
+    const u = sm.underlying('CRUDEOIL');
+    expect(u).toMatchObject({ symbol: 'CRUDEOIL', name: 'Crude Oil', kind: 'commodity', exchange: 'MCX', sector: 'Energy', lotSize: 100, strikeStep: 50 });
+    expect(u.spot).toMatchObject({ kind: 'SPOT', segment: 'mcx_fo', token: '450001', expiry: '2026-11-19' });
+    expect(sm.expiries('CRUDEOIL', 'OPT')).toEqual(['2026-11-16']);
+    expect(sm.expiries('CRUDEOIL', 'FUT')).toEqual(['2026-11-19', '2026-12-17']);
+    expect(sm.strikes('CRUDEOIL', '2026-11-16')).toEqual([5400, 5450, 5500, 5550, 5600]);
+    expect(sm.underlyingFuture('CRUDEOIL', '2026-11-16')).toBe('2026-11-19');
+    expect(sm.underlyingFuture('NIFTY', '2026-10-27')).toBe('2026-10-27');
+    expect(sm.quoteKey({ symbol: 'CRUDEOIL', kind: 'SPOT' })).toEqual({ symbol: 'CRUDEOIL', kind: 'FUT', expiry: '2026-11-19' });
+    expect(sm.quoteKey({ symbol: 'NIFTY', kind: 'SPOT' })).toEqual({ symbol: 'NIFTY', kind: 'SPOT' });
+    // The feed decodes the shared token as the future (never as the spot alias).
+    expect(sm.byToken('mcx_fo', '450001')).toMatchObject({ kind: 'FUT', expiry: '2026-11-19' });
+    expect(sm.byToken('mcx_fo', '451004')).toMatchObject({ kind: 'CE', strike: 5500 });
+    expect(sm.kotakUnderlying('CRUDEOIL')).toEqual({ exchange: 'mcx_fo', underlying: 'CRUDEOIL' });
+  });
+
+  it('a bad or missing mcx_fo file leaves MCX out with the reason; NSE/BSE are unaffected', async () => {
+    const { sm } = harness(dir, { ...ALL, mcx_fo: { status: 404, text: 'Not Found' } });
+    await sm.refresh(DATE);
+    expect(sm.underlying('NIFTY').symbol).toBe('NIFTY');
+    expect(() => sm.underlying('CRUDEOIL')).toThrow(/Unknown symbol/);
+    expect(sm.status().warnings.join(' ')).toMatch(/mcx_fo download failed: HTTP 404; MCX commodities .* unavailable/);
+  });
+});
+
+describe('ScripMaster: a cache written before MCX', () => {
+  it('a same-day cache without mcx_fo is used when the files cannot be fetched again; with the network the MCX file is downloaded', async () => {
+    const first = harness(dir, ALL);
+    await first.sm.refresh(DATE);
+    fs.rmSync(path.join(dir, 'refdata', DATE, 'mcx_fo.csv'));
+    const offline = harness(dir, ALL, { extra: { filePaths: async () => Promise.reject(new Error('offline')) } });
+    await offline.sm.refresh(DATE);
+    expect(offline.sm.status()).toMatchObject({ ready: true, source: 'cache' });
+    expect(() => offline.sm.underlying('CRUDEOIL')).toThrow(/Unknown symbol/);
+    expect(offline.sm.status().warnings.join(' ')).toMatch(/cached instrument master has no mcx_fo file/);
+    const online = harness(dir, ALL);
+    await online.sm.refresh(DATE);
+    expect(online.sm.underlying('CRUDEOIL').kind).toBe('commodity');
+  });
+});
 
 describe('ScripMaster', () => {
   it('throws NoLiveData before the first successful refresh', () => {
@@ -119,17 +176,17 @@ describe('ScripMaster', () => {
     expect(sm.byToken('nse_fo', '52010')).toBeUndefined();
   });
 
-  it('downloads the four segment files with a plain GET and builds the universe', async () => {
+  it('downloads the five segment files with a plain GET and builds the universe', async () => {
     const { sm, ff } = harness(dir, ALL);
     await sm.refresh(DATE);
     const base = `https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/${DATE}`;
     expect(ff.calls.map((c) => c.url).sort()).toEqual(
-      [`${base}/transformed-v1/bse_cm-v1.csv`, `${base}/transformed-v1/nse_cm-v1.csv`, `${base}/transformed/bse_fo.csv`, `${base}/transformed/nse_fo.csv`].sort(),
+      [`${base}/transformed-v1/bse_cm-v1.csv`, `${base}/transformed-v1/nse_cm-v1.csv`, `${base}/transformed/bse_fo.csv`, `${base}/transformed/nse_fo.csv`, `${base}/transformed/mcx_fo.csv`].sort(),
     );
     expect(ff.calls.every((c) => c.method === 'GET' && !c.hasHeaders)).toBe(true);
     expect(sm.ready()).toBe(true);
 
-    expect(sm.underlyings().map((u) => u.symbol)).toEqual(['NIFTY', 'BANKNIFTY', 'SENSEX', 'RELIANCE', 'VEDL']);
+    expect(sm.underlyings().map((u) => u.symbol)).toEqual(['NIFTY', 'BANKNIFTY', 'SENSEX', 'RELIANCE', 'VEDL', 'CRUDEOIL']);
     expect(sm.underlying('nifty')).toEqual({
       symbol: 'NIFTY',
       name: 'Nifty 50',
@@ -200,7 +257,7 @@ describe('ScripMaster', () => {
     expect(sm.kotakUnderlying('RELIANCE')).toEqual({ exchange: 'nse_fo', underlying: 'RELIANCE' });
 
     const st = sm.status();
-    expect(st).toMatchObject({ ready: true, date: DATE, sourceDate: DATE, source: 'download', underlyings: 5 });
+    expect(st).toMatchObject({ ready: true, date: DATE, sourceDate: DATE, source: 'download', underlyings: 6 });
     expect(st.warnings.join('\n')).toMatch(/FINNIFTY: no live option contracts/);
     expect(st.warnings.join('\n')).toMatch(/BANKEX: no live option contracts in bse_fo \(pSymbolName BANKEX\/BKX\)/);
     expect(st.warnings.join('\n')).toMatch(/configured stocks have no OPTSTK rows in nse_fo; not offered: [A-Z]/);
@@ -226,14 +283,14 @@ describe('ScripMaster', () => {
     const first = harness(dir, ALL);
     await first.sm.refresh(DATE);
     const day = path.join(dir, 'refdata', DATE);
-    expect(fs.readdirSync(day).sort()).toEqual(['bse_cm.csv', 'bse_fo.csv', 'manifest.json', 'nse_cm.csv', 'nse_fo.csv']);
+    expect(fs.readdirSync(day).sort()).toEqual(['bse_cm.csv', 'bse_fo.csv', 'manifest.json', 'mcx_fo.csv', 'nse_cm.csv', 'nse_fo.csv']);
     expect(fs.readFileSync(path.join(day, 'nse_fo.csv'), 'utf8')).toBe(nseFo());
 
     const second = harness(dir, {});
     await second.sm.refresh(DATE);
     expect(second.pathCalls()).toBe(0);
     expect(second.ff.calls.length).toBe(0);
-    expect(second.sm.status()).toMatchObject({ source: 'cache', underlyings: 5 });
+    expect(second.sm.status()).toMatchObject({ source: 'cache', underlyings: 6 });
     expect(second.sm.underlying('NIFTY').strikeStep).toBe(50);
   });
 
@@ -249,7 +306,7 @@ describe('ScripMaster', () => {
 
     const published = harness(dir, ALL, { day: DATE });
     await published.sm.refresh(DATE);
-    expect(published.ff.calls.length).toBe(4);
+    expect(published.ff.calls.length).toBe(5);
     expect(published.sm.status()).toMatchObject({ source: 'download', sourceDate: DATE });
   });
 
@@ -307,7 +364,7 @@ describe('ScripMaster', () => {
     // bse_fo encoded with the NSE epoch would decode ~10 years in the past: rejected, not trusted.
     const wrongEpoch = harness(dir, { ...ALL, bse_fo: { text: bseFo((d) => bseExpiry(d) - 315_511_200) } });
     await wrongEpoch.sm.refresh(DATE);
-    expect(wrongEpoch.sm.underlyings().map((u) => u.symbol)).toEqual(['NIFTY', 'BANKNIFTY', 'RELIANCE', 'VEDL']);
+    expect(wrongEpoch.sm.underlyings().map((u) => u.symbol)).toEqual(['NIFTY', 'BANKNIFTY', 'RELIANCE', 'VEDL', 'CRUDEOIL']);
     expect(wrongEpoch.sm.status().warnings.join('\n')).toMatch(/bse_fo\.csv rejected: .*expiry epoch mismatch.*SENSEX\/BANKEX F&O unavailable/);
 
     const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'q26-scrip-'));

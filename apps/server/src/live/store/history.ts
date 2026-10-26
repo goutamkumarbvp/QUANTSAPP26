@@ -17,7 +17,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { addDays, istTs, MARKET_CLOSE_MIN, type FiiDiiDay, type ParticipantDay } from '@q26/core';
+import { addDays, istTs, sessionHoursOf, type ExchangeCode, type FiiDiiDay, type ParticipantDay } from '@q26/core';
 import { isIsoDate } from '../calendar';
 import { atmIvOf, impliedForward, timeToExpiry, type PremiumRow } from '../pricing';
 import type { DailyBar, DailyFuture, DailyOption, HistoryStore, InstrumentKey } from '../types';
@@ -90,8 +90,9 @@ const OPT_KEYS: readonly (keyof DailyOption)[] = ['date', 'expiry', 'strike', 't
  *  - ATM strike: nearest the underlying close (nearest the forward when there is no close);
  *  - IV: Black-76 (off that forward) average of CE/PE at the ATM strike (pricing.atmIvOf).
  */
-export function eodAtmIv(input: { date: string; underlying?: number; options: readonly DailyOption[]; futures: readonly DailyFuture[]; r: number }): CachedIv {
+export function eodAtmIv(input: { date: string; underlying?: number; options: readonly DailyOption[]; futures: readonly DailyFuture[]; r: number; exchange?: ExchangeCode }): CachedIv {
   const { date, options, futures, r } = input;
+  const exchange = input.exchange ?? 'NSE';
   if (!isIsoDate(date)) return null;
   const minExpiry = addDays(date, 1);
   const expiries = [...new Set(options.map((o) => o.expiry))].filter((e) => isIsoDate(e) && e >= minExpiry).sort();
@@ -108,9 +109,11 @@ export function eodAtmIv(input: { date: string; underlying?: number; options: re
   }
   const rows = [...byStrike.values()];
   // Same rule for the future: an untraded one carries a previous/theoretical price, not a market forward.
-  const fut = futures.find((f) => f.expiry === expiry && f.volume > 0);
+  // MCX options are written on the future they settle into: the nearest one expiring on or after them.
+  const futExpiry = exchange === 'MCX' ? [...new Set(futures.map((f) => f.expiry))].filter((e) => e >= expiry).sort()[0] : expiry;
+  const fut = futures.find((f) => f.expiry === futExpiry && f.volume > 0);
   const future = fut ? (isPos(fut.settle) ? fut.settle : isPos(fut.close) ? fut.close : undefined) : undefined;
-  const T = timeToExpiry(expiry, istTs(date, MARKET_CLOSE_MIN));
+  const T = timeToExpiry(expiry, istTs(date, sessionHoursOf(exchange, date).close), exchange);
   const fwd = impliedForward({ spot, future, rows }, T, r);
   if (!fwd) return null;
   const atm = atmIvOf(rows, fwd.forward, T, r, spot ?? fwd.forward);

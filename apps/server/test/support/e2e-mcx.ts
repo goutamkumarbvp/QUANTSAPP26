@@ -1,73 +1,57 @@
 /**
- * TEST-ONLY MCX source for the e2e fixture server: the real McxService over a synthetic mcx_fo
- * instrument file (CRUDEOIL, GOLD) and fake Kotak quotes priced by Black-76 at a flat test volatility.
- * Every contract and price here is test data, never market data.
+ * TEST-ONLY MCX commodities for the e2e fixture server: CRUDEOIL and GOLD as ordinary underlyings of
+ * the FakeProvider (kind 'commodity', exchange MCX: price = near-month future, options written on the
+ * future they settle into), with quotes priced by Black-76 at a flat test volatility and the
+ * previous MCX session's last minute recorded (OI change). Every contract and price here is test
+ * data, never market data.
  */
-import { bsPrice, YEAR_MS } from '@q26/core';
-import { McxService } from '../../src/live/kotak/mcx';
-import type { KotakQuote, KotakRest, QuotesResult } from '../../src/live/kotak/rest';
+import { addDays, bsPrice, YEAR_MS } from '@q26/core';
+import type { FakeProvider } from './fake-provider';
 
-const HEADER = 'pSymbol,pGroup,pExchSeg,pInstType,pSymbolName,pTrdSymbol,pOptionType,pScripRefKey,lExpiryDate ,dStrikePrice;,lLotSize,dTickSize ,pSegment';
-const epoch = (d: string) => String(Date.parse(`${d}T23:59:59+05:30`) / 1000);
-const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+interface Spec {
+  name: string;
+  label: string;
+  sector: string;
+  fut: number;
+  prev: number;
+  step: number;
+  lot: number;
+  vol: number;
+}
 
-interface Spec { name: string; fut: number; step: number; lot: number; vol: number }
 const SPECS: Spec[] = [
-  { name: 'CRUDEOIL', fut: 5480, step: 50, lot: 100, vol: 0.38 },
-  { name: 'GOLD', fut: 76_250, step: 500, lot: 1, vol: 0.16 },
+  { name: 'CRUDEOIL', label: 'Crude Oil', sector: 'Energy', fut: 5480, prev: 5436, step: 50, lot: 100, vol: 0.38 },
+  { name: 'GOLD', label: 'Gold', sector: 'Precious Metals', fut: 76_250, prev: 76_010, step: 500, lot: 100, vol: 0.16 },
 ];
 
-export function testMcx(now: () => number, today: string, r = 0.065): McxService {
+export function addTestCommodities(p: FakeProvider, today: string, r = 0.065): void {
   const optExp = addDays(today, 21);
   const futExp = addDays(today, 24);
-  const rows = [HEADER];
-  const legs = new Map<string, { spec: Spec; k?: number; kind: 'FUT' | 'CE' | 'PE' }>();
-  let t = 1000;
-  for (const spec of SPECS) {
-    const mon = 'TEST';
-    const ft = String(t++);
-    rows.push(`${ft},,mcx_fo,FUTCOM,${spec.name},${spec.name}${mon}FUT,XX,x,${epoch(futExp)},-1,${spec.lot},100,FO`);
-    legs.set(ft, { spec, kind: 'FUT' });
-    const atm = Math.round(spec.fut / spec.step) * spec.step;
-    for (let i = -12; i <= 12; i++) {
-      const k = atm + i * spec.step;
+  const nextFut = addDays(today, 55);
+  const now = p.now();
+  const cal = p.mcxCalendar;
+  const prevDay = cal.prev(today);
+  const prevLast = cal.ts(prevDay, cal.sessionMinutes(prevDay) - 1);
+  const T = Math.max(1e-4, (cal.expiryTs(optExp) - now) / YEAR_MS);
+  for (const s of SPECS) {
+    p.ref.setUnderlying({ symbol: s.name, kind: 'commodity', name: s.label, sector: s.sector, lotSize: s.lot, strikeStep: s.step });
+    p.ref.setFutures(s.name, [futExp, nextFut]);
+    const atm = Math.round(s.fut / s.step) * s.step;
+    const strikes = Array.from({ length: 25 }, (_, i) => atm + (i - 12) * s.step);
+    p.ref.setStrikes(s.name, optExp, strikes);
+    p.setQuote({ symbol: s.name, kind: 'FUT', expiry: futExp }, { ltp: s.fut, prevClose: s.prev, open: s.prev, high: s.fut + s.step / 5, low: s.prev - s.step / 5, volume: 18_000, oi: 42_000, bid: s.fut - 1, ask: s.fut + 1, bidQty: s.lot, askQty: s.lot, ts: now - 2000 });
+    p.intraday.addMinutes({ symbol: s.name, kind: 'FUT', expiry: futExp }, [{ ts: prevLast, open: s.prev, high: s.prev, low: s.prev, close: s.prev, traded: true, volume: 40, oi: 40_000 }]);
+    for (const k of strikes) {
       for (const kind of ['CE', 'PE'] as const) {
-        const tok = String(t++);
-        rows.push(`${tok},,mcx_fo,OPTFUT,${spec.name},${spec.name}${mon}${k}${kind},${kind},x,${epoch(optExp)},${k * 100},${spec.lot},100,FO`);
-        legs.set(tok, { spec, k, kind });
+        // A mild smile and an OI profile peaking away from the money (test values).
+        const vol = s.vol * (1 + 30 * ((k - s.fut) / s.fut) ** 2);
+        const ltp = Math.max(0.05, Math.round(bsPrice(kind, s.fut, k, T, r, vol, r) * 20) / 20);
+        const dist = Math.abs(k - s.fut) / s.step;
+        const oi = Math.round((kind === 'CE' ? (k > s.fut ? 4000 : 1500) : k < s.fut ? 3500 : 1200) * (1 + dist / 4));
+        const key = { symbol: s.name, kind, expiry: optExp, strike: k };
+        p.setQuote(key, { ltp, prevClose: Math.round(ltp * (kind === 'CE' ? 0.95 : 1.04) * 20) / 20, volume: Math.round(oi * 0.6), oi, bid: Math.max(0.05, ltp - 0.5), ask: ltp + 0.5, bidQty: s.lot, askQty: s.lot, ts: now - 2000 });
+        p.intraday.addMinutes(key, [{ ts: prevLast, open: ltp, high: ltp, low: ltp, close: ltp, traded: true, volume: 5, oi: Math.round(oi * 0.85) }]);
       }
     }
   }
-  const csv = rows.join('\n') + '\n';
-  const rest = {
-    quotes: async (syms: string[]): Promise<QuotesResult> => {
-      const quotes = new Map<string, KotakQuote>();
-      const T = (Date.parse(`${optExp}T23:30:00+05:30`) - now()) / YEAR_MS;
-      for (const s of syms) {
-        const l = legs.get(s.split('|')[1]);
-        if (!l) continue;
-        const base = { neosymbol: s, segment: 'mcx_fo', token: s.split('|')[1], ts: now() - 2000 };
-        if (l.kind === 'FUT') {
-          quotes.set(s, { ...base, ltp: l.spec.fut, changePct: 0.8 });
-          continue;
-        }
-        const k = l.k!;
-        // A mild smile and an OI profile peaking away from the money (test values).
-        const vol = l.spec.vol * (1 + 0.6 * ((k - l.spec.fut) / l.spec.fut) ** 2 * 50);
-        const ltp = Math.max(0.05, Math.round(bsPrice(l.kind, l.spec.fut, k, T, r, vol, r) * 20) / 20);
-        const dist = Math.abs(k - l.spec.fut) / l.spec.step;
-        const oi = Math.round((l.kind === 'CE' ? (k > l.spec.fut ? 4000 : 1500) : k < l.spec.fut ? 3500 : 1200) * (1 + dist / 4));
-        quotes.set(s, { ...base, ltp, changePct: l.kind === 'CE' ? 2.1 : -1.4, oi, volume: Math.round(oi * 0.6), depth: { bids: [{ price: Math.max(0.05, ltp - 0.5), qty: l.spec.lot }], asks: [{ price: ltp + 0.5, qty: l.spec.lot }] } });
-      }
-      return { quotes, errors: [] };
-    },
-  } as unknown as KotakRest;
-  return new McxService({
-    dataDir: null,
-    rest,
-    now,
-    r,
-    filePaths: async () => [`https://test.invalid/prod/${today}/transformed/mcx_fo.csv`],
-    fetch: async () => new Response(csv),
-  });
 }

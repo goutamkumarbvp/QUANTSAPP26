@@ -125,3 +125,25 @@ describe('LiveUniverse', () => {
     expect(r.notes).toContain('user contracts callback failed: positions store offline');
   });
 });
+
+describe('streaming universe: MCX commodities', () => {
+  it("streams a commodity's near-month future with the indices and its nearest chain (±6 %) after the index chains", async () => {
+    const { FakeReference } = await import('../support/fake-provider');
+    const ref = new FakeReference();
+    ref.setUnderlying({ symbol: 'NIFTY', kind: 'index', lotSize: 75, strikeStep: 50, name: 'Nifty 50' });
+    ref.setStrikes('NIFTY', '2026-10-20', [24900, 25000, 25100]);
+    ref.setUnderlying({ symbol: 'CRUDEOIL', kind: 'commodity', lotSize: 100, strikeStep: 50 });
+    ref.setFutures('CRUDEOIL', ['2026-11-19', '2026-12-18']);
+    ref.setStrikes('CRUDEOIL', '2026-11-16', [4800, 5150, 5450, 5500, 5550, 5850, 6200]);
+    const u = computeUniverse(ref, new Map([['NIFTY', 25000], ['CRUDEOIL', 5480]]));
+    const ids = u.entries.map((e) => `${e.tier}:${keyId(e.key)}`);
+    expect(ids).toContain('index:CRUDEOIL|FUT|2026-11-19|');
+    const chainIdx = (sym: string) => ids.findIndex((x) => x.startsWith(`chain:${sym}|`));
+    expect(chainIdx('NIFTY')).toBeGreaterThanOrEqual(0);
+    const lastNifty = ids.map((x, i) => (x.startsWith('chain:NIFTY|') ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    expect(chainIdx('CRUDEOIL')).toBeGreaterThan(lastNifty);
+    const crude = u.chains.find((c) => c.symbol === 'CRUDEOIL')!;
+    // ±6 % of 5480 = 5151.2 … 5808.8
+    expect(crude).toMatchObject({ expiry: '2026-11-16', centre: 5480, strikes: [5450, 5500, 5550] });
+  });
+});

@@ -20,7 +20,7 @@ function Bar({ v }: { v: number }) {
 
 export default function IvTable() {
   const q = useLive<IvTableRow[]>(['iv-table'], '/vol/table', 15000);
-  const [kind, setKind] = useState<'all' | 'index' | 'stock'>('all');
+  const [kind, setKind] = useState<'all' | 'index' | 'stock' | 'commodity'>('all');
   const [search, setSearch] = useState('');
   const setSymbol = useApp((s) => s.setSymbol);
   const navigate = useNavigate();
@@ -29,7 +29,7 @@ export default function IvTable() {
     <div className="space-y-3">
       <PageHeader title="IV Rank & IV Percentile" subtitle="High IVP → options expensive (favour selling); low IVP → options cheap (favour buying)">
         <input className="input w-40" placeholder="Search symbol" value={search} onChange={(e) => setSearch(e.target.value)} />
-        <Segmented value={kind} onChange={setKind} options={[{ value: 'all', label: 'All' }, { value: 'index', label: 'Indices' }, { value: 'stock', label: 'Stocks' }]} />
+        <Segmented value={kind} onChange={setKind} options={[{ value: 'all', label: 'All' }, { value: 'index', label: 'Indices' }, { value: 'commodity', label: 'MCX' }, { value: 'stock', label: 'Stocks' }]} />
       </PageHeader>
       <Card pad={false}>
         <Loadable q={q}>

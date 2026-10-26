@@ -32,6 +32,11 @@ export interface AppConfig {
   wsAllowedOrigins: string[];
   /** HOLIDAYS env list, merged with NSE's holiday master by the live provider. */
   holidays: Set<string>;
+  /**
+   * MCX_HOLIDAYS env list: full-day MCX closures (no holiday API exists for MCX). MCX keeps trading on
+   * most NSE holidays (often in the evening session), so NSE's list is not applied to it.
+   */
+  mcxHolidays: Set<string>;
   persist: boolean;
   /** Kotak Neo credentials from the environment (.env); null when missing or invalid. Never log it. */
   neo: NeoEnv | null;
@@ -108,6 +113,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       .map((o) => o.trim().replace(/\/+$/, ''))
       .filter(Boolean),
     holidays: new Set((process.env.HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
+    mcxHolidays: new Set((process.env.MCX_HOLIDAYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
     persist: process.env.PERSIST !== 'false',
     ...neoFromEnv(),
     eodBackfillDays: Math.max(0, Math.floor(num('EOD_BACKFILL_DAYS', 30))),

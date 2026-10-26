@@ -117,7 +117,7 @@ export function createOperations(o: CreateOperationsOptions): Operations {
       dataDir: o.dataDir,
       calendar: p.calendar,
       eod: p.eod,
-      history: p.history,
+      history: p.eodFiles,
       intradaySessions: () => p.intraday.sessions(),
       refdata: () => p.ref.status(),
       refreshInstrumentMaster: () => p.refreshInstrumentMaster(),

@@ -8,8 +8,11 @@
  *   underlying near-month future of every underlying, and the stock spots (the chain spot of the
  *              stock-option sweep and the forward of stock options without a live future)
  *   chain      index option chains: the 2 nearest expiries, strikes within ±8 % of the centre,
- *              nearest strikes first so a budget cut drops the far wings; then the focus stocks'
- *              (NIFTY heavyweights) nearest chains within ±5 %, after every index leg
+ *              nearest strikes first so a budget cut drops the far wings; then the MCX commodities'
+ *              nearest chains within ±6 %; then the focus stocks' (NIFTY heavyweights) nearest
+ *              chains within ±5 %
+ * MCX commodities (GOLD, SILVER, CRUDEOIL …) have no cash market: their price is the near-month
+ * future, streamed in the 'index' tier with the indices (the ticker and every commodity tab read it).
  *   (ad-hoc watches are added by KotakLiveMarket.watch, below all of these)
  *
  * The chain centre is the live spot (else the live near future) and moves only when the price has
@@ -33,6 +36,8 @@ export interface UniverseOptions {
   focusStocks?: readonly string[];
   /** Half-width of a focus stock's streamed strike band, default 0.05. */
   focusBandPct?: number;
+  /** Half-width of an MCX commodity's streamed strike band (nearest expiry), default 0.06. */
+  commodityBandPct?: number;
 }
 
 export type { UserContract } from './types';
@@ -48,7 +53,7 @@ export interface UniverseChain {
 export interface UniverseResult {
   /** Priority order: index, user, underlying, chain. */
   entries: WatchEntry[];
-  /** Index chains in the universe (the recorder aggregates these every minute). */
+  /** Chains in the universe (the recorder aggregates these every minute). */
   chains: UniverseChain[];
   /** Why something is not in the universe (no price to centre a chain on, master not loaded, …). */
   notes: string[];
@@ -57,7 +62,7 @@ export interface UniverseResult {
 /** Spot-only listings streamed with the indices. */
 export const EXTRA_INDEX_SPOTS: readonly string[] = ['INDIAVIX'];
 
-const DEFAULTS = { indexExpiries: 2, strikeBandPct: 0.08, recentrePct: 0.02, stockSpots: true, focusBandPct: 0.05 } as const;
+const DEFAULTS = { indexExpiries: 2, strikeBandPct: 0.08, recentrePct: 0.02, stockSpots: true, focusBandPct: 0.05, commodityBandPct: 0.06 } as const;
 
 const isPos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
 
@@ -90,9 +95,11 @@ export function computeUniverse(
 
   const underlyings = ref.underlyings();
   const indices = underlyings.filter((u) => u.kind === 'index');
+  const commodities = underlyings.filter((u) => u.kind === 'commodity');
 
-  // 1. Index spots and India VIX.
+  // 1. Index spots and India VIX, then the commodities' price (their near-month future).
   for (const u of indices) add({ symbol: u.symbol, kind: 'SPOT' }, 'index');
+  for (const u of commodities) add({ symbol: u.symbol, kind: 'FUT', expiry: u.spot.expiry ?? ref.expiries(u.symbol, 'FUT')[0] }, 'index');
   for (const symbol of EXTRA_INDEX_SPOTS) {
     if (ref.listing({ symbol, kind: 'SPOT' })) add({ symbol, kind: 'SPOT' }, 'index');
     else notes.push(`${symbol}: not in the instrument master`);
@@ -141,6 +148,26 @@ export function computeUniverse(
   }
   legs.sort((a, b) => a.dist - b.dist || a.order - b.order);
   for (const l of legs) add(l.key, 'chain');
+
+  // 4b. MCX commodity option chains: the nearest expiry, after every index leg.
+  const cmdLegs: typeof legs = [];
+  for (const u of commodities) {
+    const centre = centres.get(u.symbol);
+    if (!isPos(centre)) {
+      notes.push(`${u.symbol}: no live price to centre the option chain on yet`);
+      continue;
+    }
+    const expiry = ref.expiries(u.symbol, 'OPT')[0];
+    if (!expiry) continue;
+    const strikes = ref.strikes(u.symbol, expiry).filter((k) => k >= centre * (1 - o.commodityBandPct) && k <= centre * (1 + o.commodityBandPct));
+    chains.push({ symbol: u.symbol, expiry, centre, strikes });
+    for (const strike of strikes) {
+      const dist = Math.abs(strike / centre - 1);
+      for (const kind of ['CE', 'PE'] as const) cmdLegs.push({ key: { symbol: u.symbol, kind, expiry, strike }, dist, order: cmdLegs.length });
+    }
+  }
+  cmdLegs.sort((a, b) => a.dist - b.dist || a.order - b.order);
+  for (const l of cmdLegs) add(l.key, 'chain');
 
   // 5. Focus stocks (NIFTY heavyweights): the nearest expiry, a narrower band, after every index leg.
   const focusLegs: typeof legs = [];
@@ -201,7 +228,7 @@ export class LiveUniverse {
     if (ref.ready()) {
       const focus = new Set(this.opts.options?.focusStocks ?? []);
       for (const u of ref.underlyings()) {
-        if (u.kind !== 'index' && !focus.has(u.symbol)) continue;
+        if (u.kind === 'stock' && !focus.has(u.symbol)) continue;
         const p = priceOf(u.symbol);
         if (!isPos(p)) continue;
         const c = this.centres.get(u.symbol);

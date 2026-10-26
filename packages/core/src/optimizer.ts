@@ -99,7 +99,7 @@ export function optimizeStrategies(input: OptimizerInput): OptimizerOutput {
   const budget = input.budget ?? 250_000;
   const minPremium = input.minPremium ?? 0.5;
   const stopLoss = input.stopLoss ?? (targetPrice >= spot ? spot - (targetPrice - spot) * 0.5 : spot + (spot - targetPrice) * 0.5);
-  const expTs = expiryTs(expiry);
+  const expTs = expiryTs(expiry, ctx.exchange);
   const evalTarget = Math.min(targetTs, expTs);
 
   const sorted = [...rows].filter((r) => r.ce || r.pe).sort((a, b) => a.strike - b.strike);

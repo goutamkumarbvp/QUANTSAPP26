@@ -10,6 +10,38 @@ export const MARKET_CLOSE_MIN = 15 * 60 + 30; // 15:30
 export const SESSION_MINUTES = MARKET_CLOSE_MIN - MARKET_OPEN_MIN; // 375
 export const YEAR_MS = 365 * DAY_MS;
 
+/** Exchanges the app takes data from. */
+export type ExchangeCode = 'NSE' | 'BSE' | 'MCX';
+
+/** 09:00 IST, MCX (commodity) open. */
+export const MCX_OPEN_MIN = 9 * 60;
+/** MCX close while the US observes daylight saving time (mid-March to early November). */
+export const MCX_CLOSE_SUMMER_MIN = 23 * 60 + 30;
+/** MCX close while the US is on standard time (early November to mid-March). */
+export const MCX_CLOSE_WINTER_MIN = 23 * 60 + 55;
+
+/** n-th Sunday (1-based) of a month, 'YYYY-MM-DD'. */
+function nthSunday(year: number, month: number, n: number): string {
+  const first = `${year}-${String(month).padStart(2, '0')}-01`;
+  const offset = (7 - weekday(first)) % 7;
+  return addDays(first, offset + 7 * (n - 1));
+}
+
+/**
+ * MCX close (minute of the IST day) on `date`: 23:30 while the US observes daylight saving time
+ * (second Sunday of March to first Sunday of November), else 23:55 (MCX's published timings follow
+ * the US switch from the next Indian session).
+ */
+export function mcxCloseMin(date: string): number {
+  const y = Number(date.slice(0, 4));
+  return date > nthSunday(y, 3, 2) && date <= nthSunday(y, 11, 1) ? MCX_CLOSE_SUMMER_MIN : MCX_CLOSE_WINTER_MIN;
+}
+
+/** Continuous-session hours (minutes of the IST day) of an exchange on `date`. */
+export function sessionHoursOf(exchange: ExchangeCode, date: string): { open: number; close: number } {
+  return exchange === 'MCX' ? { open: MCX_OPEN_MIN, close: mcxCloseMin(date) } : { open: MARKET_OPEN_MIN, close: MARKET_CLOSE_MIN };
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export function dateToNum(date: string): number {
@@ -113,16 +145,17 @@ export function istParts(ts: number): IstParts {
   };
 }
 
-export function expiryTs(expiry: string): number {
-  return istTs(expiry, MARKET_CLOSE_MIN);
+/** Expiry instant: the close of the expiry day (15:30 IST for NSE/BSE, the MCX close for MCX). */
+export function expiryTs(expiry: string, exchange: ExchangeCode = 'NSE'): number {
+  return istTs(expiry, sessionHoursOf(exchange, expiry).close);
 }
 
 export function yearsBetween(fromTs: number, toTs: number): number {
   return Math.max(0, (toTs - fromTs) / YEAR_MS);
 }
 
-export function daysToExpiry(nowTs: number, expiry: string): number {
-  return Math.max(0, (expiryTs(expiry) - nowTs) / DAY_MS);
+export function daysToExpiry(nowTs: number, expiry: string, exchange: ExchangeCode = 'NSE'): number {
+  return Math.max(0, (expiryTs(expiry, exchange) - nowTs) / DAY_MS);
 }
 
 export function formatDate(date: string, withYear = false): string {

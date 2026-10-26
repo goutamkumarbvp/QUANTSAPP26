@@ -6,7 +6,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { z, ZodError } from 'zod';
-import { expiryTs, type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type QuotesResponse, type ServerMessage, type SymbolInfo } from '@q26/core';
+import { type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type QuotesResponse, type ServerMessage, type SymbolInfo } from '@q26/core';
 import { profile } from './auth';
 import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
@@ -352,6 +352,9 @@ export async function buildApp(
 
   /** Index underlyings from the instrument master (by name while it is not loaded). */
   const indexSymbols = (): string[] => (md.ref.ready() ? md.ref.underlyings().filter((u) => u.kind === 'index').map((u) => u.symbol) : INDEX_SYMBOLS);
+  /** MCX commodities (GOLD, SILVER, CRUDEOIL …): streamed to every socket with the indices (the ticker). */
+  const commoditySymbols = (): string[] => (md.ref.ready() ? md.ref.underlyings().filter((u) => u.kind === 'commodity').map((u) => u.symbol) : []);
+  const tickerSymbols = (): string[] => [...indexSymbols(), ...commoditySymbols()];
   /** Quotes of the symbols that have one (live, or recorded at `asOf`); 503 when none has. Each one left out is added to `gaps` (symbol → reason). */
   const quotesOf = (symbols: string[], asOf?: number, gaps?: Gaps): Quote[] => {
     const out: Quote[] = [];
@@ -477,22 +480,10 @@ export async function buildApp(
     if (t !== undefined) return recordedExpiries(md, md.ref.underlying(req.params.symbol).symbol, t);
     const symbol = md.ref.underlying(req.params.symbol).symbol;
     const n = now();
-    return { options: liveOptionExpiries(md, symbol, n), futures: [...md.ref.expiries(symbol, 'FUT')].sort().filter((x) => expiryTs(x) > n) };
+    return { options: liveOptionExpiries(md, symbol, n), futures: [...md.ref.expiries(symbol, 'FUT')].sort().filter((x) => md.calendarOf(symbol).expiryTs(x) > n) };
   });
 
   app.get<{ Params: { symbol: string } }>('/api/chain/:symbol', async (req) => buildOptionChain(md, req.params.symbol, qs(req).expiry || undefined, { at: at(req) }));
-
-  // MCX commodity options (live Kotak quotes only).
-  const mcx = () => {
-    if (!md.mcx) throw new NoLiveData('MCX option chain is not available with this data provider');
-    return md.mcx;
-  };
-  app.get('/api/mcx/symbols', async () => mcx().symbols());
-  app.get<{ Params: { symbol: string } }>('/api/mcx/chain/:symbol', async (req) => {
-    const expiry = qs(req).expiry || undefined;
-    if (expiry !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) throw Object.assign(new Error('expiry must be YYYY-MM-DD'), { statusCode: 400 });
-    return mcx().chain(req.params.symbol, expiry);
-  });
 
   app.get<{ Params: { symbol: string } }>('/api/futures/:symbol', async (req) => {
     const t = at(req);
@@ -516,7 +507,7 @@ export async function buildApp(
   // opening range and last-minute flow, official FII/DII); a card without data is blank with its gap.
   // NIFTY heavyweights desk: futures + options + order flow of each configured stock (NIFTY_TOP10).
   app.get('/api/top10', async () => buildTop10(md, an, svc.tools, svc.config.focusStocks, now(), (where, err) => app.log.error({ err, where }, 'top10 row failed')));
-  app.get('/api/dashboard', async () => buildDashboard(md, an, svc.tools, { indices: indexSymbols(), onError: (where, err) => app.log.error({ err, where }, 'dashboard card failed') }));
+  app.get('/api/dashboard', async () => buildDashboard(md, an, svc.tools, { indices: indexSymbols(), commodities: commoditySymbols(), onError: (where, err) => app.log.error({ err, where }, 'dashboard card failed') }));
 
   /* ---------------------------- trend: opening range & order flow ---------------------------- */
 
@@ -536,7 +527,7 @@ export async function buildApp(
     strike: z.coerce.number().positive().optional(),
     expiry: day.optional().or(z.literal('')),
     date: day.optional().or(z.literal('')),
-    limit: z.coerce.number().int().min(1).max(375).default(60),
+    limit: z.coerce.number().int().min(1).max(900).default(60),
   });
 
   app.get('/api/orb', async (req) => {
@@ -864,7 +855,7 @@ export async function buildApp(
         wsOpen.set(key, (wsOpen.get(key) ?? 0) + 1);
         wsTotal++;
         let uid: string | null = null;
-        const client: WsClient = { symbols: new Set(indexSymbols()), dirty: new Set() };
+        const client: WsClient = { symbols: new Set(tickerSymbols()), dirty: new Set() };
         client.dirty = new Set(client.symbols); // the first batch is a snapshot
         clients.add(client);
         let lastSent = Date.now();
@@ -902,7 +893,7 @@ export async function buildApp(
             const msg = JSON.parse(raw.toString()) as ClientMessage;
             if (msg.type === 'auth') uid = svc.auth.verify(msg.token)?.id ?? null;
             if (msg.type === 'subscribe') {
-              const next = new Set([...indexSymbols(), ...subscription(msg.symbols)]);
+              const next = new Set([...tickerSymbols(), ...subscription(msg.symbols)]);
               for (const s of next) if (!client.symbols.has(s)) client.dirty.add(s);
               client.symbols = next;
             }

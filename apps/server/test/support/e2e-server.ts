@@ -17,7 +17,7 @@ import type { InstrumentKey, MinuteRecord } from '../../src/live/types';
 import { futKey, spotKey } from '../../src/services/live';
 import { createServices } from '../../src/services';
 import { FakeProvider, loadSampleBook, type SampleBook } from './fake-provider';
-import { testMcx } from './e2e-mcx';
+import { addTestCommodities } from './e2e-mcx';
 
 const port = Number(process.env.E2E_FIXTURE_PORT ?? 8791);
 const host = process.env.HOST ?? '127.0.0.1';
@@ -177,8 +177,8 @@ function recordTodayChain(): void {
 }
 recordTodayChain();
 
-// TEST-ONLY MCX contracts and quotes (synthetic), so the MCX Option Chain page has something to show.
-(p as unknown as { mcx: ReturnType<typeof testMcx> }).mcx = testMcx(() => p.now(), book.date);
+// TEST-ONLY MCX commodities (synthetic CRUDEOIL and GOLD), ordinary underlyings of every tab.
+addTestCommodities(p, book.date);
 
 const config = loadConfig({ port, host, persist: false, authSecret: process.env.AUTH_SECRET || 'e2e-fixture' });
 const svc = createServices(config, { provider: p, onError: (where, e) => console.warn(`${where} failed: ${e instanceof Error ? e.message : String(e)}`) });

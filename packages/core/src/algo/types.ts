@@ -8,6 +8,7 @@
  * stand-in; an algo must not open a position on a missing price.
  */
 import type { DataGaps } from '../api';
+import type { UnderlyingKind } from '../api';
 
 export type OptionSide = 'CE' | 'PE';
 
@@ -89,7 +90,7 @@ export interface AlgoDefinition<P = Record<string, unknown>, S = unknown> {
   /** Plain-language rules shown to the user. */
   rules: string[];
   params: AlgoParamSpec[];
-  defaults(instrument: { symbol: string; strikeStep: number; kind: 'index' | 'stock' }): P;
+  defaults(instrument: { symbol: string; strikeStep: number; kind: UnderlyingKind }): P;
   /** Returns an error message for invalid parameters. */
   validate(p: P): string | null;
   init(p: P): S;
@@ -156,7 +157,7 @@ export interface AlgoCatalog extends DataGaps {
    * Index underlyings an algo may trade (instrument master: lot size, strike step). Empty, with
    * `gaps.symbols`, while the instrument master is not loaded.
    */
-  symbols: { symbol: string; lotSize: number; strikeStep: number; kind: 'index' | 'stock' }[];
+  symbols: { symbol: string; lotSize: number; strikeStep: number; kind: UnderlyingKind }[];
 }
 
 export interface AlgoSeriesPoint {

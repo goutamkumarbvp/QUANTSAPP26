@@ -22,10 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   estimateMargin,
-  expiryTs,
-  INDEX_MARGIN,
-  SESSION_MINUTES,
-  STOCK_MARGIN,
+  marginParamsOf,
   type Funds,
   type Leg,
   type Notification,
@@ -38,7 +35,7 @@ import {
 import { NoLiveData } from '../live/types';
 import type { InstrumentKey, MarketDataProvider } from '../live/types';
 import type { Db } from '../store/db';
-import { Gaps, httpError, livePrice, r2, spotKey } from './live';
+import { Gaps, httpError, livePrice, mdFor, r2, spotKey } from './live';
 import { instrumentKey, instrumentLabel, specKey, type InstrumentSpec, type Pricer } from './pricer';
 
 const MAX_LOTS_PER_ORDER = 50;
@@ -132,7 +129,7 @@ export class PaperBroker {
       let status: Position['status'] = netQty === 0 ? 'closed' : 'open';
       let reason: string | undefined;
       let shownQty = netQty;
-      if (netQty !== 0 && expiryTs(a.expiry) < ts) {
+      if (netQty !== 0 && this.md.calendarOf(a.symbol).expiryTs(a.expiry) < ts) {
         const settle = this.md.history.settlement(specKey(spec));
         if (settle !== undefined) {
           ltp = settle;
@@ -196,7 +193,7 @@ export class PaperBroker {
   private marginFor(symbol: string, positions: Position[], ts: number): number {
     const open = positions.filter((p) => p.status === 'open' && p.netQty !== 0);
     if (!open.some((p) => p.netQty < 0 || p.type === 'FUT')) return 0;
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const u = md.ref.underlying(symbol);
     const S = livePrice(md, md.live.quote(spotKey(symbol)));
     if (S === null) throw new NoLiveData(`Margin estimate needs a live ${symbol} price`);
@@ -227,7 +224,7 @@ export class PaperBroker {
       if (q === undefined) throw new NoLiveData(`No live forward for ${symbol} ${e}`);
       return q;
     };
-    const est = estimateMargin(legs, S, md.pricing.valuationTs(ts), { r: md.pricing.r, carry: carryOf, volScanIv }, u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN);
+    const est = estimateMargin(legs, S, md.pricing.valuationTs(ts, undefined, symbol), { r: md.pricing.r, carry: carryOf, volScanIv, exchange: md.calendar.exchange }, marginParamsOf(u.kind));
     if (!est.margin) throw new NoLiveData(est.reason ?? 'Margin cannot be estimated');
     return est.margin.total;
   }
@@ -339,7 +336,7 @@ export class PaperBroker {
   private process(uid: string, order: Order, ts: number): void {
     if (order.status !== 'OPEN' && order.status !== 'TRIGGER_PENDING') return;
     const spec: InstrumentSpec = { symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry };
-    if (expiryTs(order.expiry) < ts) {
+    if (this.md.calendarOf(order.symbol).expiryTs(order.expiry) < ts) {
       this.finish(uid, order, 'CANCELLED', 'Contract expired before execution', ts);
       return;
     }
@@ -356,7 +353,7 @@ export class PaperBroker {
       if (isMarket) this.finish(uid, order, 'REJECTED', `No live bid/ask for ${order.instrument}: ${errMsg(e)}`, ts);
       return; // working orders wait for live prices
     }
-    const open = this.md.calendar.session(this.md.clock.now()).status === 'open';
+    const open = this.md.calendarOf(order.symbol).session(this.md.clock.now()).status === 'open';
     if (order.status === 'TRIGGER_PENDING') {
       if (!open || px.ltp === null) return;
       const hit = order.side === 'BUY' ? px.ltp >= order.triggerPrice! : px.ltp <= order.triggerPrice!;
@@ -415,12 +412,12 @@ export class PaperBroker {
     this.finish(uid, order, 'COMPLETE', undefined, ts);
   }
 
-  /** Close (15:30) of the session a working order belongs to: the one it was placed in, or the next when placed after the close / on a holiday. */
+  /** Close (15:30; MCX 23:30/23:55) of the session a working order belongs to: the one it was placed in, or the next when placed after the close / on a holiday. */
   private dayOrderEnd(order: Order): number {
-    const cal = this.md.calendar;
+    const cal = this.md.calendarOf(order.symbol);
     let date = cal.session(order.createdAt).date;
-    if (!cal.isTradingDay(date) || order.createdAt >= cal.ts(date, SESSION_MINUTES)) date = cal.next(date);
-    return cal.ts(date, SESSION_MINUTES);
+    if (!cal.isTradingDay(date) || order.createdAt >= cal.ts(date, cal.sessionMinutes(date))) date = cal.next(date);
+    return cal.ts(date, cal.sessionMinutes(date));
   }
 
   private finish(uid: string, order: Order, status: Order['status'], message: string | undefined, ts: number) {
@@ -551,7 +548,7 @@ export class StrategyManager {
       if (!(lots >= 1 && lots <= 500)) throw httpError(400, 'Invalid lots');
       const spec: InstrumentSpec = { symbol: u.symbol, type: l.type, strike: l.type === 'FUT' ? undefined : Number(l.strike), expiry: l.expiry };
       let price = Number(l.price);
-      const expiredWithPrice = price > 0 && typeof l.expiry === 'string' && expiryTs(l.expiry) < ts;
+      const expiredWithPrice = price > 0 && typeof l.expiry === 'string' && this.md.calendarOf(u.symbol).expiryTs(l.expiry) < ts;
       const listing = expiredWithPrice ? undefined : this.pricer.validate(spec, ts);
       if (!(price > 0)) {
         const ltp = this.pricer.price(spec, ts).ltp;

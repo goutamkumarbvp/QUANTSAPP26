@@ -17,8 +17,7 @@
  * restart mid-session, ended after 15:30), the stock-option sweep, EOD backfill + daily schedule.
  * healthReport() is JSON-safe and carries no secrets.
  */
-import { McxService } from './kotak/mcx';
-import { MARKET_CLOSE_MIN, istParts } from '@q26/core';
+import { MARKET_CLOSE_MIN, istParts, sessionHoursOf } from '@q26/core';
 import { ExchangeCalendar, isIsoDate } from './calendar';
 import { LiveClock } from './clock';
 import type { NeoEnv } from './env';
@@ -35,6 +34,7 @@ import { NseHttp } from './nse/http';
 import { LivePricing } from './pricing';
 import { Recorder, type RecorderStats } from './recorder';
 import { HistoryFiles } from './store/history';
+import { RecordedDailyHistory } from './store/recorded-daily';
 import { IntradayFiles } from './store/intraday';
 import { NoLiveData } from './types';
 import type { Candle, CandleInterval, FeedHealth, HistoryStore, InstrumentKey, IntradayStore, MarketDataProvider, TradingCalendar } from './types';
@@ -52,6 +52,8 @@ export interface LiveProviderConfig {
   riskFreeRate: number;
   /** HOLIDAYS env list (merged with NSE's holiday master by the EOD jobs). */
   holidays: Iterable<string>;
+  /** Full-day MCX closures (MCX_HOLIDAYS); weekends are always closed. */
+  mcxHolidays?: Iterable<string>;
   /** Kotak credentials; null when missing/invalid (`neoError` says which variables). */
   neo: NeoEnv | null;
   neoError?: string;
@@ -301,13 +303,16 @@ interface JobSpec {
 
 export class LiveProvider implements MarketDataProvider {
   readonly ref: ScripMaster;
-  /** MCX commodity option chain (separate from the NSE/BSE universe). */
-  readonly mcx: McxService;
   readonly calendar: ExchangeCalendar;
+  /** MCX sessions (09:00–23:30/23:55 IST) for the commodities. */
+  readonly mcxCalendar: ExchangeCalendar;
   readonly clock: LiveClock;
   readonly live: KotakLiveMarket;
   readonly intraday: IntradayFiles;
-  readonly history: HistoryFiles;
+  /** Official NSE/BSE end-of-day files (written by the EOD jobs). */
+  readonly eodFiles: HistoryFiles;
+  /** What the services read: the official files, and MCX commodities' rows from recorded ticks. */
+  readonly history: RecordedDailyHistory;
   readonly pricing: LivePricing;
   readonly recorder: Recorder;
   readonly eod: EodJobs;
@@ -351,9 +356,21 @@ export class LiveProvider implements MarketDataProvider {
     this.invalidHolidays = holidays.filter((d) => !isIsoDate(d));
     const envHolidays = holidays.filter(isIsoDate);
     this.calendar = new ExchangeCalendar(envHolidays);
-    this.clock = new LiveClock(this.calendar, this.now);
+    const mcxHol = [...(config.mcxHolidays ?? [])].map((d) => d.trim()).filter(Boolean);
+    this.invalidHolidays.push(...mcxHol.filter((d) => !isIsoDate(d)));
+    this.mcxCalendar = new ExchangeCalendar(mcxHol.filter(isIsoDate), 'MCX');
+    this.clock = new LiveClock(this.calendar, this.now, {
+      calendar: this.mcxCalendar,
+      hasMcx: () => {
+        try {
+          return this.ref.ready() && this.ref.underlyings().some((u) => u.exchange === 'MCX');
+        } catch {
+          return false;
+        }
+      },
+    });
     this.intraday = new IntradayFiles({ dataDir: config.dataDir, retentionDays: config.intradayRetentionDays });
-    this.history = new HistoryFiles({ dataDir: config.dataDir, r: config.riskFreeRate });
+    this.eodFiles = new HistoryFiles({ dataDir: config.dataDir, r: config.riskFreeRate });
 
     if (config.neo) {
       const limiter = new RateLimiter({ timers: { now: this.now, setTimeout: this.timers.setTimeout, clearTimeout: this.timers.clearTimeout } });
@@ -384,18 +401,14 @@ export class LiveProvider implements MarketDataProvider {
       },
     });
 
-    this.mcx = new McxService({
-      dataDir: config.dataDir,
-      fetch: deps.kotakFetch,
-      logger: this.log,
-      rest,
-      restUnavailable: kotakError,
-      now: this.now,
+    this.intraday.setRef(this.ref);
+    this.history = new RecordedDailyHistory({
+      base: this.eodFiles,
+      intraday: this.intraday,
+      isRecorded: (symbol) => this.calendarOf(symbol) === this.mcxCalendar,
+      calendar: this.mcxCalendar,
       r: config.riskFreeRate,
-      filePaths: async () => {
-        if (!rest) throw new NoLiveData(kotakError ?? 'Kotak credentials missing');
-        return (await rest.scripMasterPaths()).files;
-      },
+      today: () => this.calendar.session(this.now()).date,
     });
 
     this.live = new KotakLiveMarket({
@@ -404,6 +417,7 @@ export class LiveProvider implements MarketDataProvider {
       rest,
       restUnavailable: kotakError,
       calendar: this.calendar,
+      calendarOf: (symbol) => this.calendarOf(symbol),
       now: this.now,
       timers: this.timers,
       logger: this.log,
@@ -413,13 +427,14 @@ export class LiveProvider implements MarketDataProvider {
       onFeedAuthError: (e) => this.onFeedAuthError(e),
     });
 
-    this.pricing = new LivePricing({ r: config.riskFreeRate, ref: this.ref, calendar: this.calendar, getQuote: (k) => this.live.quote(k), now: this.now });
+    this.pricing = new LivePricing({ r: config.riskFreeRate, ref: this.ref, calendar: this.calendar, calendarOf: (symbol) => this.calendarOf(symbol), getQuote: (k) => this.live.quote(k), now: this.now });
 
     this.recorder = new Recorder({
       live: this.live,
       writer: this.intraday,
       pricing: this.pricing,
       calendar: this.calendar,
+      calendarOf: (symbol) => this.calendarOf(symbol),
       clock: this.clock,
       ref: this.ref,
       timers: { setInterval: this.timers.setInterval, clearInterval: this.timers.clearInterval },
@@ -429,7 +444,7 @@ export class LiveProvider implements MarketDataProvider {
     const http = new NseHttp({ fetch: deps.nseFetch, now: this.now, sleep, logger: this.log });
     this.eod = new EodJobs({
       http,
-      history: this.history,
+      history: this.eodFiles,
       calendar: this.calendar,
       now: this.now,
       timers: this.timers,
@@ -822,17 +837,34 @@ export class LiveProvider implements MarketDataProvider {
     return this.healthReport().jobs;
   }
 
-  /** Recorder session: started from pre-open (or at once after a restart mid-session), ended after 15:30. */
+  /** Calendar of the exchange `symbol` trades on: MCX for commodities, else the NSE/BSE calendar. */
+  calendarOf(symbol: string): ExchangeCalendar {
+    if (!this.ref.ready()) return this.calendar;
+    try {
+      return this.ref.underlying(symbol).exchange === 'MCX' ? this.mcxCalendar : this.calendar;
+    } catch {
+      return this.calendar;
+    }
+  }
+
+  /**
+   * Recorder session: started from the first pre-open of the day (NSE/BSE 09:00, MCX 08:45; at once
+   * after a restart mid-session), ended once every exchange has closed (MCX 23:30/23:55).
+   */
   private sessionTick(): void {
     if (this.stopped) return;
     const now = this.now();
     const s = this.calendar.session(now);
+    const m = this.mcxCalendar.session(now);
     const active = this.recorder.stats().date;
+    const live = (cal: ExchangeCalendar, x: typeof s) => cal.isTradingDay(x.date) && (x.status === 'pre-open' || x.status === 'open');
+    const mcxListed = this.ref.ready() && this.ref.underlyings().some((u) => u.exchange === 'MCX');
+    const lastClose = Math.max(MARKET_CLOSE_MIN, mcxListed ? sessionHoursOf('MCX', s.date).close : 0);
     try {
-      if (this.calendar.isTradingDay(s.date) && (s.status === 'pre-open' || s.status === 'open')) {
+      if (live(this.calendar, s) || (mcxListed && live(this.mcxCalendar, m))) {
         if (active !== s.date) this.recorder.startSession(s.date);
         this.endedSession = null;
-      } else if (active !== null && this.endedSession !== active && (active !== s.date || istParts(now).minuteOfDay >= MARKET_CLOSE_MIN)) {
+      } else if (active !== null && this.endedSession !== active && (active !== s.date || istParts(now).minuteOfDay >= lastClose)) {
         this.endedSession = active;
         this.recorder.endSession();
       }
@@ -845,12 +877,18 @@ export class LiveProvider implements MarketDataProvider {
 
   async candles(key: InstrumentKey, interval: CandleInterval, from: string, to: string): Promise<Candle[]> {
     if (!isIsoDate(from) || !isIsoDate(to) || from > to) throw badRequest(`Invalid date range ${from}..${to}`);
-    const k = canonicalKey(key);
-    if (k.kind !== 'SPOT' && !k.expiry) throw badRequest(`${k.symbol} ${k.kind} needs an expiry`);
-    if (interval === 'D') return officialDailyCandles(this.history, this.calendar, k, from, to);
+    const asked = canonicalKey(key);
+    if (asked.kind !== 'SPOT' && !asked.expiry) throw badRequest(`${asked.symbol} ${asked.kind} needs an expiry`);
+    // A commodity's "spot" is its near-month future (its candles are that future's).
+    const k = this.ref.ready() ? canonicalKey(this.ref.quoteKey(asked)) : asked;
+    const cal = this.calendarOf(k.symbol);
+    if (interval === 'D') {
+      if (cal.exchange === 'MCX') throw new NoLiveData(`No official end-of-day history for MCX ${k.symbol}: the app loads NSE/BSE files only; recorded sessions are shown on intraday intervals`);
+      return officialDailyCandles(this.eodFiles, this.calendar, k, from, to);
+    }
     const step = INTERVAL_MINUTES[interval];
     if (!step) throw badRequest(`Unsupported interval ${String(interval)}`);
-    const dates = this.calendar.sessions(from, to);
+    const dates = cal.sessions(from, to);
     if (!dates.length) throw new NoLiveData(`No trading sessions between ${from} and ${to}`);
 
     const { minutes, missing } = recordedMinutes(this.intraday, k, dates, this.istDate());
@@ -865,12 +903,13 @@ export class LiveProvider implements MarketDataProvider {
     if (!minutes.length) {
       throw new NoLiveData(`No ${interval} candles of ${describe(k)} for ${from}..${to}: not recorded${kotakNote ? `, and Kotak historical: ${kotakNote}` : ''}`);
     }
-    return resampleMinutes(minutes, step, this.calendar);
+    return resampleMinutes(minutes, step, cal);
   }
 
   /** Kotak 1-minute candles of an ACTIVE contract for the given dates (cached). */
   private async kotakMinutes(k: InstrumentKey, dates: string[]): Promise<MinuteCandle[]> {
     if (!this.rest) throw new NoLiveData(this.kotakError ?? 'Kotak REST is not available');
+    if (this.calendarOf(k.symbol).exchange === 'MCX') throw new NoLiveData('Kotak historical candles are not available for MCX; only minutes this app recorded are shown');
     let listing;
     try {
       listing = this.ref.listing(k);
@@ -901,7 +940,7 @@ export class LiveProvider implements MarketDataProvider {
     const want = new Set(dates);
     return hit.candles
       .filter((c) => {
-        const s = this.calendar.session(c.ts);
+        const s = this.calendarOf(k.symbol).session(c.ts);
         return want.has(s.date) && s.status === 'open';
       })
       .map((c) => ({ ...c }));
@@ -945,7 +984,7 @@ export class LiveProvider implements MarketDataProvider {
   healthLine(): string {
     const h = this.live.health();
     const r = this.ref.status();
-    const fo = this.history.loadedDates('fo').at(-1);
+    const fo = this.eodFiles.loadedDates('fo').at(-1);
     const parts = [
       h.loggedIn ? 'Kotak logged in' : `Kotak not logged in (${h.error ?? 'unknown'})`,
       h.connected ? `feed connected (${h.subscribed} subscribed)` : h.loggedIn ? `feed down${h.error ? ` (${h.error})` : ''}` : 'feed off',

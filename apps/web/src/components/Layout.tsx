@@ -5,12 +5,15 @@ import type { Notification } from '@q26/core';
 import { api } from '../lib/api';
 import { useFeed } from '../lib/feed';
 import { formatAge, formatAsOf, formatDateTime, formatIndian, formatPct, formatSessionTime, isNum } from '../lib/format';
+import { useMeta } from '../lib/hooks';
 import { MOBILE_TABS, NAV } from '../lib/nav';
 import { useApp, useTicks } from '../lib/store';
 import { FeedDetails, feedTone } from './FeedStatus';
 import { cx, Dash } from './ui';
 
 const TICKER = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', 'MIDCPNIFTY', 'BANKEX'];
+/** MCX commodities shown after the indices (when listed), most traded first; others follow in master order. */
+const COMMODITY_ORDER = ['CRUDEOIL', 'GOLD', 'SILVER', 'NATURALGAS', 'COPPER', 'GOLDM', 'SILVERM', 'CRUDEOILM', 'NATGASMINI', 'ZINC', 'ALUMINIUM', 'LEAD'];
 
 function Logo() {
   return (
@@ -27,6 +30,12 @@ function Logo() {
 const TICKER_STALE_MS = 60_000;
 
 function Ticker() {
+  const meta = useMeta();
+  const commodities = (meta.data?.symbols ?? [])
+    .filter((x) => x.kind === 'commodity')
+    .map((x) => x.symbol)
+    .sort((a, b) => (COMMODITY_ORDER.indexOf(a) + 1 || 99) - (COMMODITY_ORDER.indexOf(b) + 1 || 99));
+  const symbols = [...TICKER, ...commodities];
   const quotes = useTicks((s) => s.quotes);
   const prev = useTicks((s) => s.prev);
   const clock = useTicks((s) => s.clock);
@@ -35,7 +44,7 @@ function Ticker() {
   const setSymbol = useApp((s) => s.setSymbol);
   return (
     <div className="flex gap-1 overflow-x-auto no-scrollbar">
-      {TICKER.map((sym) => {
+      {symbols.map((sym, i) => {
         const q = quotes[sym];
         const dir = q ? (q.ltp > (prev[sym] ?? q.ltp) ? 'flash-up' : q.ltp < (prev[sym] ?? q.ltp) ? 'flash-down' : '') : '';
         // Last price time; dimmed when the connection is gone or (market open) no tick for a minute.
@@ -48,7 +57,7 @@ function Ticker() {
               setSymbol(sym);
               navigate('/option-chain');
             }}
-            className="flex shrink-0 flex-col rounded-md px-2.5 py-1 text-left hover:bg-panel2"
+            className={cx('flex shrink-0 flex-col rounded-md px-2.5 py-1 text-left hover:bg-panel2', i === TICKER.length && 'ml-1 border-l border-line pl-3')}
             title={q ? `${sym} · LTP ${formatAsOf(q.ts, clock?.ts)}${stale ? ` · last update ${age} ago` : ''}` : `${sym} · no live price yet`}
           >
             <span className="text-2xs font-semibold text-muted">{sym}</span>
@@ -68,6 +77,8 @@ function Ticker() {
 }
 
 /** Market clock + live-feed state (LIVE / CONNECTING / OFFLINE); click for the reason and the details. */
+const statusText = (s: string) => (s === 'open' ? 'Open' : s === 'pre-open' ? 'Pre-open' : 'Closed');
+
 function ClockChip() {
   const clock = useTicks((s) => s.clock);
   const connected = useTicks((s) => s.connected);
@@ -92,7 +103,8 @@ function ClockChip() {
           <>
             <span className="hidden tabular-nums md:inline">{formatDateTime(clock.ts)}</span>
             <span className="hidden tabular-nums sm:inline md:hidden">{formatSessionTime(clock.ts)}</span>
-            <span className={cx(marketOpen ? 'text-up' : 'text-warn', view.state !== 'LIVE' && 'hidden sm:inline')}>{clock.status === 'open' ? 'Open' : clock.status === 'pre-open' ? 'Pre-open' : 'Closed'}</span>
+            <span className={cx(marketOpen ? 'text-up' : 'text-warn', view.state !== 'LIVE' && 'hidden sm:inline')}>{clock.mcxStatus ? 'NSE ' : ''}{statusText(clock.status)}</span>
+            {clock.mcxStatus && <span className={cx(clock.mcxStatus === 'open' ? 'text-up' : 'text-warn', 'hidden sm:inline')}>MCX {statusText(clock.mcxStatus)}</span>}
           </>
         )}
       </button>

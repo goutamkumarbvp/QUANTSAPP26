@@ -12,7 +12,7 @@ type Filter = 'all' | BuildUp;
 export default function FuturesOI() {
   const q = useLive<FuturesBuildUpRow[]>(['futures-oi'], '/oi/futures', 10000);
   const [filter, setFilter] = useState<Filter>('all');
-  const [kind, setKind] = useState<'all' | 'index' | 'stock'>('all');
+  const [kind, setKind] = useState<'all' | 'index' | 'stock' | 'commodity'>('all');
   const [search, setSearch] = useState('');
   const setSymbol = useApp((s) => s.setSymbol);
   const navigate = useNavigate();
@@ -34,7 +34,7 @@ export default function FuturesOI() {
       </PageHeader>
       <div className="flex flex-wrap gap-2">
         <Segmented value={filter} onChange={setFilter} options={[{ value: 'all', label: `All (${q.data?.length ?? 0})` }, ...(['Long Build-up', 'Short Build-up', 'Short Covering', 'Long Unwinding'] as BuildUp[]).map((b) => ({ value: b as Filter, label: `${b} (${counts[b] ?? 0})` }))]} />
-        <Segmented value={kind} onChange={setKind} options={[{ value: 'all', label: 'All' }, { value: 'index', label: 'Indices' }, { value: 'stock', label: 'Stocks' }]} />
+        <Segmented value={kind} onChange={setKind} options={[{ value: 'all', label: 'All' }, { value: 'index', label: 'Indices' }, { value: 'commodity', label: 'MCX' }, { value: 'stock', label: 'Stocks' }]} />
       </div>
       <Card pad={false}>
         <Loadable q={q}>

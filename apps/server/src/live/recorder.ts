@@ -31,7 +31,7 @@
  * maxLag/maxLead from the clock (re-sent snapshots, skew) update state only. A tick for a minute
  * that was already written is folded into the next open minute instead of rewriting history.
  */
-import { maxPain, SESSION_MINUTES } from '@q26/core';
+import { maxPain } from '@q26/core';
 import { chainAtmIv } from './pricing';
 import type { IntradayWriter, LiveBarSource } from './store/intraday';
 import { keyId } from './types';
@@ -50,9 +50,14 @@ export interface RecorderOptions {
   /** Only `r` is used: ATM IV is solved on the recorded minute-close premiums (pricing.chainAtmIv). */
   pricing: Pick<Pricing, 'r'>;
   calendar: TradingCalendar;
+  /** Calendar of a symbol's exchange (MCX for commodities: 09:00–23:30/23:55); default `calendar`. */
+  calendarOf?: (symbol: string) => TradingCalendar;
   clock: SessionClock;
-  /** Listed strikes for the ATM strike (strikes seen in ticks when absent / not loaded). */
-  ref?: Pick<ReferenceData, 'strikes'>;
+  /**
+   * Listed strikes for the ATM strike (strikes seen in ticks when absent / not loaded); the instrument
+   * a commodity's SPOT is read from and the future its options are written on (MCX).
+   */
+  ref?: Partial<Pick<ReferenceData, 'strikes' | 'quoteKey' | 'underlyingFuture'>>;
   /** Flush poll interval, default 1,000 ms. */
   flushIntervalMs?: number;
   /** The timer writes a minute once the clock is this far past its end, default 1,500 ms. */
@@ -130,6 +135,8 @@ interface ChainReg {
   symbol: string;
   expiry: string;
   options: Set<Inst>;
+  /** Start of the last chain minute written. */
+  lastTs: number;
 }
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -151,7 +158,6 @@ export class Recorder implements LiveBarSource {
   /** Chains registered with trackChain(); they survive day resets. */
   private readonly tracked = new Map<string, { symbol: string; expiry: string }>();
   private date: string | null = null;
-  private lastChainTs = -Infinity;
   private unsubscribe: (() => void) | null = null;
   private timer: unknown = null;
   private readonly graceMs: number;
@@ -222,10 +228,13 @@ export class Recorder implements LiveBarSource {
       if (rec) items.push({ key: inst.key, rec });
     }
     this.write(items);
-    // Chain aggregate of the last minute that started at or before now (and inside the session).
+    // Chain aggregates of the last minute that started at or before now (and inside each session).
     const now = this.opts.clock.now();
-    const last = minuteOf(Math.min(now, this.opts.calendar.ts(date, 375)) - 1);
-    if (last > this.lastChainTs && this.inSession(last, date)) this.writeChains(last);
+    for (const reg of this.chains.values()) {
+      const cal = this.cal(reg.symbol);
+      const last = minuteOf(Math.min(now, cal.ts(date, cal.sessionMinutes(date))) - 1);
+      this.writeChains(last, [reg]);
+    }
     const summary: SessionSummary = { date, instruments: this.insts.size, minutesWritten: this.sessionWritten.minutes, chainMinutesWritten: this.sessionWritten.chains };
     this.resetDay(null);
     return summary;
@@ -258,9 +267,11 @@ export class Recorder implements LiveBarSource {
    * unknown bid/ask, so it is booked unclassified. Only live ticks are classified.
    */
   onTick(q: LiveQuote, meta?: TickMeta): void {
-    const { calendar, clock } = this.opts;
+    const { clock } = this.opts;
+    const calendar = this.cal(q.key.symbol);
     const now = clock.now();
-    const today = calendar.session(now).date;
+    // The recording day is the IST date (NSE/BSE and MCX sessions both lie within it).
+    const today = this.opts.calendar.session(now).date;
     const at = calendar.session(q.ts);
     // A packet stamped another day (e.g. yesterday's snapshot) must not touch today's baselines.
     if (at.date !== today) {
@@ -332,13 +343,13 @@ export class Recorder implements LiveBarSource {
     if (q.ts < now - this.maxLagMs) return void this.st.stateOnly.stale++;
     if (q.ts > now + this.maxLeadMs) return void this.st.stateOnly.ahead++;
     if (at.status !== 'open') {
-      if (inst.pendingGap > 0 && q.ts >= calendar.ts(today, SESSION_MINUTES)) this.bookGapAtClose(inst, today, q.ltp);
+      if (inst.pendingGap > 0 && q.ts >= calendar.ts(today, calendar.sessionMinutes(today))) this.bookGapAtClose(inst, today, q.ltp);
       return void this.st.stateOnly.outsideSession++;
     }
     let m = minuteOf(q.ts);
     if (inst.bar && inst.bar.ts > m) m = inst.bar.ts;
     if (inst.lastWritten + MINUTE_MS > m) m = inst.lastWritten + MINUTE_MS;
-    if (!this.inSession(m, today)) return void this.st.stateOnly.outsideSession++;
+    if (!this.inSession(m, today, q.key.symbol)) return void this.st.stateOnly.outsideSession++;
 
     // A trade reported late, in the minute still open before this tick's: the trade (its price and the
     // volume behind it) belongs to that minute, not to the one this tick opens.
@@ -398,17 +409,20 @@ export class Recorder implements LiveBarSource {
       }
     }
     this.write(items);
-    const x = minuteOf(now - MINUTE_MS - this.graceMs);
-    if (x > this.lastChainTs && this.inSession(x, this.date)) this.writeChains(x);
+    this.writeChains(minuteOf(now - MINUTE_MS - this.graceMs), [...this.chains.values()]);
     if (this.opts.calendar.session(now).date !== this.date) this.endSession();
   }
 
   /* ---------------------------------- chains ---------------------------------- */
 
-  private writeChains(x: number): void {
-    this.lastChainTs = x;
+  /** Chain aggregates of minute x for the chains not yet written for it whose session x is in. */
+  private writeChains(x: number, regs: ChainReg[]): void {
+    const date = this.date;
+    if (!date) return;
     const out: { symbol: string; expiry: string; rec: ChainMinute }[] = [];
-    for (const reg of this.chains.values()) {
+    for (const reg of regs) {
+      if (x <= reg.lastTs || !this.inSession(x, date, reg.symbol)) continue;
+      reg.lastTs = x;
       const rec = this.chainMinute(reg, x);
       if (rec) out.push({ symbol: reg.symbol, expiry: reg.expiry, rec });
     }
@@ -425,11 +439,13 @@ export class Recorder implements LiveBarSource {
   /** Aggregate of one chain as of the end of minute x, from the latest values known by then. */
   private chainMinute(reg: ChainReg, x: number): ChainMinute | null {
     const { symbol, expiry } = reg;
-    const spotInst = this.insts.get(keyId({ symbol, kind: 'SPOT' }));
+    // An MCX commodity's spot is its near-month future (quoteKey).
+    const spotKey: InstrumentKey = { symbol, kind: 'SPOT' };
+    const spotInst = this.insts.get(keyId(this.opts.ref?.quoteKey?.(spotKey) ?? spotKey));
     let spot = spotInst ? snapAt(spotInst, x)?.ltp : undefined;
     if (spot === undefined) {
       // No spot ticks reached the recorder: the latest live spot of the same day (≤ a few seconds after x).
-      const q = this.opts.live.quote?.({ symbol, kind: 'SPOT' });
+      const q = this.opts.live.quote?.(spotKey);
       if (q && isPos(q.ltp) && this.opts.calendar.session(q.ts).date === this.date) spot = q.ltp;
     }
     if (spot === undefined) {
@@ -472,8 +488,9 @@ export class Recorder implements LiveBarSource {
     let atmStrike = strikes[0];
     for (const k of strikes) if (Math.abs(k - spot) < Math.abs(atmStrike - spot) || (Math.abs(k - spot) === Math.abs(atmStrike - spot) && k < atmStrike)) atmStrike = k;
 
-    // ATM IV on the minute-close premiums (same-expiry future, else parity, else spot).
-    const futInst = this.insts.get(keyId({ symbol, kind: 'FUT', expiry }));
+    // ATM IV on the minute-close premiums (the future the options are written on, else parity, else spot).
+    const futureExpiry = this.futureExpiry(symbol, expiry);
+    const futInst = this.insts.get(keyId({ symbol, kind: 'FUT', expiry: futureExpiry }));
     const fut = futInst ? snapAt(futInst, x)?.ltp : undefined;
     const quote = (key: InstrumentKey, ltp: number | undefined): LiveQuote | undefined => (ltp === undefined ? undefined : { key, ts: x, ltp });
     const chain: RawChain = {
@@ -481,14 +498,14 @@ export class Recorder implements LiveBarSource {
       expiry,
       ts: x + MINUTE_MS,
       spot: quote({ symbol, kind: 'SPOT' }, spot),
-      future: quote({ symbol, kind: 'FUT', expiry }, fut),
+      future: quote({ symbol, kind: 'FUT', expiry: futureExpiry }, fut),
       rows: [...rows.values()].map((row): ChainRowLive => ({
         strike: row.strike,
         ce: quote({ symbol, kind: 'CE', expiry, strike: row.strike }, row.ce?.ltp),
         pe: quote({ symbol, kind: 'PE', expiry, strike: row.strike }, row.pe?.ltp),
       })),
     };
-    const iv = chainAtmIv(chain, this.opts.pricing.r, x + MINUTE_MS);
+    const iv = chainAtmIv(chain, this.opts.pricing.r, x + MINUTE_MS, { exchange: this.cal(symbol).exchange, futureExpiry });
     return {
       ts: x,
       spot,
@@ -505,7 +522,7 @@ export class Recorder implements LiveBarSource {
 
   private listedStrikes(symbol: string, expiry: string): number[] | undefined {
     try {
-      const s = this.opts.ref?.strikes(symbol, expiry);
+      const s = this.opts.ref?.strikes?.(symbol, expiry);
       return s && s.length ? s : undefined;
     } catch {
       return undefined; // master not loaded: fall back to the strikes seen
@@ -514,9 +531,23 @@ export class Recorder implements LiveBarSource {
 
   /* ---------------------------------- internals -------------------------------- */
 
-  private inSession(ts: number, date: string): boolean {
-    const s = this.opts.calendar.session(ts);
+  private inSession(ts: number, date: string, symbol: string): boolean {
+    const s = this.cal(symbol).session(ts);
     return s.status === 'open' && s.date === date;
+  }
+
+  /** Calendar of the symbol's exchange. */
+  private cal(symbol: string): TradingCalendar {
+    return this.opts.calendarOf?.(symbol) ?? this.opts.calendar;
+  }
+
+  /** Expiry of the future the options of `expiry` are written on (MCX: the one they settle into). */
+  private futureExpiry(symbol: string, expiry: string): string {
+    try {
+      return this.opts.ref?.underlyingFuture?.(symbol, expiry) ?? expiry;
+    } catch {
+      return expiry;
+    }
   }
 
   private inst(key: InstrumentKey): Inst {
@@ -533,7 +564,7 @@ export class Recorder implements LiveBarSource {
     const id = `${symbol}|${expiry}`;
     let reg = this.chains.get(id);
     if (!reg) {
-      reg = { symbol, expiry, options: new Set() };
+      reg = { symbol, expiry, options: new Set(), lastTs: -Infinity };
       for (const inst of this.insts.values()) {
         if ((inst.key.kind === 'CE' || inst.key.kind === 'PE') && inst.key.symbol === symbol && inst.key.expiry === expiry) reg.options.add(inst);
       }
@@ -572,7 +603,8 @@ export class Recorder implements LiveBarSource {
    * stands as a quote-only (traded: false) minute at the post-close LTP (the session's last trade).
    */
   private bookGapAtClose(inst: Inst, date: string, ltp: number): void {
-    const last = this.opts.calendar.ts(date, SESSION_MINUTES - 1);
+    const cal = this.cal(inst.key.symbol);
+    const last = cal.ts(date, cal.sessionMinutes(date) - 1);
     const gapVolume = inst.pendingGap;
     inst.pendingGap = 0;
     if (inst.bar && inst.bar.ts === last) {
@@ -614,7 +646,6 @@ export class Recorder implements LiveBarSource {
     this.chains.clear();
     for (const t of this.tracked.values()) this.chainReg(t.symbol, t.expiry);
     this.date = date;
-    this.lastChainTs = -Infinity;
     this.sessionWritten = { minutes: 0, chains: 0 };
   }
 }

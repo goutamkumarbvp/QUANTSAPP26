@@ -8,8 +8,10 @@
  *   2. put-call parity at the strike nearest spot      → source 'parity'   F = K + e^{rT}(C − P)
  *      (weekly index expiries have no future, MAP §13.6)
  *   3. spot with zero dividend, F = S·e^{rT}           → source 'spot'
- * and NoLiveData when none of them is live. Time to expiry is calendar time to 15:30 IST on the
- * expiry date (/365, core `yearsBetween`), measured from the valuation time (valuationTs): now while
+ * and NoLiveData when none of them is live. MCX options are written on futures that expire after
+ * them: "the same-expiry future" there is the future the option expiry settles into
+ * (ReferenceData.underlyingFuture). Time to expiry is calendar time to the close of the expiry date
+ * (15:30 IST for NSE/BSE, the MCX close for MCX; /365, core `yearsBetween`), measured from the valuation time (valuationTs): now while
  * the session is open, otherwise the close of the session whose quotes are still live, so values
  * solved from unchanged premiums do not drift overnight, over a weekend or before the open. An LTP
  * premium (no sane live book) is valued at its own last-trade time (premiumTs). There is no fallback
@@ -21,7 +23,7 @@
  * before the valuation time of now without an explicit forward gives null: the live quotes are newer
  * than `ts` (no look-ahead).
  */
-import { SESSION_MINUTES, bsGreeks, bsPrice, expiryTs, impliedVol, yearsBetween, type Greeks } from '@q26/core';
+import { bsGreeks, bsPrice, expiryTs, impliedVol, yearsBetween, type ExchangeCode, type Greeks } from '@q26/core';
 import { NoLiveData } from './types';
 import type { ForwardEstimate, InstrumentKey, LiveQuote, OptKind, Pricing, RawChain, ReferenceData, TradingCalendar } from './types';
 
@@ -29,9 +31,9 @@ import type { ForwardEstimate, InstrumentKey, LiveQuote, OptKind, Pricing, RawCh
 /* Pure helpers (shared by LivePricing, the recorder and the EOD store)                         */
 /* ------------------------------------------------------------------------------------------ */
 
-/** Years from `ts` to 15:30 IST on the expiry date (0 once expired). */
-export function timeToExpiry(expiry: string, ts: number): number {
-  return yearsBetween(ts, expiryTs(expiry));
+/** Years from `ts` to the close of the expiry date on its exchange (0 once expired). */
+export function timeToExpiry(expiry: string, ts: number, exchange: ExchangeCode = 'NSE'): number {
+  return yearsBetween(ts, expiryTs(expiry, exchange));
 }
 
 /** Premiums of one strike (rupees); absent sides are not live. */
@@ -153,11 +155,18 @@ export function atmIvOf(rows: readonly PremiumRow[], F: number, T: number, r: nu
 
 /**
  * Forward and ATM IV of a RawChain (live or recorded with IntradayStore.chainAt) at `ts`. The
- * chain's future is used only when it is of the chain's own expiry.
+ * chain's future is used only when it is the one the options are written on: of the chain's own
+ * expiry (NSE/BSE), or `opts.futureExpiry` (MCX: the future the expiry settles into).
  */
-export function chainAtmIv(chain: RawChain, r: number, ts: number = chain.ts): { iv: number; strike: number; forward: ForwardPrice } | null {
-  const T = timeToExpiry(chain.expiry, ts);
-  const future = chain.future && chain.future.key.expiry === chain.expiry ? chain.future.ltp : undefined;
+export function chainAtmIv(
+  chain: RawChain,
+  r: number,
+  ts: number = chain.ts,
+  opts: { exchange?: ExchangeCode; futureExpiry?: string } = {},
+): { iv: number; strike: number; forward: ForwardPrice } | null {
+  const T = timeToExpiry(chain.expiry, ts, opts.exchange);
+  const fe = opts.futureExpiry ?? chain.expiry;
+  const future = chain.future && chain.future.key.expiry === fe ? chain.future.ltp : undefined;
   const rows: PremiumRow[] = chain.rows.map((row) => ({ strike: row.strike, ce: row.ce?.ltp, pe: row.pe?.ltp }));
   const forward = impliedForward({ spot: chain.spot?.ltp, future, rows }, T, r);
   if (!forward) return null;
@@ -175,6 +184,8 @@ export interface LivePricingOptions {
   ref: ReferenceData;
   /** Exchange calendar: which session date a quote belongs to. */
   calendar: TradingCalendar;
+  /** Calendar of a symbol's exchange (MCX for commodities); default `calendar` for every symbol. */
+  calendarOf?: (symbol: string) => TradingCalendar;
   /** Latest live quote of an instrument (LiveMarket.quote). */
   getQuote: (key: InstrumentKey) => LiveQuote | undefined;
   now?: () => number;
@@ -208,13 +219,14 @@ function lastStartedSession(calendar: TradingCalendar, ts: number): string {
 
 /**
  * Valuation time at `ts` (time to expiry is measured from it): `ts` while the session is open;
- * otherwise the close (15:30 IST) of the most recent session, the one whose quotes are still live
+ * otherwise the close (15:30 IST; MCX: its close) of the most recent session, the one whose quotes are still live
  * then (liveSessionDates). Outside the session the premiums are that session's last ones; measuring
  * from the clock would decay them overnight and over weekends with no market move.
  */
 export function valuationTs(calendar: TradingCalendar, ts: number): number {
   if (calendar.session(ts).status === 'open') return ts;
-  return Math.min(ts, calendar.ts(lastStartedSession(calendar, ts), SESSION_MINUTES));
+  const last = lastStartedSession(calendar, ts);
+  return Math.min(ts, calendar.ts(last, calendar.sessionMinutes(last)));
 }
 
 /**
@@ -272,17 +284,23 @@ export class LivePricing implements Pricing {
    * Session dates whose quotes are live at `now`: today; outside session hours also the most
    * recent session (the previous trading day before 09:15 and on holidays, today after the close).
    */
-  private liveDates(now: number): Set<string> {
-    return liveSessionDates(this.opts.calendar, now);
+  private liveDates(cal: TradingCalendar, now: number): Set<string> {
+    return liveSessionDates(cal, now);
+  }
+
+  /** Calendar of the symbol's exchange. */
+  private cal(symbol: string): TradingCalendar {
+    return this.opts.calendarOf?.(symbol) ?? this.opts.calendar;
   }
 
   /** Live price of an instrument, undefined when there is none (or its LTP is not a trade of a live session / too old). */
   private price(key: InstrumentKey, now: number, dates: Set<string>): number | undefined {
+    const cal = this.cal(key.symbol);
     const q = this.opts.getQuote(key);
-    if (!q || !isPos(q.ltp) || !isLivePrice(q, this.opts.calendar, dates)) return undefined;
+    if (!q || !isPos(q.ltp) || !isLivePrice(q, cal, dates)) return undefined;
     if (this.opts.maxQuoteAgeMs !== undefined && now - q.ts > this.opts.maxQuoteAgeMs) return undefined;
     // A pre-open price is newer than the valuation time of the premiums (isAfterValuation).
-    if (isAfterValuation(q, this.opts.calendar, valuationTs(this.opts.calendar, now))) return undefined;
+    if (isAfterValuation(q, cal, valuationTs(cal, now))) return undefined;
     return q.ltp;
   }
 
@@ -308,29 +326,40 @@ export class LivePricing implements Pricing {
    * The time a premium is valued at: valuationTs of `ts` (default now); with `ltt`, an LTP premium's
    * last-trade time when it is a trade of a live session, capped by that (premiumTs).
    */
-  valuationTs(ts?: number, ltt?: number): number {
+  valuationTs(ts?: number, ltt?: number, symbol?: string): number {
     const now = this.now();
-    return premiumTs(this.opts.calendar, now, valuationTs(this.opts.calendar, ts ?? now), ltt);
+    const cal = symbol ? this.cal(symbol) : this.opts.calendar;
+    return premiumTs(cal, now, valuationTs(cal, ts ?? now), ltt);
   }
 
   /** NoLiveData when no forward is live, when there is no live spot to imply the carry from, or once expired. */
   forward(symbol: string, expiry: string): ForwardEstimate {
     const now = this.now();
-    const dates = this.liveDates(now);
-    const T = timeToExpiry(expiry, valuationTs(this.opts.calendar, now));
+    const cal = this.cal(symbol);
+    const dates = this.liveDates(cal, now);
+    const T = timeToExpiry(expiry, valuationTs(cal, now), cal.exchange);
     if (!(T > 0)) throw new NoLiveData(`${symbol} ${expiry} has expired: no forward`);
     const inputs = this.forwardInputs(symbol, expiry, now, dates);
     const f = forwardOf(inputs, T, this.r);
     if (f) return f;
     if (!impliedForward(inputs, T, this.r)) throw new NoLiveData(`No live future, put-call pair or spot price for ${symbol} ${expiry}`);
     const sq = this.opts.getQuote({ symbol, kind: 'SPOT' });
-    const pre = sq && isAfterValuation(sq, this.opts.calendar, valuationTs(this.opts.calendar, now)) ? " (its latest price is a pre-open one, newer than the premiums' valuation time)" : '';
+    const pre = sq && isAfterValuation(sq, cal, valuationTs(cal, now)) ? " (its latest price is a pre-open one, newer than the premiums' valuation time)" : '';
     throw new NoLiveData(`No live spot price for ${symbol}${pre}: the carry of the ${expiry} forward cannot be implied`);
+  }
+
+  /** Expiry of the future the options of `expiry` are written on (MCX: the one they settle into). */
+  private futureExpiry(symbol: string, expiry: string): string {
+    try {
+      return this.opts.ref.underlyingFuture(symbol, expiry) ?? expiry;
+    } catch {
+      return expiry;
+    }
   }
 
   private forwardInputs(symbol: string, expiry: string, now: number, dates: Set<string>): ForwardInputs {
     const spot = this.price({ symbol, kind: 'SPOT' }, now, dates);
-    const future = this.price({ symbol, kind: 'FUT', expiry }, now, dates);
+    const future = this.price({ symbol, kind: 'FUT', expiry: this.futureExpiry(symbol, expiry) }, now, dates);
     // Parity needs the option quotes only when there is no same-expiry future.
     const rows = future === undefined ? this.premiumRows(symbol, expiry, now, dates) : [];
     return { spot, future, rows };
@@ -338,28 +367,31 @@ export class LivePricing implements Pricing {
 
   iv(input: { symbol: string; expiry: string; type: OptKind; strike: number; premium: number; ts?: number; forward?: number; ltt?: number }): number | null {
     const now = this.now();
-    const ts = valuationTs(this.opts.calendar, input.ts ?? now);
+    const cal = this.cal(input.symbol);
+    const ts = valuationTs(cal, input.ts ?? now);
     const F = input.forward ?? this.liveForward(input.symbol, input.expiry, ts, now);
     if (F === undefined) return null;
-    return black76Iv(input.type, input.premium, F, input.strike, timeToExpiry(input.expiry, premiumTs(this.opts.calendar, now, ts, input.ltt)), this.r);
+    return black76Iv(input.type, input.premium, F, input.strike, timeToExpiry(input.expiry, premiumTs(cal, now, ts, input.ltt), cal.exchange), this.r);
   }
 
   greeks(input: { symbol: string; expiry: string; type: OptKind; strike: number; iv: number; ts?: number; forward?: number; ltt?: number }): Greeks | null {
     const now = this.now();
-    const ts = valuationTs(this.opts.calendar, input.ts ?? now);
+    const cal = this.cal(input.symbol);
+    const ts = valuationTs(cal, input.ts ?? now);
     const F = input.forward ?? this.liveForward(input.symbol, input.expiry, ts, now);
     if (F === undefined) return null;
-    return black76Greeks(input.type, F, input.strike, timeToExpiry(input.expiry, premiumTs(this.opts.calendar, now, ts, input.ltt)), this.r, input.iv);
+    return black76Greeks(input.type, F, input.strike, timeToExpiry(input.expiry, premiumTs(cal, now, ts, input.ltt), cal.exchange), this.r, input.iv);
   }
 
   atmIv(symbol: string, expiry?: string): number | null {
     const now = this.now();
-    const val = valuationTs(this.opts.calendar, now);
+    const cal = this.cal(symbol);
+    const val = valuationTs(cal, now);
     const exp = expiry ?? this.nearestExpiry(symbol, val);
     if (!exp) return null;
-    const T = timeToExpiry(exp, val);
+    const T = timeToExpiry(exp, val, cal.exchange);
     if (!(T > 0)) return null;
-    const dates = this.liveDates(now);
+    const dates = this.liveDates(cal, now);
     const F = impliedForward(this.forwardInputs(symbol, exp, now, dates), T, this.r)?.forward;
     if (F === undefined) return null;
     return atmIvOf(this.premiumRows(symbol, exp, now, dates), F, T, this.r)?.iv ?? null;
@@ -374,7 +406,8 @@ export class LivePricing implements Pricing {
       if (e instanceof NoLiveData) return undefined;
       throw e;
     }
-    return [...list].sort().find((e) => timeToExpiry(e, now) > 0);
+    const ex = this.cal(symbol).exchange;
+    return [...list].sort().find((e) => timeToExpiry(e, now, ex) > 0);
   }
 
   /**
@@ -383,9 +416,10 @@ export class LivePricing implements Pricing {
    * quotes are newer than it.
    */
   private liveForward(symbol: string, expiry: string, ts: number, now: number): number | undefined {
-    const val = valuationTs(this.opts.calendar, now);
+    const cal = this.cal(symbol);
+    const val = valuationTs(cal, now);
     if (ts < val - LIVE_TS_SLACK_MS) return undefined;
-    const dates = this.liveDates(now);
-    return impliedForward(this.forwardInputs(symbol, expiry, now, dates), timeToExpiry(expiry, val), this.r)?.forward;
+    const dates = this.liveDates(cal, now);
+    return impliedForward(this.forwardInputs(symbol, expiry, now, dates), timeToExpiry(expiry, val, cal.exchange), this.r)?.forward;
   }
 }

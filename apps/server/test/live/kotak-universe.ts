@@ -21,7 +21,7 @@ const range = (lo: number, hi: number, step: number): number[] => {
   return out;
 };
 
-export type ScripFiles = Record<'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo', string>;
+export type ScripFiles = Record<'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo', string> & { mcx_fo?: string };
 
 export function universeFiles(): ScripFiles {
   let tok = 40000;
@@ -62,8 +62,9 @@ export function universeFiles(): ScripFiles {
 /** Answers the four scrip-master downloads of filePaths(day) (any other URL is unexpected). */
 export function scripReply(url: string, files: ScripFiles): Reply | undefined {
   if (!url.includes('wso2-scripmaster') || url.includes('nse_com')) return undefined;
-  const seg = (['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo'] as const).find((s) => url.includes(`/${s}`));
-  return seg ? { text: files[seg] } : undefined;
+  const seg = (['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo', 'mcx_fo'] as const).find((s) => url.includes(`/${s}`));
+  // No MCX contracts in a fixture without an mcx_fo file: an empty file (header only).
+  return seg ? { text: files[seg] ?? scripCsv([]) } : undefined;
 }
 
 /** A loaded ScripMaster over the fixture files (cached under dataDir/refdata). */

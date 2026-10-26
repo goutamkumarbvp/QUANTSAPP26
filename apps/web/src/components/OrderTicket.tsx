@@ -169,7 +169,7 @@ function TicketForm({ spec, onClose, onAddToBuilder }: { spec: TicketSpec; onClo
           )}
         </div>
         {isNum(q?.ltp) && isNum(lotSize) ? <div className="text-xs text-muted">Value at LTP ≈ {formatINR(q.ltp * lots * lotSize)}</div> : null}
-        {dayOrder && <div className="text-2xs text-muted">Limit and stop orders are day orders: they work only while a live price allows a fill and are cancelled (“Day order expired”) at 15:30.</div>}
+        {dayOrder && <div className="text-2xs text-muted">Limit and stop orders are day orders: they work only while a live price allows a fill and are cancelled (“Day order expired”) at the session close (15:30; MCX 23:30/23:55).</div>}
         {error ? <ErrorState error={error} compact title="Order not placed" /> : null}
         {result && (
           <div className={cx('rounded-lg px-3 py-2 text-sm', result.status === 'COMPLETE' ? 'bg-up/10 text-up' : result.status === 'REJECTED' ? 'bg-down/10 text-down' : 'bg-accent/10 text-accent')}>

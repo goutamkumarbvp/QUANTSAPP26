@@ -17,6 +17,7 @@ import { INTERVAL_MINUTES, officialDailyCandles, recordedMinutes, resampleMinute
 import { BOOK_FIELDS } from '../../src/live/live-market';
 import { LivePricing, black76Price, chainAtmIv, liveSessionDates, timeToExpiry } from '../../src/live/pricing';
 import { HistoryFiles } from '../../src/live/store/history';
+import { RecordedDailyHistory } from '../../src/live/store/recorded-daily';
 import type { IntradayWriter } from '../../src/live/store/intraday';
 import { NoLiveData, keyId } from '../../src/live/types';
 import type {
@@ -25,6 +26,7 @@ import type {
   ChainMinute,
   ChainRowLive,
   FeedHealth,
+  HistoryStore,
   InstrumentKey,
   IntradayStore,
   Listing,
@@ -69,8 +71,9 @@ const canon = (k: InstrumentKey): InstrumentKey => {
 export interface FakeUnderlyingInput {
   symbol: string;
   name?: string;
-  kind: 'index' | 'stock';
-  exchange?: 'NSE' | 'BSE';
+  kind: 'index' | 'stock' | 'commodity';
+  /** Default NSE; a commodity is MCX. */
+  exchange?: 'NSE' | 'BSE' | 'MCX';
   sector?: string;
   lotSize: number;
   strikeStep: number;
@@ -102,7 +105,15 @@ export class FakeReference implements ReferenceData {
   }
 
   setUnderlying(u: FakeUnderlyingInput): Underlying {
-    const exchange = u.exchange ?? 'NSE';
+    if (u.kind === 'commodity') {
+      // MCX: no cash market; the spot is the near-month future, set by setFutures.
+      const spot: Listing = { symbol: u.symbol, kind: 'SPOT', exchange: 'MCX', segment: 'mcx_fo', token: `${u.symbol}-NEAR`, tradingSymbol: `${u.symbol} near-month future`, lotSize: u.lotSize };
+      const und: Underlying = { symbol: u.symbol, name: u.name ?? u.symbol, kind: 'commodity', exchange: 'MCX', sector: u.sector ?? 'Commodities', lotSize: u.lotSize, strikeStep: u.strikeStep, spot };
+      this.byKey.set(keyId(canon(spot)), spot);
+      this.unders.set(u.symbol, und);
+      return und;
+    }
+    const exchange = u.exchange === 'BSE' ? 'BSE' : 'NSE';
     const segment: Segment = exchange === 'NSE' ? 'nse_cm' : 'bse_cm';
     const spot = this.add(
       u.kind === 'index'
@@ -134,8 +145,9 @@ export class FakeReference implements ReferenceData {
     return s;
   }
 
-  private exchangeOf(symbol: string): { exchange: 'NSE' | 'BSE'; segment: Segment } {
+  private exchangeOf(symbol: string): { exchange: 'NSE' | 'BSE' | 'MCX'; segment: Segment } {
     const u = this.unders.get(symbol);
+    if (u?.exchange === 'MCX') return { exchange: 'MCX', segment: 'mcx_fo' };
     return u?.exchange === 'BSE' ? { exchange: 'BSE', segment: 'bse_fo' } : { exchange: 'NSE', segment: 'nse_fo' };
   }
 
@@ -144,6 +156,30 @@ export class FakeReference implements ReferenceData {
     for (const expiry of expiries) {
       this.addListing({ symbol, kind: 'FUT', expiry, ...this.exchangeOf(symbol), token: String(this.tokenSeq++), tradingSymbol: `${symbol}${expiry}FUT`, lotSize: u?.lotSize ?? 1, tickSize: 0.05 });
     }
+    // A commodity's spot: its near-month future (same token, kind SPOT), as the ScripMaster does.
+    if (u?.kind === 'commodity') {
+      const near = [...(this.fut.get(symbol) ?? [])].sort()[0];
+      const f = near ? this.byKey.get(keyId(canon({ symbol, kind: 'FUT', expiry: near }))) : undefined;
+      if (f) {
+        const spot: Listing = { ...f, kind: 'SPOT', expiry: near };
+        this.byKey.set(keyId(canon({ symbol, kind: 'SPOT' })), spot);
+        this.unders.set(symbol, { ...u, spot });
+      }
+    }
+  }
+
+  underlyingFuture(symbol: string, optionExpiry: string): string | undefined {
+    const u = this.underlying(symbol);
+    const exps = this.expiries(symbol, 'FUT');
+    if (u.kind !== 'commodity') return exps.includes(optionExpiry) ? optionExpiry : undefined;
+    return exps.find((e) => e >= optionExpiry) ?? exps[exps.length - 1];
+  }
+
+  quoteKey(key: InstrumentKey): InstrumentKey {
+    if (key.kind !== 'SPOT' || !this.loadedFlag) return key;
+    const u = this.unders.get(key.symbol.trim().toUpperCase());
+    if (!u || u.kind !== 'commodity' || !u.spot.expiry) return key;
+    return { symbol: u.symbol, kind: 'FUT', expiry: u.spot.expiry };
   }
 
   /** Lists CE and PE at every strike of an option expiry. */
@@ -221,10 +257,11 @@ export class FakeLiveMarket implements LiveMarket {
     private readonly ref: FakeReference,
     private readonly now: () => number,
     private readonly calendar: TradingCalendar = new ExchangeCalendar(),
+    private readonly calendarOf?: (symbol: string) => TradingCalendar,
   ) {}
 
-  private liveDates(): Set<string> {
-    return liveSessionDates(this.calendar, this.now());
+  private liveDates(symbol?: string): Set<string> {
+    return liveSessionDates((symbol && this.calendarOf?.(symbol)) || this.calendar, this.now());
   }
 
   /**
@@ -232,8 +269,13 @@ export class FakeLiveMarket implements LiveMarket {
    * market: an update dated before the stored quote's session is ignored, and an older update of the
    * same session only fills fields the quote does not have yet.
    */
+  /** The instrument whose quotes stand for `key` (a commodity SPOT: its near-month future). */
+  private alias(key: InstrumentKey): InstrumentKey {
+    return canon(this.ref.quoteKey(canon(key)));
+  }
+
   setQuote(key: InstrumentKey, q: QuoteInput): LiveQuote {
-    const k = canon(key);
+    const k = this.alias(key);
     const ts = q.ts ?? this.now();
     let prev = this.map.get(keyId(k));
     if (prev) {
@@ -257,7 +299,7 @@ export class FakeLiveMarket implements LiveMarket {
   }
 
   clearQuote(key: InstrumentKey): void {
-    this.map.delete(keyId(canon(key)));
+    this.map.delete(keyId(this.alias(key)));
   }
 
   setHealth(h: Partial<FeedHealth>): void {
@@ -265,8 +307,11 @@ export class FakeLiveMarket implements LiveMarket {
   }
 
   quote(key: InstrumentKey): LiveQuote | undefined {
-    const q = this.map.get(keyId(canon(key)));
-    return q && this.liveDates().has(this.calendar.session(q.ts).date) ? copyQuote(q) : undefined;
+    const q = this.map.get(keyId(this.alias(key)));
+    if (!q || !this.liveDates(key.symbol).has(this.calendar.session(q.ts).date)) return undefined;
+    const out = copyQuote(q);
+    out.key = canon(key);
+    return out;
   }
 
   quotes(keys: InstrumentKey[]): Map<string, LiveQuote> {
@@ -306,7 +351,7 @@ export class FakeLiveMarket implements LiveMarket {
     const chain: RawChain = { symbol: sym, expiry, ts, rows };
     const spot = this.quote({ symbol: sym, kind: 'SPOT' });
     if (spot) chain.spot = spot;
-    const futKey: InstrumentKey = { symbol: sym, kind: 'FUT', expiry };
+    const futKey: InstrumentKey = { symbol: sym, kind: 'FUT', expiry: this.ref.underlyingFuture(sym, expiry) ?? expiry };
     const fut = this.ref.listing(futKey) ? this.quote(futKey) : undefined;
     if (fut) chain.future = fut;
     return chain;
@@ -332,6 +377,8 @@ export class FakeLiveMarket implements LiveMarket {
 
 /** In-memory IntradayStore (also an IntradayWriter, so the real Recorder can write into it). */
 export class MemoryIntraday implements IntradayStore, IntradayWriter {
+  /** Instrument master hooks (commodity SPOT → its recorded near-month future; MCX option → its future). */
+  ref: Pick<ReferenceData, 'quoteKey' | 'underlyingFuture'> | null = null;
   private readonly bar = new Map<string, Map<number, MinuteRecord>>();
   private readonly chainRecs = new Map<string, Map<number, ChainMinute>>();
   private readonly liveBars = new Map<string, MinuteRecord>();
@@ -382,12 +429,34 @@ export class MemoryIntraday implements IntradayStore, IntradayWriter {
     else this.liveBars.delete(keyId(canon(key)));
   }
 
+  /** As IntradayFiles: a commodity SPOT is the nearest future (on or after `date`) recorded that day. */
+  private recordedKey(key: InstrumentKey, date: string): InstrumentKey {
+    if (key.kind !== 'SPOT' || !this.ref) return key;
+    let alias: InstrumentKey;
+    try {
+      alias = this.ref.quoteKey(key);
+    } catch {
+      return key;
+    }
+    if (alias.kind !== 'FUT') return key;
+    const sym = key.symbol.toUpperCase();
+    const futs = this.recordedKeys(date).filter((k) => k.symbol === sym && k.kind === 'FUT' && (k.expiry as string) >= date);
+    return futs.sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string))[0] ?? alias;
+  }
+
   bars(key: InstrumentKey, date: string): MinuteRecord[] {
-    return [...(this.bar.get(`${date}|${keyId(canon(key))}`)?.values() ?? [])].sort((a, b) => a.ts - b.ts).map((r) => ({ ...r }));
+    const k = this.recordedKey(key, date);
+    return [...(this.bar.get(`${date}|${keyId(canon(k))}`)?.values() ?? [])].sort((a, b) => a.ts - b.ts).map((r) => ({ ...r }));
   }
 
   liveBar(key: InstrumentKey): MinuteRecord | null {
-    const r = this.liveBars.get(keyId(canon(key)));
+    let k = key;
+    try {
+      if (key.kind === 'SPOT' && this.ref) k = this.ref.quoteKey(key);
+    } catch {
+      k = key;
+    }
+    const r = this.liveBars.get(keyId(canon(k)));
     return r ? { ...r } : null;
   }
 
@@ -422,8 +491,15 @@ export class MemoryIntraday implements IntradayStore, IntradayWriter {
     const chain: RawChain = { symbol: sym, expiry, ts, rows: [...rows.values()].sort((a, b) => a.strike - b.strike) };
     const spot = quoteAt({ symbol: sym, kind: 'SPOT' });
     if (spot) chain.spot = spot;
-    // As IntradayFiles: the same-expiry future, else the nearest unexpired recorded future.
-    const same = futures.find((f) => f.expiry === expiry);
+    // As IntradayFiles: the future the options are written on (same expiry; MCX: the one it settles
+    // into), else the nearest unexpired recorded future.
+    let fe = expiry;
+    try {
+      fe = this.ref?.underlyingFuture(sym, expiry) ?? expiry;
+    } catch {
+      fe = expiry;
+    }
+    const same = futures.find((f) => f.expiry === fe);
     const ordered = [...(same ? [same] : []), ...futures.filter((f) => f !== same && (f.expiry as string) >= date).sort((a, b) => (a.expiry as string).localeCompare(b.expiry as string))];
     for (const f of ordered) {
       const q = quoteAt(f);
@@ -468,6 +544,7 @@ export interface FakeProviderOptions {
   now?: number;
   r?: number;
   holidays?: string[];
+  mcxHolidays?: string[];
   /** Directory for the EOD store (default: a fresh temp dir, removed by dispose()). */
   dataDir?: string;
 }
@@ -475,6 +552,8 @@ export interface FakeProviderOptions {
 export class FakeProvider implements MarketDataProvider {
   readonly ref = new FakeReference();
   readonly calendar: ExchangeCalendar;
+  /** MCX sessions (09:00–23:30/23:55) for commodities. */
+  readonly mcxCalendar: ExchangeCalendar;
   readonly clock: LiveClock;
   readonly live: FakeLiveMarket;
   readonly intraday = new MemoryIntraday();
@@ -487,13 +566,42 @@ export class FakeProvider implements MarketDataProvider {
   constructor(opts: FakeProviderOptions = {}) {
     this.t = opts.now ?? Date.parse('2026-10-12T05:30:00Z');
     this.calendar = new ExchangeCalendar(opts.holidays ?? []);
-    this.clock = new LiveClock(this.calendar, () => this.t);
-    this.live = new FakeLiveMarket(this.ref, () => this.t, this.calendar);
+    this.mcxCalendar = new ExchangeCalendar(opts.mcxHolidays ?? [], 'MCX');
+    this.clock = new LiveClock(this.calendar, () => this.t, { calendar: this.mcxCalendar, hasMcx: () => this.ref.ready() && this.ref.underlyings().some((u) => u.exchange === 'MCX') });
+    this.live = new FakeLiveMarket(this.ref, () => this.t, this.calendar, (s) => this.calendarOf(s));
+    this.intraday.ref = this.ref;
     this.ownsDir = !opts.dataDir;
     this.dir = opts.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'q26-fake-provider-'));
     const r = opts.r ?? 0.065;
     this.history = new HistoryFiles({ dataDir: this.dir, r });
-    this.pricing = new LivePricing({ r, ref: this.ref, calendar: this.calendar, getQuote: (k) => this.live.quote(k), now: () => this.t });
+    // As LiveProvider: reads of MCX commodities come from their recorded minutes (RecordedDailyHistory).
+    const files = this.history;
+    const base: HistoryStore = {
+      dailyBars: files.dailyBars.bind(files),
+      dailyFutures: files.dailyFutures.bind(files),
+      dailyOptions: files.dailyOptions.bind(files),
+      dailyAtmIv: files.dailyAtmIv.bind(files),
+      fiiDii: files.fiiDii.bind(files),
+      participantOi: files.participantOi.bind(files),
+      settlement: files.settlement.bind(files),
+      loadedDates: files.loadedDates.bind(files),
+    };
+    const rec = new RecordedDailyHistory({ base, intraday: this.intraday, isRecorded: (s) => this.calendarOf(s) === this.mcxCalendar, calendar: this.mcxCalendar, r, today: () => this.calendar.session(this.t).date });
+    files.dailyBars = rec.dailyBars.bind(rec);
+    files.dailyFutures = rec.dailyFutures.bind(rec);
+    files.dailyOptions = rec.dailyOptions.bind(rec);
+    files.dailyAtmIv = rec.dailyAtmIv.bind(rec);
+    files.settlement = rec.settlement.bind(rec);
+    this.pricing = new LivePricing({ r, ref: this.ref, calendar: this.calendar, calendarOf: (s) => this.calendarOf(s), getQuote: (k) => this.live.quote(k), now: () => this.t });
+  }
+
+  /** As LiveProvider.calendarOf: MCX for commodities. */
+  calendarOf(symbol: string): ExchangeCalendar {
+    try {
+      return this.ref.underlying(symbol).exchange === 'MCX' ? this.mcxCalendar : this.calendar;
+    } catch {
+      return this.calendar;
+    }
   }
 
   now(): number {
@@ -516,14 +624,19 @@ export class FakeProvider implements MarketDataProvider {
   async candles(key: InstrumentKey, interval: CandleInterval, from: string, to: string): Promise<Candle[]> {
     const badRequest = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
     if (!isIsoDate(from) || !isIsoDate(to) || from > to) throw badRequest(`Invalid date range ${from}..${to}`);
-    const k = canon(key);
-    if (k.kind !== 'SPOT' && !k.expiry) throw badRequest(`${k.symbol} ${k.kind} needs an expiry`);
-    if (interval === 'D') return officialDailyCandles(this.history, this.calendar, k, from, to);
+    const asked = canon(key);
+    if (asked.kind !== 'SPOT' && !asked.expiry) throw badRequest(`${asked.symbol} ${asked.kind} needs an expiry`);
+    const k = this.ref.ready() ? canon(this.ref.quoteKey(asked)) : asked;
+    const cal = this.calendarOf(k.symbol);
+    if (interval === 'D') {
+      if (cal.exchange === 'MCX') throw new NoLiveData(`No official end-of-day history for MCX ${k.symbol}`);
+      return officialDailyCandles(this.history, this.calendar, k, from, to);
+    }
     if (!INTERVAL_MINUTES[interval]) throw badRequest(`Unsupported interval ${String(interval)}`);
-    const dates = this.calendar.sessions(from, to);
+    const dates = cal.sessions(from, to);
     const { minutes } = recordedMinutes(this.intraday, k, dates, this.calendar.session(this.t).date);
     if (!minutes.length) throw new NoLiveData(`No ${interval} candles of ${keyId(k)} for ${from}..${to}: not recorded`);
-    return resampleMinutes(minutes, INTERVAL_MINUTES[interval], this.calendar);
+    return resampleMinutes(minutes, INTERVAL_MINUTES[interval], cal);
   }
 
   private userFn: (() => Iterable<UserContract>) | null = null;

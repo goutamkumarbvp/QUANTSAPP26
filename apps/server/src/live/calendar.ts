@@ -1,8 +1,10 @@
 /**
  * Real exchange calendar (DESIGN.md §2): weekends plus the published holiday list. Holidays come from
- * the caller (NSE holiday master / HOLIDAYS env, nse/holidays.ts) and can be replaced at runtime.
- * Kotak has no holiday API (critic R11). Times are IST; NSE/BSE equity derivatives: pre-open
- * 09:00–09:15, continuous session 09:15–15:30.
+ * the caller (NSE holiday master / HOLIDAYS env, nse/holidays.ts; MCX_HOLIDAYS env for MCX) and can be
+ * replaced at runtime. Kotak has no holiday API (critic R11). Times are IST:
+ *  - NSE/BSE equity derivatives: pre-open 09:00–09:15, continuous session 09:15–15:30;
+ *  - MCX commodities: pre-open 08:45–09:00, continuous session 09:00–23:30 (23:55 while the US is on
+ *    standard time, core mcxCloseMin).
  *
  * Not modelled: special sessions on weekends/holidays (Muhurat trading, DR drills); they run
  * outside the normal hours and are announced by circular.
@@ -10,29 +12,30 @@
 import {
   DAY_MS,
   IST_OFFSET_MS,
-  MARKET_CLOSE_MIN,
-  MARKET_OPEN_MIN,
-  SESSION_MINUTES,
   isTradingDay,
+  istTs,
+  sessionHoursOf,
+  type ExchangeCode,
   nextTradingDay,
   numToDate,
   onOrAfterTradingDay,
   onOrBeforeTradingDay,
   prevTradingDay,
-  sessionTs,
   addDays,
 } from '@q26/core';
 import type { TradingCalendar } from './types';
 
 /** 09:00 IST, start of the equity pre-open session. */
 export const PRE_OPEN_MIN = 9 * 60;
+/** Pre-open length before the continuous session (NSE/BSE 09:00–09:15, MCX 08:45–09:00). */
+const PRE_OPEN_LEN = 15;
 
 export type SessionStatus = 'pre-open' | 'open' | 'closed';
 
 export interface SessionPosition {
   /** IST calendar date of the timestamp. */
   date: string;
-  /** Minutes since 09:15 IST (fractional), clamped to 0..375. */
+  /** Minutes since the exchange's open (fractional), clamped to 0..session length (NSE/BSE 375). */
   minute: number;
   status: SessionStatus;
 }
@@ -54,8 +57,22 @@ function assertDate(s: string, what: string): void {
 export class ExchangeCalendar implements TradingCalendar {
   private hol: Set<string> = new Set();
 
-  constructor(holidays: Iterable<string> = []) {
+  constructor(
+    holidays: Iterable<string> = [],
+    readonly exchange: ExchangeCode = 'NSE',
+  ) {
     this.setHolidays(holidays);
+  }
+
+  sessionMinutes(date: string): number {
+    const h = sessionHoursOf(this.exchange, date);
+    return h.close - h.open;
+  }
+
+  /** NaN for a malformed date (every comparison with it is false, as core expiryTs), so callers validate it themselves. */
+  expiryTs(expiry: string): number {
+    if (!isIsoDate(expiry)) return Number.NaN;
+    return istTs(expiry, sessionHoursOf(this.exchange, expiry).close);
   }
 
   /** Replace the holiday set (e.g. after the yearly NSE list or an ad-hoc circular). */
@@ -117,18 +134,19 @@ export class ExchangeCalendar implements TradingCalendar {
     const dayNum = Math.floor(shifted / DAY_MS);
     const minuteOfDay = (shifted - dayNum * DAY_MS) / 60_000;
     const date = numToDate(dayNum);
-    const minute = Math.min(SESSION_MINUTES, Math.max(0, minuteOfDay - MARKET_OPEN_MIN));
+    const { open, close } = sessionHoursOf(this.exchange, date);
+    const minute = Math.min(close - open, Math.max(0, minuteOfDay - open));
     let status: SessionStatus = 'closed';
     if (isTradingDay(date, this.hol)) {
-      if (minuteOfDay >= MARKET_OPEN_MIN && minuteOfDay < MARKET_CLOSE_MIN) status = 'open';
-      else if (minuteOfDay >= PRE_OPEN_MIN && minuteOfDay < MARKET_OPEN_MIN) status = 'pre-open';
+      if (minuteOfDay >= open && minuteOfDay < close) status = 'open';
+      else if (minuteOfDay >= open - PRE_OPEN_LEN && minuteOfDay < open) status = 'pre-open';
     }
     return { date, minute, status };
   }
 
-  /** Epoch ms of `minute` (may be fractional) minutes after 09:15 IST on `date`. */
+  /** Epoch ms of `minute` (may be fractional) minutes after the exchange's open on `date`. */
   ts(date: string, minute: number): number {
     assertDate(date, 'ts');
-    return sessionTs(date, minute);
+    return istTs(date, sessionHoursOf(this.exchange, date).open + minute);
   }
 }

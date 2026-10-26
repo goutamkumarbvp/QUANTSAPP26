@@ -13,7 +13,7 @@
  * is null); it is never evaluated against a stand-in value.
  */
 import { randomUUID } from 'node:crypto';
-import { describeOrb, expiryTs, formatExpiry, formatIndian, formatTimeIST, type AlertDef, type Notification, type OptionChain, type OrbEvaluation, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
+import { describeOrb, formatExpiry, formatIndian, formatTimeIST, type AlertDef, type Notification, type OptionChain, type OrbEvaluation, type WatchItem, type Watchlist, type WatchQuote } from '@q26/core';
 import { NoLiveData } from '../live/types';
 import type { MarketDataProvider } from '../live/types';
 import type { Db } from '../store/db';
@@ -222,7 +222,7 @@ export class AlertService {
       case 'OI_CHANGE': {
         const spec: InstrumentSpec = { symbol: a.symbol, type: a.optionType!, strike: a.strike, expiry: a.expiry };
         const label = instrumentLabel(spec);
-        if (!a.expiry || expiryTs(a.expiry) < ts) return { disable: `${label} has expired` };
+        if (!a.expiry || this.md.calendarOf(a.symbol).expiryTs(a.expiry) < ts) return { disable: `${label} has expired` };
         const px = this.pricer.price(spec, ts);
         if (a.kind === 'OPTION_PRICE') return px.ltp !== null ? { value: px.ltp } : { skip: px.reason ?? `${label} has not traded in the live session` };
         if (px.oiChangePct !== null) return { value: px.oiChangePct };

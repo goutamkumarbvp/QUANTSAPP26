@@ -16,10 +16,12 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { ExchangeCode, UnderlyingKind } from '@q26/core';
 import { NoLiveData, type InstrumentKey, type Listing, type OptKind, type ReferenceData, type Segment, type Underlying } from '../types';
+import { MCX_CONTRACTS, parseMcxMaster } from './mcx';
 import type { FetchLike, KotakLogger } from './session';
 
-export const SCRIP_SEGMENTS: readonly Segment[] = ['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo'];
+export const SCRIP_SEGMENTS: readonly Segment[] = ['nse_cm', 'bse_cm', 'nse_fo', 'bse_fo', 'mcx_fo'];
 
 /** Added to nse_fo/cde_fo lExpiryDate to get Unix seconds (official instruments.md §6). */
 export const NSE_EPOCH_OFFSET_S = 315_511_200;
@@ -155,10 +157,10 @@ interface Legs {
 interface UState {
   symbol: string;
   name: string;
-  kind: 'index' | 'stock';
-  exchange: 'NSE' | 'BSE';
+  kind: UnderlyingKind;
+  exchange: ExchangeCode;
   sector: string;
-  foSegment: 'nse_fo' | 'bse_fo';
+  foSegment: 'nse_fo' | 'bse_fo' | 'mcx_fo';
   foName?: string;
   spot?: Listing;
   hasOptStk: boolean;
@@ -400,6 +402,20 @@ export class ScripMaster implements ReferenceData {
     return st.opts.get(key.expiry)?.get(roundStrike(key.strike))?.[key.kind];
   }
 
+  underlyingFuture(symbol: string, optionExpiry: string): string | undefined {
+    const { u, st } = this.entry(symbol);
+    if (u.kind !== 'commodity') return st.futs.has(optionExpiry) ? optionExpiry : undefined;
+    const exps = [...st.futs.keys()].sort();
+    return exps.find((x) => x >= optionExpiry) ?? exps[exps.length - 1];
+  }
+
+  quoteKey(key: InstrumentKey): InstrumentKey {
+    if (key.kind !== 'SPOT' || !this.state) return key;
+    const e = this.state.bySymbol.get(key.symbol.trim().toUpperCase());
+    if (!e || e.u.kind !== 'commodity') return key;
+    return { symbol: e.u.symbol, kind: 'FUT', expiry: e.u.spot.expiry };
+  }
+
   byToken(segment: Segment, token: string): Listing | undefined {
     return this.state?.byToken.get(`${segment}|${token}`);
   }
@@ -417,7 +433,7 @@ export class ScripMaster implements ReferenceData {
   }
 
   /** `exchange`/`underlying` parameters for the option-chain and expiries APIs. */
-  kotakUnderlying(symbol: string): { exchange: 'nse_fo' | 'bse_fo'; underlying: string } {
+  kotakUnderlying(symbol: string): { exchange: 'nse_fo' | 'bse_fo' | 'mcx_fo'; underlying: string } {
     const { st } = this.entry(symbol);
     return { exchange: st.foSegment, underlying: st.foName ?? st.symbol };
   }
@@ -459,28 +475,42 @@ export class ScripMaster implements ReferenceData {
     const dir = path.join(this.opts.dataDir, 'refdata', date);
     const manifest = await readManifest(dir);
 
-    // 1. Today's cache, built from today's Kotak folder: no network at all.
+    // 1. Today's cache, built from today's Kotak folder: no network at all. A cache without an
+    //    optional file (one written before MCX was loaded, or when Kotak lacked that file) is used
+    //    only when the files cannot be fetched again now.
+    let partial: { manifest: Manifest } | null = null;
     if (manifest && manifest.date === date && (manifest.sourceDate === null || manifest.sourceDate >= date)) {
-      if (await this.tryCache(dir, date, manifest)) return;
+      const complete = await cacheComplete(dir);
+      if (complete && (await this.tryCache(dir, date, manifest))) return;
+      if (!complete) partial = { manifest };
     }
 
     // 2. Ask Kotak which files are current.
-    const urls = await this.opts.filePaths();
+    let urls: string[];
+    try {
+      urls = await this.opts.filePaths();
+    } catch (e) {
+      if (partial && (await this.tryCache(dir, date, partial.manifest))) return;
+      throw e;
+    }
     const picked: Partial<Record<Segment, string>> = {};
     for (const seg of SCRIP_SEGMENTS) picked[seg] = pickScripFile(urls, seg);
     const missing = REQUIRED_SEGMENTS.filter((s) => !picked[s]);
-    if (missing.length) throw new NoLiveData(`Kotak scrip-master file-paths lists no ${missing.join(', ')} file`);
+    if (missing.length) {
+      if (partial && (await this.tryCache(dir, date, partial.manifest))) return;
+      throw new NoLiveData(`Kotak scrip-master file-paths lists no ${missing.join(', ')} file`);
+    }
     const sourceDate = folderDate(picked.nse_fo);
 
     // 3. The cache already holds that folder's files (Kotak has not published a newer one yet).
-    if (manifest && manifest.date === date && sourceDate !== null && manifest.sourceDate === sourceDate) {
+    if (manifest && manifest.date === date && sourceDate !== null && manifest.sourceDate === sourceDate && !partial) {
       if (await this.tryCache(dir, date, manifest)) return;
     }
 
     // 4. Download, validate, then cache (only a complete set, so a restart retries what failed).
     const texts: Partial<Texts> = {};
     const notes: string[] = [];
-    await Promise.all(
+    const downloads = Promise.all(
       SCRIP_SEGMENTS.map(async (seg) => {
         const url = picked[seg];
         try {
@@ -492,6 +522,13 @@ export class ScripMaster implements ReferenceData {
         }
       }),
     );
+    try {
+      await downloads;
+    } catch (e) {
+      // A required file failed: keep today's partial cache rather than nothing.
+      if (partial && (await this.tryCache(dir, date, partial.manifest))) return;
+      throw e;
+    }
     this.state = this.build(texts, date, sourceDate, 'download', notes);
     if (SCRIP_SEGMENTS.every((s) => texts[s] !== undefined)) {
       try {
@@ -507,8 +544,9 @@ export class ScripMaster implements ReferenceData {
   private async tryCache(dir: string, date: string, manifest: Manifest): Promise<boolean> {
     const texts = await readCache(dir);
     if (!texts) return false;
+    const notes = SCRIP_SEGMENTS.filter((seg) => texts[seg] === undefined).map((seg) => `cached instrument master has no ${seg} file; ${OPTIONAL_SEGMENT_IMPACT[seg]}`);
     try {
-      this.state = this.build(texts, date, manifest.sourceDate, 'cache', []);
+      this.state = this.build(texts, date, manifest.sourceDate, 'cache', notes);
       this.logLoaded();
       return true;
     } catch (e) {
@@ -720,6 +758,78 @@ export class ScripMaster implements ReferenceData {
     return out;
   }
 
+  /**
+   * MCX commodities from the mcx_fo file (kotak/mcx.ts parseMcxMaster: strike scale and expiry epoch
+   * checked, units per lot checked against MCX's contract specifications) as ordinary underlyings:
+   * kind 'commodity', exchange 'MCX', the near-month future as the "spot" (MCX has no cash market). A
+   * file that cannot be trusted leaves MCX out with the reason; NSE/BSE are unaffected.
+   */
+  private addCommodities(
+    text: string | undefined,
+    date: string,
+    list: Underlying[],
+    bySymbol: Map<string, { u: Underlying; st: UState }>,
+    byToken: Map<string, Listing>,
+    warnings: string[],
+    count: (n: number) => void,
+  ): void {
+    if (text === undefined) return;
+    let master: ReturnType<typeof parseMcxMaster>;
+    try {
+      master = parseMcxMaster(text, date);
+    } catch (e) {
+      warnings.push(`${e instanceof Error ? e.message : String(e)}; ${OPTIONAL_SEGMENT_IMPACT.mcx_fo}`);
+      return;
+    }
+    warnings.push(...master.warnings);
+    for (const cm of [...master.commodities.values()].sort((a, b) => a.symbol.localeCompare(b.symbol))) {
+      if (bySymbol.has(cm.symbol)) {
+        warnings.push(`MCX ${cm.symbol}: the name is already an NSE/BSE underlying; MCX contract skipped`);
+        continue;
+      }
+      const spec = MCX_CONTRACTS[cm.symbol];
+      const st = newState(cm.symbol, spec?.name ?? cm.symbol, 'commodity', 'MCX', spec?.sector ?? 'Commodities', 'mcx_fo');
+      st.foName = cm.symbol;
+      const base = (c: { token: string; tradingSymbol: string }) => ({ symbol: cm.symbol, exchange: 'MCX' as const, segment: 'mcx_fo' as const, token: c.token, tradingSymbol: c.tradingSymbol, lotSize: cm.lotSize });
+      let n = 0;
+      for (const [expiry, c] of cm.futures) {
+        const l: Listing = { ...base(c), kind: 'FUT', expiry };
+        st.futs.set(expiry, l);
+        byToken.set(`mcx_fo|${c.token}`, l);
+        n++;
+      }
+      for (const [expiry, byStrike] of cm.options) {
+        const m = new Map<number, Legs>();
+        for (const [strike, legs] of byStrike) {
+          const out: Legs = {};
+          for (const kind of ['CE', 'PE'] as const) {
+            const c = legs[kind];
+            if (!c) continue;
+            const l: Listing = { ...base(c), kind, expiry, strike };
+            out[kind] = l;
+            byToken.set(`mcx_fo|${c.token}`, l);
+            n++;
+          }
+          m.set(strike, out);
+        }
+        st.opts.set(expiry, m);
+      }
+      const strikeStep = strikeStepOf(...[...st.opts.values()].map((byStrike) => [...byStrike.keys()]));
+      const nearFut = [...st.futs.keys()].sort()[0];
+      if (strikeStep === undefined || !nearFut) {
+        warnings.push(`MCX ${cm.symbol}: fewer than two strikes in any live expiry or no future; skipped`);
+        continue;
+      }
+      // The "spot" is the near-month future (same token): quotes of it stand for the commodity price.
+      const fut = st.futs.get(nearFut)!;
+      st.spot = { ...fut, kind: 'SPOT', expiry: nearFut };
+      const u: Underlying = { symbol: cm.symbol, name: st.name, kind: 'commodity', exchange: 'MCX', sector: st.sector, lotSize: cm.lotSize, strikeStep, spot: st.spot };
+      list.push(u);
+      bySymbol.set(cm.symbol, { u, st });
+      count(n);
+    }
+  }
+
   private build(texts: Partial<Texts>, date: string, sourceDate: string | null, source: 'cache' | 'download', notes: string[]): LoadedState {
     const warnings = [...notes];
     const t = this.targets();
@@ -730,7 +840,7 @@ export class ScripMaster implements ReferenceData {
 
     for (const seg of SCRIP_SEGMENTS) {
       const text = texts[seg];
-      if (text === undefined) continue; // optional file unavailable (already noted)
+      if (text === undefined || seg === 'mcx_fo') continue; // optional file unavailable (already noted); MCX below
       let res: FileParse;
       try {
         res = this.parseFile(seg, text, date, t);
@@ -802,11 +912,13 @@ export class ScripMaster implements ReferenceData {
       list.push(u);
       bySymbol.set(st.symbol, { u, st });
     }
+    this.addCommodities(texts.mcx_fo, date, list, bySymbol, byToken, warnings, (n) => (listings += n));
     if (skippedStocks.length) warnings.push(`${skippedStocks.length} configured stocks have no OPTSTK rows in nse_fo; not offered: ${skippedStocks.slice(0, 10).join(', ')}${skippedStocks.length > 10 ? ', …' : ''}`);
     if (!list.length) throw new FileRejected('Instrument master has no usable underlyings');
 
     // Spot listings by name, plus numeric index tokens where a cm file has them (feed decoding).
-    for (const { u } of bySymbol.values()) byToken.set(`${u.spot.segment}|${u.spot.token}`, u.spot);
+    // A commodity's spot shares its near-month future's token: the token stays that future's.
+    for (const { u } of bySymbol.values()) if (u.kind !== 'commodity') byToken.set(`${u.spot.segment}|${u.spot.token}`, u.spot);
     for (const l of spots.values()) byToken.set(`${l.segment}|${l.token}`, l);
     for (const [k, sym] of indexTokens) {
       const l = bySymbol.get(sym)?.u.spot ?? spots.get(sym);
@@ -816,13 +928,14 @@ export class ScripMaster implements ReferenceData {
   }
 }
 
-/** NSE files are required; the BSE ones only feed SENSEX/BANKEX. */
+/** NSE files are required; the BSE ones only feed SENSEX/BANKEX, the MCX one the commodities. */
 const REQUIRED_SEGMENTS: readonly Segment[] = ['nse_cm', 'nse_fo'];
 const OPTIONAL_SEGMENT_IMPACT: Record<Segment, string> = {
   nse_cm: '',
   nse_fo: '',
   bse_cm: 'BSE numeric index tokens unavailable',
   bse_fo: 'SENSEX/BANKEX F&O unavailable',
+  mcx_fo: 'MCX commodities (GOLD, SILVER, CRUDEOIL, NATURALGAS …) unavailable',
 };
 
 interface Targets {
@@ -849,7 +962,7 @@ interface FileParse {
  */
 const INDEX_SPOT_META = { lotSize: 1 } as const;
 
-function newState(symbol: string, name: string, kind: 'index' | 'stock', exchange: 'NSE' | 'BSE', sector: string, foSegment: 'nse_fo' | 'bse_fo'): UState {
+function newState(symbol: string, name: string, kind: UnderlyingKind, exchange: ExchangeCode, sector: string, foSegment: UState['foSegment']): UState {
   return { symbol, name, kind, exchange, sector, foSegment, hasOptStk: false, futs: new Map(), opts: new Map() };
 }
 
@@ -870,14 +983,27 @@ async function readManifest(dir: string): Promise<Manifest | null> {
   }
 }
 
-async function readCache(dir: string): Promise<Texts | null> {
+/** Every segment file is cached. */
+async function cacheComplete(dir: string): Promise<boolean> {
   try {
-    const texts = {} as Texts;
-    for (const seg of SCRIP_SEGMENTS) texts[seg] = await fs.readFile(path.join(dir, `${seg}.csv`), 'utf8');
-    return texts;
+    for (const seg of SCRIP_SEGMENTS) await fs.access(path.join(dir, `${seg}.csv`));
+    return true;
   } catch {
-    return null;
+    return false;
   }
+}
+
+/** The cached files: the required ones must be there; an optional one missing is left out (its underlyings with it). */
+async function readCache(dir: string): Promise<Partial<Texts> | null> {
+  const texts: Partial<Texts> = {};
+  for (const seg of SCRIP_SEGMENTS) {
+    try {
+      texts[seg] = await fs.readFile(path.join(dir, `${seg}.csv`), 'utf8');
+    } catch {
+      if (REQUIRED_SEGMENTS.includes(seg)) return null;
+    }
+  }
+  return texts;
 }
 
 /** Files first (atomic rename), manifest last: a manifest implies a complete set. */

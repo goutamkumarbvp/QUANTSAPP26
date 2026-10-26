@@ -102,6 +102,7 @@ logged in, and serves only official EOD files and already-recorded history):
 | `PORT` / `HOST` | `8787` / `0.0.0.0` | API listen address |
 | `RISK_FREE_RATE` | `0.065` | Used for IV, Greeks and margin estimates |
 | `HOLIDAYS` | — | Comma-separated `YYYY-MM-DD` exchange holidays, merged with NSE's holiday master |
+| `MCX_HOLIDAYS` | — | Comma-separated `YYYY-MM-DD` full-day MCX closures (MCX has no holiday API and trades on most NSE holidays) |
 | `AUTH_SECRET` | random per boot | HMAC secret for app session tokens — **set a long random value (≥ 16 characters) in production** so sessions survive restarts; a placeholder such as `change-me` or a shorter value is ignored with a warning |
 | `DATA_DIR` | `apps/server/data` | User data (`db.json`), recorded sessions and EOD files |
 | `PERSIST` | `true` | `false` keeps user data in memory only |
@@ -156,7 +157,8 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
 
 | Area | Tabs |
 |---|---|
-| Market | Home dashboard, Watchlist, Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), MCX Option Chain, F&O Market (heat-map · futures build-up · sector breadth) |
+| **MCX commodities** | GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER … are ordinary symbols of **every** tab (symbol picker group *Commodities (MCX)*, ticker, Home card), exactly like NIFTY/SENSEX: option chain, OI, PCR, max pain, IV/skew/surface, order flow & book, opening range, strategy builder, paper trading. MCX runs on its own calendar (09:00–23:30, 23:55 in US winter), its "spot" is the near-month future, and its options are valued with Black-76 on the future they settle into. Previous-session values come from MCX sessions this app recorded from live ticks (no official MCX files are loaded). Units per lot are checked against MCX contract specifications. |
+| Market | Home dashboard, Watchlist, Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), F&O Market (heat-map · futures build-up · sector breadth) |
 | Order flow & trend | Order Flow & Book (Order & Trade chart: the security's price, buyer vs seller initiated quantity per minute on one scale, cumulative delta; session split; 5-level depth; minute table; past sessions), Opening range breakout |
 | Open interest | OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |

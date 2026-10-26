@@ -1,11 +1,9 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { bsPrice, YEAR_MS } from '@q26/core';
-import { McxService, mcxMarket, parseMcxMaster } from '../../src/live/kotak/mcx';
-import type { KotakQuote, KotakRest, QuotesResult } from '../../src/live/kotak/rest';
-import { NoLiveData } from '../../src/live/types';
+import { describe, expect, it } from 'vitest';
+import { bsPrice, mcxCloseMin, YEAR_MS } from '@q26/core';
+import { ExchangeCalendar } from '../../src/live/calendar';
+import { MCX_CONTRACTS, parseMcxMaster, underlyingFuture } from '../../src/live/kotak/mcx';
+import { buildOptionChain, underlyingQuote } from '../../src/services/live';
+import { FakeProvider } from '../support/fake-provider';
 
 // Synthetic test data in the layout of Kotak's mcx_fo instrument file (not real contracts or prices).
 const HEADER = 'pSymbol,pGroup,pExchSeg,pInstType,pSymbolName,pTrdSymbol,pOptionType,pScripRefKey,lExpiryDate ,dStrikePrice;,lLotSize,dTickSize ,pSegment';
@@ -50,135 +48,98 @@ describe('MCX instrument master', () => {
   });
 });
 
-describe('MCX market hours', () => {
-  it('weekdays 09:00 to 23:30 (23:55 Nov–Mar) IST', () => {
-    expect(mcxMarket(Date.parse('2026-10-26T20:00:00+05:30')).open).toBe(true);
-    expect(mcxMarket(Date.parse('2026-10-26T23:40:00+05:30')).open).toBe(false);
-    expect(mcxMarket(Date.parse('2026-11-23T23:40:00+05:30')).open).toBe(true);
-    expect(mcxMarket(Date.parse('2026-10-25T12:00:00+05:30')).open).toBe(false); // Sunday
+describe('MCX contract units', () => {
+  it('units per lot follow MCX specifications when the file agrees in any reading, else the specification with a warning', () => {
+    // CRUDEOIL: the file says lot 100 (agrees).
+    expect(parseMcxMaster(master(), TODAY).commodities.get('CRUDEOIL')!.lotSize).toBe(100);
+    // A file giving lot 1 (one lot) for CRUDEOIL: MCX's 100 barrels per lot is used, with a warning.
+    const one = parseMcxMaster(master().replace(/,100,100,FO/g, ',1,100,FO'), TODAY);
+    expect(one.commodities.get('CRUDEOIL')!.lotSize).toBe(100);
+    expect(one.warnings.join(' ')).toMatch(/MCX specifies 100 barrel per lot/);
+    // Every contract of the commodity carries the checked units per lot.
+    const cm = one.commodities.get('CRUDEOIL')!;
+    expect(cm.futures.get(FUT_EXP)!.lotSize).toBe(100);
+    expect(cm.options.get(OPT_EXP)!.get(5500)!.PE!.lotSize).toBe(100);
+    expect(MCX_CONTRACTS.GOLD.unitsPerLot).toBe(100); // 1 kg quoted per 10 g
+  });
+
+  it('an option expiry settles into the nearest future expiring on or after it', () => {
+    const cm = parseMcxMaster(master(), TODAY).commodities.get('CRUDEOIL')!;
+    expect(underlyingFuture(cm, OPT_EXP).expiry).toBe(FUT_EXP);
   });
 });
 
-const R = 0.065;
-const T = (Date.parse(`${OPT_EXP}T23:30:00+05:30`) - NOW) / YEAR_MS;
+describe('MCX sessions', () => {
+  const cal = new ExchangeCalendar([], 'MCX');
+  const at = (d: string, hm: string) => Date.parse(`${d}T${hm}:00+05:30`);
+  it('09:00 to 23:30 while the US is on daylight time, 23:55 on US standard time', () => {
+    expect(mcxCloseMin('2026-10-26')).toBe(23 * 60 + 30);
+    expect(mcxCloseMin('2026-11-02')).toBe(23 * 60 + 55); // after the US switch (1 Nov 2026)
+    expect(mcxCloseMin('2026-03-02')).toBe(23 * 60 + 55);
+    expect(mcxCloseMin('2026-03-09')).toBe(23 * 60 + 30); // after 8 Mar 2026
+    expect(cal.session(at('2026-10-26', '20:00')).status).toBe('open');
+    expect(cal.session(at('2026-10-26', '08:50')).status).toBe('pre-open');
+    expect(cal.session(at('2026-10-26', '23:40')).status).toBe('closed');
+    expect(cal.session(at('2026-11-23', '23:40')).status).toBe('open');
+    expect(cal.session(at('2026-10-25', '12:00')).status).toBe('closed'); // Sunday
+    expect(cal.sessionMinutes('2026-10-26')).toBe(870);
+    expect(cal.ts('2026-10-26', 0)).toBe(at('2026-10-26', '09:00'));
+    expect(cal.expiryTs('2026-11-16')).toBe(at('2026-11-16', '23:55'));
+  });
+});
 
-function fakeRest(prices: { fut?: number; vol?: number; oi?: (k: number, kind: 'CE' | 'PE') => number; fail?: boolean } = {}) {
-  const calls: string[][] = [];
-  const m = parseMcxMaster(master(), TODAY);
-  const legs = new Map<string, { k: number; kind: 'CE' | 'PE' }>();
-  for (const [k, l] of m.commodities.get('CRUDEOIL')!.options.get(OPT_EXP)!) {
-    legs.set(l.CE!.token, { k, kind: 'CE' });
-    legs.set(l.PE!.token, { k, kind: 'PE' });
+describe('MCX commodity as an ordinary underlying', () => {
+  const R = 0.065;
+  function provider() {
+    const p = new FakeProvider({ now: Date.parse('2026-10-26T20:00:00+05:30'), r: R }); // Monday 20:00: NSE closed, MCX open
+    p.ref.setUnderlying({ symbol: 'CRUDEOIL', kind: 'commodity', lotSize: 100, strikeStep: 50, name: 'Crude Oil', sector: 'Energy' });
+    p.ref.setFutures('CRUDEOIL', ['2026-11-19', '2026-12-18']);
+    p.ref.setStrikes('CRUDEOIL', OPT_EXP, [5300, 5400, 5500, 5600, 5700]);
+    return p;
   }
-  const rest = {
-    quotes: async (syms: string[]): Promise<QuotesResult> => {
-      calls.push(syms);
-      const quotes = new Map<string, KotakQuote>();
-      if (prices.fail && syms.length > 1) return { quotes, errors: [{ neosymbols: syms, error: 'HTTP 500' }] };
-      for (const s of syms) {
-        const token = s.split('|')[1];
-        const base = { neosymbol: s, segment: 'mcx_fo', token, ts: NOW - 1000 };
-        if (token === '1') {
-          if (prices.fut !== undefined) quotes.set(s, { ...base, ltp: prices.fut, changePct: 1.2 });
-          continue;
-        }
-        const l = legs.get(token)!;
-        const ltp = Math.round(bsPrice(l.kind, prices.fut!, l.k, T, R, prices.vol ?? 0.4, R) * 100) / 100;
-        quotes.set(s, { ...base, ltp, oi: prices.oi?.(l.k, l.kind) ?? 1000, volume: 50, depth: { bids: [{ price: ltp - 0.5, qty: 1, orders: 1 }], asks: [{ price: ltp + 0.5, qty: 1, orders: 1 }] } });
+
+  it('the price is the near-month future; the chain is valued at MCX hours on the future it settles into (Black-76)', async () => {
+    const p = provider();
+    const now = p.now();
+    const F = 5480;
+    p.setQuote({ symbol: 'CRUDEOIL', kind: 'FUT', expiry: '2026-11-19' }, { ltp: F, prevClose: 5420, volume: 1000, oi: 9000, ts: now - 1000 });
+    const T = (Date.parse(`${OPT_EXP}T23:30:00+05:30`) - now) / YEAR_MS; // 16 Nov 2026 is US standard time: 23:55
+    const T2 = (Date.parse(`${OPT_EXP}T23:55:00+05:30`) - now) / YEAR_MS;
+    expect(T2).toBeGreaterThan(T);
+    for (const k of [5300, 5400, 5500, 5600, 5700]) {
+      for (const kind of ['CE', 'PE'] as const) {
+        const prem = Math.round(bsPrice(kind, F, k, T2, R, 0.4, R) * 100) / 100;
+        p.setQuote({ symbol: 'CRUDEOIL', kind, expiry: OPT_EXP, strike: k }, { ltp: prem, volume: 10, oi: 1000 + k, bid: prem - 0.5, ask: prem + 0.5, ts: now - 1000 });
       }
-      return { quotes, errors: [] };
-    },
-  } as unknown as KotakRest;
-  return { rest, calls };
-}
-
-let dir = '';
-afterEach(() => {
-  if (dir) fs.rmSync(dir, { recursive: true, force: true });
-  dir = '';
-});
-
-function service(rest: KotakRest | null, over: Partial<ConstructorParameters<typeof McxService>[0]> = {}) {
-  let downloads = 0;
-  const svc = new McxService({
-    dataDir: null,
-    rest,
-    now: () => NOW,
-    r: R,
-    filePaths: async () => ['https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/2026-10-26/transformed/mcx_fo.csv'],
-    fetch: async () => {
-      downloads++;
-      return new Response(master());
-    },
-    ...over,
-  });
-  return { svc, downloads: () => downloads };
-}
-
-describe('MCX option chain', () => {
-  it('prices the options on the future they settle into (Black-76 IV recovered), with ATM, PCR and max pain', async () => {
-    const { rest, calls } = fakeRest({ fut: 5480, vol: 0.4, oi: (k, kind) => (kind === 'CE' ? (k >= 5600 ? 5000 : 1000) : k <= 5400 ? 4000 : 1000) });
-    const { svc } = service(rest);
-    const c = await svc.chain('crudeoil');
-    expect(c).toMatchObject({ symbol: 'CRUDEOIL', expiry: OPT_EXP, expiries: [OPT_EXP], lotSize: 100, atmStrike: 5500, masterDate: TODAY, market: { open: true } });
-    expect(c.future).toMatchObject({ expiry: FUT_EXP, tradingSymbol: 'CRUDEOIL26NOVFUT', ltp: 5480, changePct: 1.2 });
-    expect(c.rows.map((r) => r.strike)).toEqual([5300, 5400, 5500, 5600, 5700]);
-    const atm = c.rows.find((r) => r.strike === 5500)!;
-    expect(atm.ce!.iv!).toBeCloseTo(0.4, 2);
-    expect(atm.pe!.iv!).toBeCloseTo(0.4, 2);
-    expect(atm.ce!.delta!).toBeGreaterThan(0.3);
-    expect(atm.pe!.delta!).toBeLessThan(0);
-    expect(atm.ce!.bid).toBe(atm.ce!.ltp! - 0.5);
-    expect(c.totals).toEqual({ ceOi: 13_000, peOi: 11_000, pcr: 11_000 / 13_000 });
-    expect(c.maxPain).toBe(5500);
-    expect(c.asOf).toBe(NOW - 1000);
-    expect(c.gaps).toEqual([]);
-    // One call for the future, one for the legs; a poll within 3 s reuses the answer.
-    expect(calls.map((x) => x.length)).toEqual([1, 10]);
-    await svc.chain('CRUDEOIL');
-    expect(calls).toHaveLength(2);
+    }
+    const q = underlyingQuote(p, 'CRUDEOIL');
+    expect(q.ltp).toBe(F);
+    expect(q.changePct).toBeCloseTo((F / 5420 - 1) * 100, 1);
+    const c = await buildOptionChain(p, 'CRUDEOIL');
+    expect(c.spot).toBe(F);
+    expect(c.futureExpiry).toBe('2026-11-19');
+    expect(c.forward).toBe(F);
+    expect(c.forwardSource).toBe('future');
+    expect(c.atm).toBe(5500);
+    expect(c.atmIv).toBeCloseTo(40, 0);
+    expect(c.rows.find((r) => r.strike === 5500)!.ce.iv).toBeCloseTo(40, 0);
+    expect(c.lotSize).toBe(100);
   });
 
-  it('no live future price → no chain, with the reason (never a made-up price)', async () => {
-    const { svc } = service(fakeRest({}).rest);
-    await expect(svc.chain('CRUDEOIL')).rejects.toThrow(NoLiveData);
-    await expect(svc.chain('CRUDEOIL')).rejects.toThrow(/No live price for CRUDEOIL26NOVFUT/);
-  });
-
-  it('a future price that does not fit the strikes (unit mismatch) is refused', async () => {
-    const { svc } = service(fakeRest({ fut: 548_000 }).rest);
-    await expect(svc.chain('CRUDEOIL')).rejects.toThrow(/price unit mismatch/);
-  });
-
-  it('failed option quotes leave the legs blank and say why', async () => {
-    const { svc } = service(fakeRest({ fut: 5480, fail: true }).rest);
-    const c = await svc.chain('CRUDEOIL');
-    expect(c.rows[0].ce).toMatchObject({ ltp: null, oi: null, iv: null });
-    expect(c.gaps[0]).toMatch(/10 of 10 option quotes failed: HTTP 500/);
-    expect(c.maxPain).toBeNull();
-    expect(c.totals.pcr).toBeNull();
-  });
-
-  it('without Kotak, or for an unknown commodity / expiry, says so', async () => {
-    await expect(service(null, { restUnavailable: 'Kotak credentials missing in .env' }).svc.chain('CRUDEOIL')).rejects.toThrow(/credentials missing/);
-    const { svc } = service(fakeRest({ fut: 5480 }).rest);
-    await expect(svc.chain('GOLD')).rejects.toMatchObject({ statusCode: 404 });
-    await expect(svc.chain('CRUDEOIL', '2026-12-15')).rejects.toMatchObject({ statusCode: 404 });
-  });
-
-  it('lists the commodities; the downloaded file is cached for the day', async () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'q26-mcx-'));
-    const a = service(fakeRest({ fut: 5480 }).rest, { dataDir: dir });
-    expect(await a.svc.symbols()).toEqual({ masterDate: TODAY, symbols: [{ symbol: 'CRUDEOIL', lotSize: 100, optionExpiries: [OPT_EXP], futureExpiries: [FUT_EXP] }], warnings: [] });
-    expect(a.downloads()).toBe(1);
-    expect(fs.existsSync(path.join(dir, 'refdata-mcx', `${TODAY}.csv`))).toBe(true);
-    const b = service(fakeRest({ fut: 5480 }).rest, { dataDir: dir });
-    await b.svc.symbols();
-    expect(b.downloads()).toBe(0);
-  });
-
-  it('no mcx_fo file listed by Kotak → unavailable with the reason', async () => {
-    const { svc } = service(fakeRest({ fut: 5480 }).rest, { filePaths: async () => ['https://x/prod/2026-10-26/transformed/nse_fo.csv'] });
-    await expect(svc.symbols()).rejects.toThrow(/MCX contracts unavailable: Kotak lists no mcx_fo instrument file today/);
+  it('previous-session OI comes from the recorded MCX session (blank with the reason when not recorded)', async () => {
+    const p = provider();
+    const now = p.now();
+    const prev = '2026-10-23'; // Friday
+    const at = Date.parse(`${prev}T23:20:00+05:30`); // MCX evening, recorded
+    p.intraday.addMinutes({ symbol: 'CRUDEOIL', kind: 'CE', expiry: OPT_EXP, strike: 5500 }, [{ ts: at, open: 150, high: 150, low: 150, close: 150, traded: true, volume: 5, oi: 800 }]);
+    p.setQuote({ symbol: 'CRUDEOIL', kind: 'FUT', expiry: '2026-11-19' }, { ltp: 5480, volume: 1000, ts: now - 1000 });
+    p.setQuote({ symbol: 'CRUDEOIL', kind: 'CE', expiry: OPT_EXP, strike: 5500 }, { ltp: 160, volume: 10, oi: 1100, ts: now - 1000 });
+    p.setQuote({ symbol: 'CRUDEOIL', kind: 'PE', expiry: OPT_EXP, strike: 5500 }, { ltp: 170, volume: 10, oi: 900, ts: now - 1000 });
+    const c = await buildOptionChain(p, 'CRUDEOIL');
+    const row = c.rows.find((r) => r.strike === 5500)!;
+    expect(row.ce.prevOi).toBe(800);
+    expect(row.ce.oiChange).toBe(300);
+    expect(row.pe.prevOi).toBeNull();
+    expect(c.gaps?.oiChange).toMatch(/MCX session was not recorded by this app/);
   });
 });

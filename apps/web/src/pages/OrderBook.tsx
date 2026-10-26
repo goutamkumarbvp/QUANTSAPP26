@@ -65,7 +65,7 @@ export default function OrderBook() {
   const reqStrike = type === 'FUT' ? undefined : isPast ? pastStrike : k;
   const trade = useLive<OrderFlowResponse>(
     ['order-trade', symbol, type, reqExpiry, reqStrike, ...(isPast ? [date] : [])],
-    `/order-flow/${symbol}${qs({ type, expiry: reqExpiry, strike: reqStrike, date: isPast ? date : undefined, limit: 375 })}`,
+    `/order-flow/${symbol}${qs({ type, expiry: reqExpiry, strike: reqStrike, date: isPast ? date : undefined, limit: 900 })}`,
     isPast ? false : 2000,
     isPast || ready,
   );

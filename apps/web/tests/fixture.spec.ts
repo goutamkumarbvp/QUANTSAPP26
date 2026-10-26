@@ -55,7 +55,7 @@ test('scanners: a build-up row with its coverage note', async ({ page }, info) =
   const row = page.getByRole('row', { name: /RELIANCE/ }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toContainText('1,403.20');
-  await expect(page.getByText(/12 of 12 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE + the 9 test heavyweights
+  await expect(page.getByText(/14 of 14 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD
   await shot(page, info, 'scanners');
   await clean(page, watch);
 });
@@ -97,15 +97,24 @@ test('order book: Order & Trade chart — 1-min candles with buyer vs seller ini
   await clean(page, watch);
 });
 
-test('MCX option chain: commodity options priced on their future (test contracts), IV from premiums', async ({ page }, info) => {
+test('MCX commodities are ordinary symbols: home card, ticker, picker group and the option chain priced on the future (test contracts)', async ({ page }, info) => {
   const watch = watchErrors(page);
-  await open(page, '/mcx-chain', /MCX Option Chain/);
-  await expect(page.getByText(/CRUDEOIL options · expiry/)).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByRole('combobox', { name: 'Commodity' })).toContainText('GOLD');
-  await expect(page.getByText('5,480.00').first()).toBeVisible(); // the future it settles into
-  await expect(page.getByText('ATM strike')).toBeVisible();
-  await expect(page.getByText('Max pain', { exact: true })).toBeVisible();
-  await shot(page, info, 'mcx-chain');
+  await open(page, '/', /Market Overview/);
+  await expect(page.getByText('Commodities · MCX')).toBeVisible();
+  await expect(page.getByRole('button', { name: /CRUDEOIL/ }).first()).toBeVisible();
+  // The old MCX tab address opens the Option Chain on a commodity.
+  await open(page, '/mcx-chain', /Option Chain/);
+  await expect(page.getByRole('button', { name: 'Select symbol' })).toHaveText(/CRUDEOIL/);
+  await page.getByRole('button', { name: 'Select symbol' }).click();
+  await expect(page.getByText('Commodities (MCX)')).toBeVisible();
+  await expect(page.getByText('Indices (NSE · BSE)')).toBeVisible();
+  await page.getByPlaceholder(/Search NIFTY, GOLD/).fill('CRUDE');
+  await page.getByRole('listbox').getByRole('button', { name: /^CRUDEOIL/ }).click();
+  const atm = page.getByRole('row', { name: /5,500/ }).first();
+  await expect(atm).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('5,480.00').first()).toBeVisible(); // the near-month future = the commodity price
+  await expect(atm).toContainText('38.0'); // IV solved by Black-76 on the future the expiry settles into (test vol 38 %)
+  await shot(page, info, 'mcx-option-chain');
   await clean(page, watch);
 });
 

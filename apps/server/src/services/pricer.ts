@@ -7,10 +7,10 @@
  * session the close of the last session; an LTP at its own trade time). An expired contract is valued
  * at the exchange's final settlement (md.history.settlement), else NoLiveData until it is published.
  */
-import { expiryTs, formatExpiry, type InstrumentType } from '@q26/core';
+import { formatExpiry, type InstrumentType } from '@q26/core';
 import { NoLiveData } from '../live/types';
 import type { InstrumentKey, Listing, MarketDataProvider } from '../live/types';
-import { changeOf, eodClose, futKey, httpError, liveBook, liveDates, livePrice, optKey, pct, saneMid, sessionDateOf, spotKey } from './live';
+import { changeOf, eodClose, futKey, httpError, liveBook, liveDates, livePrice, mdFor, optKey, pct, saneMid, sessionDateOf, spotKey } from './live';
 
 export interface InstrumentSpec {
   symbol: string;
@@ -89,7 +89,7 @@ export class Pricer {
     }
     if (!spec.expiry) throw httpError(400, 'Expiry is required');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(spec.expiry)) throw httpError(400, `Invalid expiry '${spec.expiry}'`);
-    if (expiryTs(spec.expiry) < ts) throw httpError(400, 'Contract has expired');
+    if (this.md.calendarOf(symbol).expiryTs(spec.expiry) < ts) throw httpError(400, 'Contract has expired');
     if (spec.type === 'FUT') {
       if (!this.md.ref.expiries(symbol, 'FUT').includes(spec.expiry)) throw httpError(400, `${symbol} future ${spec.expiry} is not listed`);
     } else {
@@ -113,7 +113,7 @@ export class Pricer {
   }
 
   price(spec: InstrumentSpec, ts: number = this.md.clock.now()): PricedInstrument {
-    const md = this.md;
+    const md = mdFor(this.md, spec.symbol);
     const u = md.ref.underlying(spec.symbol);
     const s = { ...spec, symbol: u.symbol, ...(spec.type !== 'EQ' && spec.type !== 'FUT' ? { strike: Number(spec.strike) } : {}) };
     const label = instrumentLabel(s);
@@ -122,7 +122,7 @@ export class Pricer {
 
     if (s.type !== 'EQ') {
       if (!s.expiry) throw httpError(400, 'Expiry is required');
-      if (expiryTs(s.expiry) < ts) {
+      if (md.calendar.expiryTs(s.expiry) < ts) {
         const settle = md.history.settlement(key);
         if (settle === undefined) throw new NoLiveData(`Awaiting the exchange settlement price for ${label}`);
         let lot: number | null = null;

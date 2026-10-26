@@ -11,6 +11,8 @@ export class LiveClock implements SessionClock {
     private readonly calendar: TradingCalendar,
     /** Wall clock (epoch ms); injectable for tests. */
     private readonly wall: () => number = () => Date.now(),
+    /** MCX calendar, reported as `mcxStatus` while `hasMcx()` (commodities are listed). */
+    private readonly mcx?: { calendar: TradingCalendar; hasMcx: () => boolean },
   ) {}
 
   now(): number {
@@ -27,6 +29,7 @@ export class LiveClock implements SessionClock {
       status: s.status,
       // Whole minutes since 09:15, clamped to 0..375 by the calendar.
       sessionMinute: Math.floor(s.minute),
+      ...(this.mcx?.hasMcx() ? { mcxStatus: this.mcx.calendar.session(ts).status } : {}),
     };
   }
 }

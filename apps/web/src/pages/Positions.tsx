@@ -220,7 +220,7 @@ export default function Positions() {
                         <td title={o.message}>
                           <Pill tone={o.status === 'COMPLETE' ? 'up' : o.status === 'REJECTED' ? 'down' : o.status === 'CANCELLED' ? 'muted' : 'accent'}>{o.status.replace('_', ' ')}</Pill>
                           {o.message && <div className="max-w-[22rem] whitespace-normal text-2xs text-muted">{o.message}</div>}
-                          {(o.status === 'OPEN' || o.status === 'TRIGGER_PENDING') && o.orderType !== 'MARKET' && <div className="max-w-[22rem] whitespace-normal text-2xs text-muted">Day order: fills only while a live price allows it, cancelled at 15:30</div>}
+                          {(o.status === 'OPEN' || o.status === 'TRIGGER_PENDING') && o.orderType !== 'MARKET' && <div className="max-w-[22rem] whitespace-normal text-2xs text-muted">Day order: fills only while a live price allows it, cancelled at the session close (15:30; MCX 23:30/23:55)</div>}
                         </td>
                         <td>{(o.status === 'OPEN' || o.status === 'TRIGGER_PENDING') && <button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => act(() => api(`/broker/orders/${o.id}`, { method: 'DELETE' }))}>Cancel</button>}</td>
                       </tr>

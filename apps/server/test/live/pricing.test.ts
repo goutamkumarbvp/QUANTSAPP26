@@ -53,6 +53,12 @@ class FakeRef implements ReferenceData {
   listing(_key: InstrumentKey): Listing | undefined {
     return undefined;
   }
+  underlyingFuture(_symbol: string, optionExpiry: string): string | undefined {
+    return optionExpiry;
+  }
+  quoteKey(key: InstrumentKey): InstrumentKey {
+    return key;
+  }
   byToken(_segment: Segment, _token: string): Listing | undefined {
     return undefined;
   }

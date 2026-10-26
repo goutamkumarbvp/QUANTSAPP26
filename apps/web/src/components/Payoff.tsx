@@ -7,13 +7,12 @@ import {
   estimateMargin,
   expiryTs,
   formatExpiry,
-  INDEX_MARGIN,
   legLabel,
   legQty,
   payoffCurve,
   scenarioGrid,
   sideSign,
-  STOCK_MARGIN,
+  marginParamsOf,
   strategyGreeks,
   type FuturesQuote,
   type Leg,
@@ -158,9 +157,9 @@ export function useStrategyView(
     const lotSize = info?.lotSize ?? base.lotSize;
     const gaps: Record<string, string> = {};
     for (const k of VALUATION_GAPS) if (base.gaps?.[k]) gaps[k] = base.gaps[k];
-    const ctx: ValuationContext = { r: rate, carry: (e) => chains[e]?.carry ?? null, ivShift: (opts.ivShift ?? 0) / 100 };
+    const ctx: ValuationContext = { r: rate, carry: (e) => chains[e]?.carry ?? null, ivShift: (opts.ivShift ?? 0) / 100, exchange: info?.exchange };
     // The margin scan sizes its own volatility moves: the what-if IV shift is not part of it.
-    const marginCtx: ValuationContext = { r: rate, carry: ctx.carry };
+    const marginCtx: ValuationContext = { r: rate, carry: ctx.carry, exchange: info?.exchange };
 
     const legs: MarkedLeg[] = legsIn.map((l0) => {
       // A contract's lot size is defined by the instrument; a stored lot size of 1 means "not known".
@@ -221,7 +220,7 @@ export function useStrategyView(
       const g = strategyGreeks([l], spot, nowTs, ctx);
       if (!g.missing.length) Object.assign(l, { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega });
     }
-    const firstExp = openLegs.length ? Math.min(...openLegs.map((l) => expiryTs(l.expiry))) : nowTs;
+    const firstExp = openLegs.length ? Math.min(...openLegs.map((l) => expiryTs(l.expiry, info?.exchange))) : nowTs;
     const maxDays = Math.max(0, (firstExp - nowTs) / DAY_MS);
     const targetTs = Math.min(firstExp, nowTs + Math.min(maxDays, opts.targetDays ?? 0) * DAY_MS);
     const analysis = analyzeStrategy(activeLegs, spot, nowTs, ctx, { sigma: atmIv ?? undefined });
@@ -229,18 +228,18 @@ export function useStrategyView(
       const leg = activeLegs[g.index];
       if (leg && !leg.excluded) leg.excluded = g.reason;
     }
-    const range = opts.range ?? (info?.kind === 'stock' ? 0.15 : 0.08);
+    const range = opts.range ?? (info?.kind === 'stock' ? 0.15 : info?.kind === 'commodity' ? 0.12 : 0.08);
     const strikes = activeLegs.filter((l) => l.type !== 'FUT').map((l) => l.strike);
     const lo = Math.min(spot * (1 - range), ...strikes.map((k) => k * 0.98));
     const hi = Math.max(spot * (1 + range), ...strikes.map((k) => k * 1.02));
     const curve = payoffCurve(activeLegs, ctx, { lo, hi, points: 241, targetTs, extraPrices: [spot, ...analysis.breakevens] });
-    const margin = estimateMargin(openLegs, spot, nowTs, marginCtx, info?.kind === 'stock' ? STOCK_MARGIN : INDEX_MARGIN);
+    const margin = estimateMargin(openLegs, spot, nowTs, marginCtx, marginParamsOf(info?.kind ?? 'index'));
     const scenarioTs = [nowTs, nowTs + (firstExp - nowTs) / 2, firstExp];
     const scenario = scenarioGrid(activeLegs, spot, ctx, [-5, -3, -2, -1, -0.5, 0, 0.5, 1, 2, 3, 5], scenarioTs);
     const targetBlank = openLegs.length > 0 && curve.targetMissing.length >= openLegs.length;
     return { ...common, blank: null, spot, analysis, margin, curve, targetBlank, targetTs, expiryTs: firstExp, scenario, scenarioTs };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataKey, JSON.stringify(legsIn), opts.targetDays, opts.ivShift, opts.range, rate, info?.kind, info?.lotSize]);
+  }, [dataKey, JSON.stringify(legsIn), opts.targetDays, opts.ivShift, opts.range, rate, info?.kind, info?.lotSize, info?.exchange]);
 }
 
 /** Why the strategy view has nothing to draw: a spinner while it loads, the reason when it cannot. */

@@ -53,6 +53,7 @@ const provider = new LiveProvider(
     dataDir: config.dataDir,
     riskFreeRate: config.riskFreeRate,
     holidays: config.holidays,
+    mcxHolidays: config.mcxHolidays,
     neo: config.neo,
     neoError: config.neoError,
     eodBackfillDays: config.eodBackfillDays,

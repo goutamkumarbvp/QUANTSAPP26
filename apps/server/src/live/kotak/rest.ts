@@ -234,7 +234,7 @@ export function quoteToLive(q: KotakQuote, key: InstrumentKey, receivedAt: numbe
 /* Option chain / futures chain / expiries                                                      */
 /* ------------------------------------------------------------------------------------------ */
 
-export type FoExchange = 'nse_fo' | 'bse_fo';
+export type FoExchange = 'nse_fo' | 'bse_fo' | 'mcx_fo';
 
 export interface KotakChainLeg {
   neosymbol: string;

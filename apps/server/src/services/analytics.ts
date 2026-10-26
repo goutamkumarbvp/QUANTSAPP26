@@ -15,6 +15,7 @@
  * Whole answer unavailable → NoLiveData (HTTP 503); a missing field → null, with the reason in `gaps`.
  */
 import {
+  type UnderlyingKind,
   addDays,
   classifyBuildUp,
   daysToExpiry,
@@ -24,7 +25,7 @@ import {
   formatExpiry,
   formatTimeIST,
   historicalVol,
-  INDEX_MARGIN,
+  marginParamsOf,
   istTs,
   ivPercentile,
   ivRank,
@@ -35,7 +36,6 @@ import {
   orbAtPrice,
   SESSION_MINUTES,
   sideSign,
-  STOCK_MARGIN,
   volatilityCone,
   type BreadthResponse,
   type BuildUp,
@@ -75,7 +75,7 @@ import {
 import { isIsoDate } from '../live/calendar';
 import { black76Iv, impliedForward, timeToExpiry, type PremiumRow } from '../live/pricing';
 import { NoLiveData, keyId } from '../live/types';
-import type { DailyFuture, DailyOption, InstrumentKey, MarketDataProvider, MinuteRecord, OptKind, Underlying } from '../live/types';
+import type { DailyFuture, DailyOption, InstrumentKey, MarketDataProvider, MinuteRecord, OptKind, TradingCalendar, Underlying } from '../live/types';
 import {
   buildOptionChain,
   changeOf,
@@ -91,6 +91,7 @@ import {
   liveOptionExpiries,
   livePrice,
   MAX_CANDLE_SESSIONS,
+  mdFor,
   nearFuture,
   notRecordedReason,
   onOrBefore,
@@ -189,7 +190,7 @@ export function sumFiiDii(days: readonly FiiDiiDay[]): { fiiNet: number | null; 
  */
 export interface OptionSnapshotRow {
   symbol: string;
-  kind: 'index' | 'stock';
+  kind: UnderlyingKind;
   sector: string;
   expiry: string;
   type: OptKind;
@@ -301,13 +302,14 @@ export class Analytics {
   }
 
   /** As-of points every `interval` minutes of a session, up to its last completed minute. */
-  private marks(date: string, interval: number): Marks {
-    const md = this.md;
+  private marks(date: string, interval: number, symbol: string): Marks {
+    const md = mdFor(this.md, symbol);
     const now = this.now();
     const s = md.calendar.session(now);
     const open = md.calendar.ts(date, 0);
-    const done = date === s.date ? Math.max(0, Math.min(M, Math.floor((now - open) / MINUTE))) : M;
-    const step = clampInt(interval, 1, M, 5);
+    const len = md.calendar.sessionMinutes(date);
+    const done = date === s.date ? Math.max(0, Math.min(len, Math.floor((now - open) / MINUTE))) : len;
+    const step = clampInt(interval, 1, len, 5);
     const mins: number[] = [];
     for (let m = step; m < done; m += step) mins.push(m);
     if (done >= 1) mins.push(done);
@@ -390,8 +392,8 @@ export class Analytics {
    * Minute records per key for one session, with Kotak 1-minute history (md.candles) for keys the
    * recorder does not hold, when `kotak` (active contracts, last 30 sessions, ≤ MAX_KOTAK_CONTRACTS).
    */
-  private loader(date: string, kotak: boolean) {
-    const md = this.md;
+  private loader(date: string, kotak: boolean, symbol: string) {
+    const md = mdFor(this.md, symbol);
     const cache = new Map<string, Promise<KeyMinutes>>();
     const reasons: string[] = [];
     let calls = 0;
@@ -479,7 +481,8 @@ export class Analytics {
     if (!byStrike.size) return { spot, forward: null, iv, rows };
     const f = this.eodFuture(symbol, expiry, date);
     const future = f && f.volume > 0 ? (isPos(f.settle) ? f.settle : isPos(f.close) ? f.close : undefined) : undefined;
-    const T = timeToExpiry(expiry, istTs(date, MARKET_CLOSE_MIN));
+    const cal = this.md.calendarOf(symbol);
+    const T = timeToExpiry(expiry, cal.ts(date, cal.sessionMinutes(date)), cal.exchange);
     const r = this.md.pricing.r;
     const fwd = impliedForward({ spot: spot ?? undefined, future, rows: [...byStrike.values()] }, T, r);
     if (fwd) {
@@ -494,16 +497,16 @@ export class Analytics {
   }
 
   /** Consecutive-session run lengths of official bars (a missing session breaks the run). */
-  private runs(bars: readonly { date: string }[]): number[] {
+  private runs(bars: readonly { date: string }[], cal: TradingCalendar = this.md.calendar): number[] {
     const out: number[] = [];
-    bars.forEach((b, i) => out.push(i > 0 && bars[i - 1].date === this.md.calendar.prev(b.date) ? out[i - 1] + 1 : 1));
+    bars.forEach((b, i) => out.push(i > 0 && bars[i - 1].date === cal.prev(b.date) ? out[i - 1] + 1 : 1));
     return out;
   }
 
   /** HV 20D (decimal) per date of official closes; only over 21 consecutive sessions. */
-  private hv20(bars: readonly { date: string; close: number }[]): Map<string, number> {
+  private hv20(bars: readonly { date: string; close: number }[], cal: TradingCalendar = this.md.calendar): Map<string, number> {
     const sorted = [...bars].sort((a, b) => a.date.localeCompare(b.date));
-    const run = this.runs(sorted);
+    const run = this.runs(sorted, cal);
     const out = new Map<string, number>();
     sorted.forEach((b, i) => {
       if (run[i] < 21) return;
@@ -515,15 +518,16 @@ export class Analytics {
 
   /** Nearest listed option expiry with at least one calendar day left (the official ATM IV rule). */
   private ivExpiry(symbol: string): string | null {
-    const minExp = addDays(this.md.calendar.session(this.now()).date, 1);
+    const minExp = addDays(this.md.calendarOf(symbol).session(this.now()).date, 1);
     return this.orElse(() => liveOptionExpiries(this.md, symbol).find((e) => e >= minExp) ?? null, null);
   }
 
   /** IV rank / percentile of `current` (decimal) over the IV_WINDOW sessions of official ATM IV before `asOf`. */
   private ivStats(symbol: string, current: number | null, asOf: string): { ivr: number | null; ivp: number | null; reason?: string } {
     if (current === null) return { ivr: null, ivp: null, reason: 'No current ATM IV' };
-    const end = this.md.calendar.prev(asOf);
-    const win = sessionsBack(this.md, end, IV_WINDOW);
+    const md = mdFor(this.md, symbol);
+    const end = md.calendar.prev(asOf);
+    const win = sessionsBack(md, end, IV_WINDOW);
     const hist = this.md.history.dailyAtmIv(symbol, win[0], end).map((x) => x.iv);
     if (hist.length < MIN_IV_HISTORY) {
       return { ivr: null, ivp: null, reason: `IV rank/percentile need ${IV_WINDOW} sessions of official ATM IV history (at least ${MIN_IV_HISTORY}); ${hist.length} loaded` };
@@ -537,8 +541,8 @@ export class Analytics {
   /** Previous-session close of an underlying for a session: the quote's (same session), else official. */
   private prevCloseOf(symbol: string, date: string): number | null {
     const q = this.md.live.quote(spotKey(symbol));
-    if (q && isPos(q.prevClose) && sessionDateOf(this.md, q.ts) === date) return q.prevClose;
-    return eodClose(this.md, symbol, this.md.calendar.prev(date));
+    if (q && isPos(q.prevClose) && sessionDateOf(mdFor(this.md, symbol), q.ts) === date) return q.prevClose;
+    return eodClose(this.md, symbol, this.md.calendarOf(symbol).prev(date));
   }
 
   /* ------------------------------------------------------------------------------------------ */
@@ -550,7 +554,7 @@ export class Analytics {
    * Null when nothing is recorded; NoLiveData when the recording started after the open.
    */
   private recordedDay(symbol: string, date: string, live: boolean, withLive: boolean): DayBars | null {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const key = spotKey(symbol);
     const recs = byTs(md.intraday.bars(key, date));
     const open = md.calendar.ts(date, 0);
@@ -558,7 +562,7 @@ export class Analytics {
     if (lb && (lb.ts < open || md.calendar.session(lb.ts).date !== date)) lb = null; // a bar of another session
     if (!recs.length && !lb) return null;
     const first = recs.length ? recs[0].ts : (lb as MinuteRecord).ts;
-    if (first > open + ORB_OPEN_SLACK_MIN * MINUTE) throw new NoLiveData(`Recording of ${symbol} on ${date} starts at ${formatTimeIST(first)}: the opening range from 09:15 was not recorded`);
+    if (first > open + ORB_OPEN_SLACK_MIN * MINUTE) throw new NoLiveData(`Recording of ${symbol} on ${date} starts at ${formatTimeIST(first)}: the opening range from ${formatTimeIST(open)} was not recorded`);
     const bars = recs.filter(traded).map(toBar);
     let partial = false;
     if (lb && lb.traded && (!bars.length || lb.ts > bars[bars.length - 1].ts)) {
@@ -570,7 +574,7 @@ export class Analytics {
 
   /** Kotak 1-minute candles of an underlying for a date the recorder does not hold (last 30 sessions). */
   private async kotakDay(symbol: string, date: string): Promise<DayBars> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const notRec = notRecordedReason(md, date, `${symbol} minutes`);
     const oldest = sessionsBack(md, currentSession(md), MAX_CANDLE_SESSIONS['1min'])[0];
     if (date < oldest) throw new NoLiveData(`${notRec}; Kotak 1-minute history is used for the last ${MAX_CANDLE_SESSIONS['1min']} sessions only`);
@@ -596,10 +600,10 @@ export class Analytics {
    * minute never pulls a later bar into the range.
    */
   private evaluate(day: DayBars, symbol: string, date: string, evalTs: number, rangeMinutes: number, rule: OrbRule): OrbEvaluation {
-    const rangeEnd = this.md.calendar.ts(date, rangeMinutes);
+    const rangeEnd = this.md.calendarOf(symbol).ts(date, rangeMinutes);
     if (evalTs < rangeEnd) return evaluateOpeningRange(day.bars, { rangeMinutes, rule, lastIsPartial: day.partial });
     const k = day.bars.filter((b) => b.ts < rangeEnd).length;
-    if (!k) throw new NoLiveData(`No ${symbol} trade in the opening range (09:15 + ${rangeMinutes} min) on ${date}`);
+    if (!k) throw new NoLiveData(`No ${symbol} trade in the opening range (${formatTimeIST(this.md.calendarOf(symbol).ts(date, 0))} + ${rangeMinutes} min) on ${date}`);
     return { ...evaluateOpeningRange(day.bars, { rangeMinutes: k, rule, lastIsPartial: day.partial }), rangeMinutes };
   }
 
@@ -608,7 +612,7 @@ export class Analytics {
    * the minute in progress never confirms a break. Used by alerts. NoLiveData before data exists.
    */
   orbConfirmed(symbol: string, _ts: number | undefined, rangeMinutes: number): OrbEvaluation {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const now = this.now();
     const st = md.calendar.session(now);
@@ -617,7 +621,7 @@ export class Analytics {
     const day = this.recordedDay(s, date, live, false);
     if (!day) throw new NoLiveData(notRecordedReason(md, date, `${s} minutes`));
     if (!day.bars.length) throw new NoLiveData(`No ${s} trade recorded on ${date} yet`);
-    return this.evaluate(day, s, date, live ? now : md.calendar.ts(date, M), clampInt(rangeMinutes, 1, 120, 15), 'close');
+    return this.evaluate(day, s, date, live ? now : md.calendar.ts(date, md.calendar.sessionMinutes(date)), clampInt(rangeMinutes, 1, 120, 15), 'close');
   }
 
   /**
@@ -627,7 +631,7 @@ export class Analytics {
    * close (ORB_CLOSE_SLACK_MIN); else they are null with the reason in `gaps.day`.
    */
   async orb(symbol: string, _ts?: number, opts: { date?: string; rangeMinutes?: number; rule?: OrbRule } = {}): Promise<OrbResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const rangeMinutes = clampInt(opts.rangeMinutes, 1, 120, 15);
     const rule = opts.rule ?? 'close';
@@ -641,11 +645,11 @@ export class Analytics {
     // Price vs range uses the price shown: the live LTP when there is one, else the last recorded close.
     const spotQ = live ? md.live.quote(spotKey(s)) : undefined;
     const liveLtp = live ? livePrice(md, spotQ) : null;
-    const ev0 = this.evaluate(day, s, date, live ? now : md.calendar.ts(date, M), rangeMinutes, rule);
+    const ev0 = this.evaluate(day, s, date, live ? now : md.calendar.ts(date, md.calendar.sessionMinutes(date)), rangeMinutes, rule);
     const ev = liveLtp !== null ? orbAtPrice(ev0, liveLtp) : ev0;
     const gaps = new Gaps();
     // A completed session's close and day range come from bars that reach its close only.
-    const whole = live || last.ts >= md.calendar.ts(date, M - ORB_CLOSE_SLACK_MIN);
+    const whole = live || last.ts >= md.calendar.ts(date, md.calendar.sessionMinutes(date) - ORB_CLOSE_SLACK_MIN);
     if (!whole) gaps.add('day', `${day.source === 'kotak' ? 'Kotak 1-minute history' : 'Recording'} of ${s} on ${date} ends at ${formatTimeIST(last.ts + MINUTE)}: the session's last price and day high/low are not known`);
     const ltp = whole ? (liveLtp ?? last.close) : null;
     return {
@@ -678,14 +682,15 @@ export class Analytics {
   }
 
   private computeOrbScan(rangeMinutes: number, rule: OrbRule): OrbScanRow[] {
-    const md = this.md;
     const now = this.now();
-    const st = md.calendar.session(now);
-    const date = currentSession(md, now);
-    const live = date === st.date && st.status === 'open';
-    const evalTs = live ? now : md.calendar.ts(date, M);
     const rows: OrbScanRow[] = [];
-    for (const u of md.ref.underlyings()) {
+    for (const u of this.md.ref.underlyings()) {
+      // The opening range of each underlying's own session (MCX opens at 09:00).
+      const md = mdFor(this.md, u.symbol);
+      const st = md.calendar.session(now);
+      const date = currentSession(md, now);
+      const live = date === st.date && st.status === 'open';
+      const evalTs = live ? now : md.calendar.ts(date, md.calendar.sessionMinutes(date));
       let day: DayBars | null;
       let ev: OrbEvaluation;
       try {
@@ -722,7 +727,7 @@ export class Analytics {
         summary: describeOrb(ev),
       });
     }
-    if (!rows.length) throw new NoLiveData(`No underlying has recorded 1-minute bars covering the ${date} opening range`);
+    if (!rows.length) throw new NoLiveData(`No underlying has recorded 1-minute bars covering the ${currentSession(this.md, now)} opening range`);
     return rows;
   }
 
@@ -731,7 +736,7 @@ export class Analytics {
    * whole session, else Kotak 1-minute history (last 30 sessions). Other days are left out (gap).
    */
   async orbHistory(symbol: string, days: number, _ts?: number, opts: { rangeMinutes?: number; rule?: OrbRule } = {}): Promise<OrbHistoryResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const rangeMinutes = clampInt(opts.rangeMinutes, 1, 120, 15);
     const rule = opts.rule ?? 'close';
@@ -741,7 +746,7 @@ export class Analytics {
     const cur = currentSession(md, now);
     const lastDone = cur === st.date && st.status === 'open' ? md.calendar.prev(cur) : cur;
     const dates = sessionsBack(md, lastDone, n);
-    const endOk = (d: string, b: DayBars) => b.bars.length > 0 && b.bars[b.bars.length - 1].ts >= md.calendar.ts(d, M - ORB_CLOSE_SLACK_MIN);
+    const endOk = (d: string, b: DayBars) => b.bars.length > 0 && b.bars[b.bars.length - 1].ts >= md.calendar.ts(d, md.calendar.sessionMinutes(d) - ORB_CLOSE_SLACK_MIN);
     const byDate = new Map<string, DayBars>();
     const missing: string[] = [];
     const why: string[] = [];
@@ -787,7 +792,7 @@ export class Analytics {
       if (!day) continue;
       let ev: OrbEvaluation;
       try {
-        ev = this.evaluate(day, s, d, md.calendar.ts(d, M), rangeMinutes, rule);
+        ev = this.evaluate(day, s, d, md.calendar.ts(d, md.calendar.sessionMinutes(d)), rangeMinutes, rule);
       } catch (e) {
         if (!(e instanceof NoLiveData)) throw e;
         why.push(e.message);
@@ -847,7 +852,7 @@ export class Analytics {
    * chain at that time of the same session (md.intraday.chainAt).
    */
   async strikeOi(symbol: string, expiryIn?: string, at?: number, fromTs?: number): Promise<StrikeOiResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const chain = await buildOptionChain(md, symbol, this.checkExpiry(expiryIn), { at });
     const now = this.now();
     const asOf = at !== undefined && at < now;
@@ -856,7 +861,8 @@ export class Analytics {
     for (const k of ['spot', 'oi'] as const) if (chain.gaps?.[k]) gaps.add(k, chain.gaps[k]);
     const session = asOf ? onOrBefore(md, md.calendar.session(toTs).date) : currentSession(md, now);
     let from: StrikeOiResponse['from'] = 'prev-close';
-    let fromAt = md.calendar.ts(md.calendar.prev(session), M);
+    const prevSession = md.calendar.prev(session);
+    let fromAt = md.calendar.ts(prevSession, md.calendar.sessionMinutes(prevSession));
     let base: Map<string, number> | null = null;
     if (fromTs !== undefined && Number.isFinite(fromTs) && fromTs < toTs) {
       const t = Math.max(fromTs, md.calendar.ts(session, 1));
@@ -909,13 +915,13 @@ export class Analytics {
 
   /** Recorded minute series (OI, traded premium, IV solved from it) of chosen strikes of one session. */
   multiStrike(symbol: string, expiryIn: string | undefined, strikesIn: number[], date: string | undefined, interval: number, _ts?: number): MultiStrikeResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const u = md.ref.underlying(symbol);
     const s = u.symbol;
     const day = requireDate(md, date);
     requireRecorded(md, day);
     const expiry = this.recordedExpiry(s, day, expiryIn);
-    const mk = this.requireMarks(this.marks(day, interval));
+    const mk = this.requireMarks(this.marks(day, interval, s));
     const gaps = new Gaps();
     const recorded = this.recordedStrikes(s, expiry, day);
     const spotRecs = byTs(md.intraday.bars(spotKey(s), day));
@@ -949,7 +955,7 @@ export class Analytics {
     const r = md.pricing.r;
     const forward = mk.times.map((t, k) => {
       const rows: PremiumRow[] = strikes.map((strike) => ({ strike, ce: legs.get(`CE|${strike}`)!.ltp[k] ?? undefined, pe: legs.get(`PE|${strike}`)!.ltp[k] ?? undefined }));
-      return impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows }, timeToExpiry(expiry, t), r)?.forward ?? null;
+      return impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows }, timeToExpiry(expiry, t, md.calendar.exchange), r)?.forward ?? null;
     });
     const series: MultiStrikeResponse['series'] = [];
     for (const strike of strikes) {
@@ -971,12 +977,12 @@ export class Analytics {
    * official previous-close OI, each at its OI as of the point (last recorded value of the session).
    */
   oiTrend(symbol: string, expiryIn: string | undefined, date: string | undefined, interval: number, _ts?: number): OiTrendResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const day = requireDate(md, date);
     requireRecorded(md, day);
     const expiry = this.chainExpiry(s, day, expiryIn);
-    const mk = this.requireMarks(this.marks(day, interval));
+    const mk = this.requireMarks(this.marks(day, interval, s));
     const gaps = new Gaps();
     const picks = inWindows(byTs(md.intraday.chainSeries(s, expiry, day)), mk.starts, mk.times);
     const prevDate = md.calendar.prev(day);
@@ -1020,7 +1026,7 @@ export class Analytics {
 
   /** PCR per session from the official F&O bhavcopy: every strike of the nearest expiry (≥ that date), real OI only. */
   dailyPcr(symbol: string, days: number, _ts?: number): DailyPcrPoint[] {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const n = clampInt(days, 1, 250, 30);
     const loaded = new Set(md.history.loadedDates('fo'));
@@ -1088,13 +1094,12 @@ export class Analytics {
   }
 
   private computeFutures(): FuturesBuildUpRow[] {
-    const md = this.md;
     const now = this.now();
-    const dates = liveDates(md);
-    const session = currentSession(md, now);
     const rows: FuturesBuildUpRow[] = [];
-    for (const u of md.ref.underlyings()) {
-      const row = this.nearFutureRow(u, now, dates, session);
+    for (const u of this.md.ref.underlyings()) {
+      // Each underlying in its own exchange's sessions (MCX commodities: MCX's).
+      const md = mdFor(this.md, u.symbol);
+      const row = this.nearFutureRow(u, now, liveDates(md), currentSession(md, now));
       if (row) rows.push(row);
     }
     if (!rows.some((r) => r.ltp !== null || r.oi !== null)) throw new NoLiveData('No live futures quotes yet');
@@ -1102,7 +1107,7 @@ export class Analytics {
   }
 
   private nearFutureRow(u: Underlying, now: number, dates: ReadonlySet<string>, session: string): FuturesBuildUpRow | null {
-    const md = this.md;
+    const md = mdFor(this.md, u.symbol);
     const fe = nearFuture(md, u.symbol, now);
     if (!fe) return null;
     const key = futKey(u.symbol, fe);
@@ -1262,7 +1267,7 @@ export class Analytics {
 
   /** Official daily ATM IV (bhavcopy closes, nearest expiry with ≥ 1 day left), HV 20D and close of the last `days` sessions. */
   ivHistory(symbol: string, days: number, _ts?: number): IvChartResponse['daily'] {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const n = clampInt(days, 1, 400, 120);
     const cur = currentSession(md);
@@ -1270,7 +1275,7 @@ export class Analytics {
     const warm = sessionsBack(md, from, 22)[0];
     const atm = new Map(md.history.dailyAtmIv(s, from, cur).map((x) => [x.date, x]));
     const bars = md.history.dailyBars(s, warm, cur);
-    const hv = this.hv20(bars);
+    const hv = this.hv20(bars, md.calendar);
     const closes = new Map(bars.map((b) => [b.date, b.close]));
     const dates = [...new Set([...atm.keys(), ...bars.map((b) => b.date).filter((d) => d >= from)])].sort();
     if (!dates.length) throw new NoLiveData(`No official ATM IV or daily closes of ${s} loaded for ${from}..${cur}`);
@@ -1279,7 +1284,7 @@ export class Analytics {
 
   /** Intraday ATM IV of a recorded session, official daily ATM IV/HV, IV rank and percentile. */
   ivChart(symbol: string, expiryIn: string | undefined, date: string | undefined, interval: number, days: number, _ts?: number): IvChartResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const day = requireDate(md, date);
     const gaps = new Gaps();
@@ -1299,10 +1304,10 @@ export class Analytics {
   }
 
   private intradayIv(s: string, day: string, expiryIn: string | undefined, interval: number): { expiry: string; points: IvChartResponse['intraday'] } {
-    const md = this.md;
+    const md = mdFor(this.md, s);
     requireRecorded(md, day);
     const expiry = this.chainExpiry(s, day, expiryIn);
-    const mk = this.requireMarks(this.marks(day, interval));
+    const mk = this.requireMarks(this.marks(day, interval, s));
     const picks = inWindows(byTs(md.intraday.chainSeries(s, expiry, day)), mk.starts, mk.times);
     const fut = inWindows(byTs(md.intraday.bars(futKey(s, expiry), day)), mk.starts, mk.times, traded);
     const legs = new Map<string, MinuteRecord[]>();
@@ -1320,7 +1325,7 @@ export class Analytics {
       const K = cm.atmStrike;
       const ce = legClose('CE', K, k);
       const pe = legClose('PE', K, k);
-      const F = impliedForward({ spot: isPos(cm.spot) ? cm.spot : undefined, future: fut[k]?.close, rows: ce !== null && pe !== null ? [{ strike: K, ce, pe }] : [] }, timeToExpiry(expiry, t), r)?.forward ?? null;
+      const F = impliedForward({ spot: isPos(cm.spot) ? cm.spot : undefined, future: fut[k]?.close, rows: ce !== null && pe !== null ? [{ strike: K, ce, pe }] : [] }, timeToExpiry(expiry, t, md.calendar.exchange), r)?.forward ?? null;
       const iv = (type: OptKind, p: number | null) => (p !== null && F !== null ? pct(md.pricing.iv({ symbol: s, expiry, type, strike: K, premium: p, ts: t, forward: F })) : null);
       points.push({ ts: t, spot: isPos(cm.spot) ? cm.spot : null, atmIv: pct(cm.atmIv), ceIv: iv('CE', ce), peIv: iv('PE', pe) });
     });
@@ -1334,22 +1339,23 @@ export class Analytics {
   }
 
   private computeIvTable(): IvTableRow[] {
-    const md = this.md;
-    const session = currentSession(md);
-    const prevDate = md.calendar.prev(session);
-    const rows: IvTableRow[] = md.ref.underlyings().map((u) => {
+    const rows: IvTableRow[] = this.md.ref.underlyings().map((u) => {
+      // Each underlying in its own exchange's sessions (MCX commodities: MCX's).
+      const md = mdFor(this.md, u.symbol);
+      const session = currentSession(md);
+      const prevDate = md.calendar.prev(session);
       const gaps = new Gaps();
       const q = gaps.try('quote', () => this.spotNow(u.symbol));
       const expiry = this.ivExpiry(u.symbol);
       const ivDec = expiry ? md.pricing.atmIv(u.symbol, expiry) : null;
       if (ivDec === null) gaps.add('iv', expiry ? `ATM IV of ${u.symbol} ${expiry} could not be solved from live premiums` : `No listed ${u.symbol} option expiry`);
       const prevIv = expiry ? eodAtmIvOf(md, u.symbol, expiry, prevDate) : null;
-      if (ivDec !== null && prevIv === null) gaps.add('ivChange', `No traded official option closes of ${u.symbol} ${expiry} for ${prevDate}`);
+      if (ivDec !== null && prevIv === null) gaps.add('ivChange', u.kind === 'commodity' ? `No recorded option closes of ${u.symbol} ${expiry} for the ${prevDate} MCX session` : `No traded official option closes of ${u.symbol} ${expiry} for ${prevDate}`);
       const st = this.ivStats(u.symbol, ivDec, session);
       if (ivDec !== null && st.reason) gaps.add('ivr', st.reason);
       const bars = md.history.dailyBars(u.symbol, sessionsBack(md, session, 30)[0], session);
-      const hvDec = bars.length ? (this.hv20(bars).get(bars[bars.length - 1].date) ?? null) : null;
-      if (hvDec === null) gaps.add('hv', `HV 20D needs 21 consecutive official closes of ${u.symbol}`);
+      const hvDec = bars.length ? (this.hv20(bars, md.calendar).get(bars[bars.length - 1].date) ?? null) : null;
+      if (hvDec === null) gaps.add('hv', u.kind === 'commodity' ? `HV 20D needs 21 consecutive MCX sessions of ${u.symbol} recorded by this app from open to close` : `HV 20D needs 21 consecutive official closes of ${u.symbol}`);
       const iv = pct(ivDec);
       const hv = pct(hvDec);
       return {
@@ -1374,7 +1380,7 @@ export class Analytics {
 
   /** Live spot price and change of an underlying (NoLiveData when it has not traded in the live session). */
   private spotNow(symbol: string): { ltp: number; changePct: number | null } {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const q = md.live.quote(spotKey(symbol));
     const ltp = livePrice(md, q);
     if (!q || ltp === null) throw new NoLiveData(`No live price for ${symbol}`);
@@ -1387,7 +1393,7 @@ export class Analytics {
    * compare='prev', the same expiries at the previous session's official traded closes.
    */
   async skew(symbol: string, expiriesIn: string[], _ts?: number, compare: 'none' | 'prev' = 'none'): Promise<SkewResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const listed = liveOptionExpiries(md, s);
     let chosen: string[];
@@ -1449,7 +1455,7 @@ export class Analytics {
    * listed strike nearest the bucket centre within the bucket; null when there is none (no smile model).
    */
   async surface(symbol: string, _ts?: number): Promise<SurfaceResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const now = this.now();
     const expiries = liveOptionExpiries(md, s, now).slice(0, 8);
@@ -1501,19 +1507,19 @@ export class Analytics {
     });
     if (iv.every((row) => row.every((v) => v === null))) throw new NoLiveData(Object.values(gaps.out().gaps ?? {}).join('; ') || `No ${s} option premium to solve`);
     // Days to expiry from the valuation time the IVs are solved at (outside the session: the last close).
-    const valTs = md.pricing.valuationTs(now);
-    return { symbol: s, spot, expiries, daysToExpiry: expiries.map((e) => +daysToExpiry(valTs, e).toFixed(1)), moneyness: [...B], iv, strikes, ...gaps.out() };
+    const valTs = md.pricing.valuationTs(now, undefined, s);
+    return { symbol: s, spot, expiries, daysToExpiry: expiries.map((e) => +daysToExpiry(valTs, e, md.calendar.exchange).toFixed(1)), moneyness: [...B], iv, strikes, ...gaps.out() };
   }
 
   /** Realised-volatility cone of the consecutive official daily closes (≤ 505); short windows are null. */
   cone(symbol: string, _ts?: number): ConeResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const cur = currentSession(md);
     const from = sessionsBack(md, cur, 505)[0];
     const bars = md.history.dailyBars(s, from, cur).filter((b) => isPos(b.close));
     if (!bars.length) throw new NoLiveData(`No official daily closes of ${s} loaded for ${from}..${cur}`);
-    const run = this.runs(bars);
+    const run = this.runs(bars, md.calendar);
     const used = bars.slice(bars.length - run[run.length - 1]);
     const closes = used.map((b) => b.close);
     const byWindow = new Map(volatilityCone(closes, CONE_WINDOWS).map((r) => [r.window, r]));
@@ -1548,10 +1554,10 @@ export class Analytics {
    * the expiry's strikes, a negative width, or one wider than the strikes allow.
    */
   async straddle(symbol: string, expiryIn: string | undefined, strikeIn: number | 'atm', mode: 'rolling' | 'fixed', date: string | undefined, interval: number, _ts?: number, strangleWidth = 0): Promise<StraddleResponse> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const day = requireDate(md, date);
-    const mk = this.requireMarks(this.marks(day, interval));
+    const mk = this.requireMarks(this.marks(day, interval, s));
     const current = day === currentSession(md);
     const want = this.checkExpiry(expiryIn);
     const listed = current ? this.orElse(() => liveOptionExpiries(md, s), [] as string[]) : [];
@@ -1571,7 +1577,7 @@ export class Analytics {
     if (!(isNum(strangleWidth) && strangleWidth >= 0)) throw httpError(400, `Strangle width must be a non-negative number of points (got ${strangleWidth})`);
     if (2 * strangleWidth > hi - lo) throw httpError(400, `Strangle width ${strangleWidth} is wider than the ${range} allow`);
     const width = strangleWidth;
-    const load = this.loader(day, true);
+    const load = this.loader(day, true, s);
     const sources = new Set<'recorded' | 'kotak'>();
     const closesOf = async (key: InstrumentKey, track = false) => {
       const m = await load.get(key);
@@ -1582,7 +1588,7 @@ export class Analytics {
     const futListed = this.recordedKeysHas(futKey(s, expiry), day) || (current && !!this.orElse(() => md.ref.listing(futKey(s, expiry)), undefined));
     const fut = futListed ? await closesOf(futKey(s, expiry)) : mk.times.map(() => null);
     const r = md.pricing.r;
-    const fwd = mk.times.map((t, k) => impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows: [] }, timeToExpiry(expiry, t), r)?.forward ?? null);
+    const fwd = mk.times.map((t, k) => impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows: [] }, timeToExpiry(expiry, t, md.calendar.exchange), r)?.forward ?? null);
     const rolling = mode === 'rolling' && strikeIn === 'atm';
     let fixed: number | null = null;
     if (!rolling) {
@@ -1610,7 +1616,7 @@ export class Analytics {
       const ce = legCloses.get(`CE|${kc}`)?.[k] ?? null;
       const pe = legCloses.get(`PE|${kp}`)?.[k] ?? null;
       if (ce === null && pe === null && spot[k] === null) return;
-      const F = impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows: kc === kp && ce !== null && pe !== null ? [{ strike: kc, ce, pe }] : [] }, timeToExpiry(expiry, t), r)?.forward ?? null;
+      const F = impliedForward({ spot: spot[k] ?? undefined, future: fut[k] ?? undefined, rows: kc === kp && ce !== null && pe !== null ? [{ strike: kc, ce, pe }] : [] }, timeToExpiry(expiry, t, md.calendar.exchange), r)?.forward ?? null;
       const ivs: number[] = [];
       for (const [type, strike, p] of [['CE', kc, ce], ['PE', kp, pe]] as const) {
         if (p === null || F === null) continue;
@@ -1658,7 +1664,7 @@ export class Analytics {
    * minutes; IV/Greeks solved from each leg's premium with the recorded forward of that time.
    */
   async strategyChart(symbol: string, legsIn: Leg[], date: string | undefined, interval: number, _ts?: number): Promise<StrategyChartPoint[]> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     const legs = legsIn.filter((l) => l.lots > 0);
     if (!legs.length) throw httpError(400, 'No legs');
@@ -1666,8 +1672,8 @@ export class Analytics {
     const keys = legs.map((l) => this.legKey(s, l));
     for (const l of legs) if (l.expiry < day) throw httpError(400, `${l.expiry} expired before ${day}`);
     const lots = legs.map((l, i) => this.lotOf(s, l, keys[i]));
-    const mk = this.requireMarks(this.marks(day, interval));
-    const load = this.loader(day, true);
+    const mk = this.requireMarks(this.marks(day, interval, s));
+    const load = this.loader(day, true, s);
     const closesOf = async (key: InstrumentKey) => inWindows((await load.get(key)).recs, mk.starts, mk.times, traded).map((r) => r?.close ?? null);
     const spot = await closesOf(spotKey(s));
     const px: (number | null)[][] = [];
@@ -1701,7 +1707,7 @@ export class Analytics {
             if (!row) rows.push((row = { strike: l.strike }));
             row[l.type === 'CE' ? 'ce' : 'pe'] = prices[i] as number;
           });
-          fwd.set(e, impliedForward({ spot: spot[k] ?? undefined, future: fut.get(e)?.[k] ?? undefined, rows }, timeToExpiry(e, t), r)?.forward ?? null);
+          fwd.set(e, impliedForward({ spot: spot[k] ?? undefined, future: fut.get(e)?.[k] ?? undefined, rows }, timeToExpiry(e, t, md.calendar.exchange), r)?.forward ?? null);
         }
         return fwd.get(e) ?? null;
       };
@@ -1754,7 +1760,7 @@ export class Analytics {
    * chart); its P&L is blank until then — a missing entry is never taken as ₹0.
    */
   recap(req: RecapRequest, _nowTs?: number): RecapResponse {
-    const md = this.md;
+    const md = mdFor(this.md, req.symbol);
     const s = md.ref.underlying(req.symbol).symbol;
     const legs = req.legs.filter((l) => l.lots > 0);
     if (!legs.length) throw httpError(400, 'No legs');
@@ -1763,7 +1769,7 @@ export class Analytics {
     const now = this.now();
     if (!Number.isFinite(req.fromTs)) throw httpError(400, 'fromTs must be a timestamp');
     const fromTs = Math.min(req.fromTs, now);
-    const firstExpiry = Math.min(...legs.map((l) => expiryTs(l.expiry)));
+    const firstExpiry = Math.min(...legs.map((l) => md.calendar.expiryTs(l.expiry)));
     const endTs = Math.min(isNum(req.toTs) ? req.toTs : now, now, firstExpiry);
     if (!(fromTs < endTs)) throw httpError(400, 'fromTs must be before the end of the replay (toTs, now or the first expiry)');
     const step = clampInt(req.intervalMin, 1, M, 5) * MINUTE;
@@ -1779,7 +1785,7 @@ export class Analytics {
         continue;
       }
       const open = md.calendar.ts(d, 0);
-      const close = md.calendar.ts(d, M);
+      const close = md.calendar.ts(d, md.calendar.sessionMinutes(d));
       const start = Math.max(fromTs, open);
       const end = Math.min(endTs, close, now);
       const times: number[] = [];
@@ -1838,7 +1844,7 @@ export class Analytics {
    * Valuation needs the live spot, the expiry's forward (carry) and the ATM IV.
    */
   async optimize(req: OptimizerRequest, _ts?: number): Promise<OptimizerOutput & { expiry: string; spot: number; forward: number; tookMs: number; targetTs: number; coverage: string }> {
-    const md = this.md;
+    const md = mdFor(this.md, req.symbol);
     const u = md.ref.underlying(req.symbol);
     if (!isIsoDate(req.targetDate)) throw httpError(400, `targetDate must be YYYY-MM-DD (got '${req.targetDate}')`);
     const chain = await buildOptionChain(md, u.symbol, this.checkExpiry(req.expiry));
@@ -1853,8 +1859,8 @@ export class Analytics {
     const rows = chain.rows.map((r) => ({ strike: r.strike, ce: quote(r.ce), pe: quote(r.pe) })).filter((r) => r.ce || r.pe);
     if (rows.length < 2) throw new NoLiveData(`Fewer than two ${u.symbol} ${chain.expiry} strikes have a live premium`);
     const now = this.now();
-    const expTs = expiryTs(chain.expiry);
-    const targetTs = Math.min(expTs, Math.max(now + 60_000, expiryTs(req.targetDate)));
+    const expTs = md.calendar.expiryTs(chain.expiry);
+    const targetTs = Math.min(expTs, Math.max(now + 60_000, md.calendar.expiryTs(req.targetDate)));
     const carry = chain.carry;
     const atmIv = chain.atmIv / 100;
     const t0 = performance.now();
@@ -1872,8 +1878,8 @@ export class Analytics {
       allowUnlimitedRisk: req.allowUnlimitedRisk ?? false,
       maxCapital: req.maxCapital,
       atmIv,
-      ctx: { r: md.pricing.r, carry: () => carry },
-      marginParams: u.kind === 'index' ? INDEX_MARGIN : STOCK_MARGIN,
+      ctx: { r: md.pricing.r, carry: () => carry, exchange: md.calendar.exchange },
+      marginParams: marginParamsOf(u.kind),
       sortBy: req.sortBy ?? 'rr',
       limit: 25,
       budget: 220_000,
@@ -1903,17 +1909,18 @@ export class Analytics {
   }
 
   private computeSnapshot(): OptionSnapshotRow[] {
-    const md = this.md;
     const now = this.now();
-    const dates = liveDates(md);
-    const prevDate = md.calendar.prev(currentSession(md, now));
     const out: OptionSnapshotRow[] = [];
-    for (const u of md.ref.underlyings()) {
+    for (const u of this.md.ref.underlyings()) {
+      // Each underlying in its own exchange's sessions (MCX commodities: MCX's).
+      const md = mdFor(this.md, u.symbol);
+      const dates = liveDates(md);
+      const prevDate = md.calendar.prev(currentSession(md, now));
       const spot = livePrice(md, md.live.quote(spotKey(u.symbol)), dates);
       if (spot === null) continue;
       const expiry = this.orElse(() => liveOptionExpiries(md, u.symbol, now)[0], undefined);
       if (!expiry) continue;
-      const band = u.kind === 'index' ? 0.05 : 0.12;
+      const band = u.kind === 'index' ? 0.05 : u.kind === 'commodity' ? 0.08 : 0.12;
       const keys: InstrumentKey[] = [];
       for (const k of this.listedStrikes(u.symbol, expiry)) if (Math.abs(k / spot - 1) <= band) keys.push(optKey(u.symbol, expiry, 'CE', k), optKey(u.symbol, expiry, 'PE', k));
       const quotes = md.live.quotes(keys);

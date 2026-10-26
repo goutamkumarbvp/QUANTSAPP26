@@ -564,3 +564,23 @@ describe('Recorder: session hooks and the store', () => {
     expect(reopened.sessions()).toEqual([D]);
   });
 });
+
+describe('Recorder: MCX commodities (their own session hours)', () => {
+  it('records an MCX future at 20:00 (MCX open until 23:30) while NSE ticks at that hour are outside the session', () => {
+    const mcx = new ExchangeCalendar([], 'MCX');
+    const CRUDE: InstrumentKey = { symbol: 'CRUDEOIL', kind: 'FUT', expiry: '2026-11-19' };
+    const { writer, tick, at } = setup({ calendarOf: (s) => (s === 'CRUDEOIL' ? mcx : new ExchangeCalendar()) });
+    tick(CRUDE, t(20, 0, 5), { ltp: 5480, volume: 100 });
+    tick(CRUDE, t(20, 0, 30), { ltp: 5482, volume: 110, bid: 5481, ask: 5482 });
+    tick(FUT, t(20, 0, 10), { ltp: 25100, volume: 900 }); // NIFTY future after 15:30: state only
+    at(t(20, 2));
+    expect(writer.of(CRUDE)).toEqual([expect.objectContaining({ ts: t(20, 0), close: 5482, traded: true, volume: 10 })]);
+    expect(writer.of(FUT)).toEqual([]);
+    // 23:31: MCX closed too. The volume reported after the close traded during the session at an
+    // unknown time: booked as gapVolume of MCX's last minute (23:29), never as a trade of 23:31.
+    tick(CRUDE, t(23, 31, 0), { ltp: 5490, volume: 200 });
+    at(t(23, 33));
+    expect(writer.of(CRUDE).map((r) => r.ts)).toEqual([t(20, 0), t(23, 29)]);
+    expect(writer.of(CRUDE)[1]).toMatchObject({ traded: false, gapVolume: 90 });
+  });
+});

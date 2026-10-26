@@ -6,11 +6,10 @@
  * Nothing is synthesised. When a value cannot be obtained, code throws `NoLiveData` (HTTP 503)
  * or returns `null` for that field, and the UI shows the field blank with the reason.
  *
- * Time is real IST time: dates are 'YYYY-MM-DD', a session minute is minutes since 09:15
- * (0..375), timestamps are epoch milliseconds.
+ * Time is real IST time: dates are 'YYYY-MM-DD', a session minute is minutes since the exchange's
+ * open (NSE/BSE 09:15, 0..375; MCX 09:00, 0..870/895), timestamps are epoch milliseconds.
  */
-import type { McxService } from './kotak/mcx';
-import type { FiiDiiDay, Greeks, MarketClockInfo, ParticipantDay } from '@q26/core';
+import type { ExchangeCode, FiiDiiDay, Greeks, MarketClockInfo, ParticipantDay, UnderlyingKind } from '@q26/core';
 
 /* ------------------------------------------------------------------------------------------ */
 /* Errors                                                                                       */
@@ -34,10 +33,10 @@ export type OptKind = 'CE' | 'PE';
 export type InstKind = 'SPOT' | 'FUT' | OptKind;
 
 /** Exchange segment codes as used by Kotak Neo. */
-export type Segment = 'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo';
+export type Segment = 'nse_cm' | 'bse_cm' | 'nse_fo' | 'bse_fo' | 'mcx_fo';
 
 export interface InstrumentKey {
-  /** Underlying symbol as the app uses it: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX, RELIANCE … */
+  /** Underlying symbol as the app uses it: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX, RELIANCE, GOLD, CRUDEOIL … */
   symbol: string;
   kind: InstKind;
   /** 'YYYY-MM-DD' for FUT/CE/PE. */
@@ -50,7 +49,7 @@ export const keyId = (k: InstrumentKey): string => `${k.symbol}|${k.kind}|${k.ex
 
 /** A tradable listing resolved from the broker's instrument master (scrip master). */
 export interface Listing extends InstrumentKey {
-  exchange: 'NSE' | 'BSE';
+  exchange: ExchangeCode;
   segment: Segment;
   /** Broker instrument token (numeric string), or the index name for index spots ("Nifty 50"). */
   token: string;
@@ -65,13 +64,18 @@ export interface Listing extends InstrumentKey {
 export interface Underlying {
   symbol: string;
   name: string;
-  kind: 'index' | 'stock';
-  exchange: 'NSE' | 'BSE';
+  kind: UnderlyingKind;
+  exchange: ExchangeCode;
   /** Reference metadata (hand-maintained map), '' when unknown. */
   sector: string;
   lotSize: number;
   /** Most common gap between consecutive listed strikes, counted over every live expiry. */
   strikeStep: number;
+  /**
+   * The price the underlying is read from. Indices and stocks: the cash-market spot. MCX commodities
+   * have no cash market: their "spot" is the near-month FUTURE (this listing is that future's, with
+   * kind 'SPOT'), the reference price MCX itself quotes and the one the options settle into.
+   */
   spot: Listing;
 }
 
@@ -193,18 +197,36 @@ export interface ReferenceData {
   expiries(symbol: string, kind: 'OPT' | 'FUT'): string[];
   strikes(symbol: string, expiry: string): number[];
   listing(key: InstrumentKey): Listing | undefined;
+  /**
+   * Expiry of the future an option expiry is written on / priced off: the same expiry for NSE/BSE
+   * (undefined when no future of that expiry is listed: weekly expiries), the nearest future expiring
+   * on or after it for MCX (MCX options expire before their future and settle into it).
+   */
+  underlyingFuture(symbol: string, optionExpiry: string): string | undefined;
+  /**
+   * The instrument whose quotes stand for `key`: an MCX commodity's SPOT is its near-month future
+   * (there is no cash market), any other key is itself. Never throws (identity when unknown).
+   */
+  quoteKey(key: InstrumentKey): InstrumentKey;
   /** Reverse lookup used by the feed decoder. */
   byToken(segment: Segment, token: string): Listing | undefined;
 }
 
 export interface TradingCalendar {
+  /** Exchange whose sessions this calendar describes. */
+  readonly exchange: ExchangeCode;
+  /** Length of the continuous session of `date` in minutes (NSE/BSE 375; MCX 870 or 895). */
+  sessionMinutes(date: string): number;
+  /** Expiry instant: the close of the expiry day on this exchange. */
+  expiryTs(expiry: string): number;
   isTradingDay(date: string): boolean;
   prev(date: string): string;
   next(date: string): string;
   /** Trading days in [from, to]. */
   sessions(from: string, to: string): string[];
-  /** IST session position of a timestamp. */
+  /** IST session position of a timestamp; the minute counts from this exchange's open. */
   session(ts: number): { date: string; minute: number; status: 'pre-open' | 'open' | 'closed' };
+  /** Epoch ms of `minute` minutes after this exchange's open on `date`. */
   ts(date: string, minute: number): number;
 }
 
@@ -382,9 +404,10 @@ export interface Pricing {
    * while the session is open, otherwise the close (15:30 IST) of the last session before it, whose
    * premiums are the last ones (they do not decay overnight or over a weekend). With `ltt`, the
    * last-trade time of an LTP premium: that trade's time when it is of a live session, capped by the
-   * former. Callers report this time next to the IV/Greeks they show.
+   * former. Callers report this time next to the IV/Greeks they show. `symbol` picks its exchange's
+   * session (MCX closes at 23:30/23:55); default NSE/BSE.
    */
-  valuationTs(ts?: number, ltt?: number): number;
+  valuationTs(ts?: number, ltt?: number, symbol?: string): number;
   /**
    * Throws NoLiveData when neither a future, a put-call pair nor a spot price is live, when no live
    * spot is there to imply the carry from, or once the expiry has passed (carry is never NaN).
@@ -438,7 +461,10 @@ export interface TickMeta {
 
 export interface MarketDataProvider {
   ref: ReferenceData;
+  /** NSE/BSE calendar (the app clock, EOD files, indices and stocks). */
   calendar: TradingCalendar;
+  /** Calendar of the exchange `symbol` trades on (MCX for commodities, else `calendar`). */
+  calendarOf(symbol: string): TradingCalendar;
   clock: SessionClock;
   live: LiveMarket;
   intraday: IntradayStore;
@@ -455,8 +481,6 @@ export interface MarketDataProvider {
    * they are streamed in the 'user' tier, above the index chains and ad-hoc watches. Null clears it.
    */
   setUserContracts(fn: (() => Iterable<UserContract>) | null): void;
-  /** MCX commodity option chain; absent on providers without Kotak MCX access. */
-  mcx?: Pick<McxService, 'symbols' | 'chain'>;
   start(): Promise<void>;
   stop(): Promise<void>;
 }

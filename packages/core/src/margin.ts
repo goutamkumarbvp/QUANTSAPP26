@@ -20,6 +20,16 @@ export interface MarginParams {
 
 export const INDEX_MARGIN: MarginParams = { priceScanRange: 0.07, volScanRange: 0.25, exposurePct: 0.02, shortOptionMinPct: 0.0125 };
 export const STOCK_MARGIN: MarginParams = { priceScanRange: 0.12, volScanRange: 0.25, exposurePct: 0.035, shortOptionMinPct: 0.02 };
+/**
+ * MCX commodity options/futures (approximation of MCX SPAN: a wider price scan than indices for the
+ * energy and metal contracts, and MCX's additional/exposure margin). An estimate like the others.
+ */
+export const COMMODITY_MARGIN: MarginParams = { priceScanRange: 0.1, volScanRange: 0.3, exposurePct: 0.03, shortOptionMinPct: 0.02 };
+
+/** Margin parameters of an underlying kind. */
+export function marginParamsOf(kind: 'index' | 'stock' | 'commodity'): MarginParams {
+  return kind === 'index' ? INDEX_MARGIN : kind === 'commodity' ? COMMODITY_MARGIN : STOCK_MARGIN;
+}
 
 /** Valuation context of a margin estimate. */
 export interface MarginContext extends ValuationContext {

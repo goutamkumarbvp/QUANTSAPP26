@@ -412,7 +412,7 @@ describe('SFeedClient subscriptions', () => {
 
   it('rejects invalid subscriptions', () => {
     const h = harness();
-    const bad = [scrip('1,2'), scrip('a|b'), { segment: 'mcx_fo', token: '1', intent: 'scrips' } as unknown as SFeedSub, { segment: 'nse_fo', token: '1', intent: 'full' } as unknown as SFeedSub];
+    const bad = [scrip('1,2'), scrip('a|b'), { segment: 'cde_fo', token: '1', intent: 'scrips' } as unknown as SFeedSub, { segment: 'nse_fo', token: '1', intent: 'full' } as unknown as SFeedSub];
     const r = h.client.subscribe(bad);
     expect(r.accepted).toEqual([]);
     expect(r.rejected.map((x) => x.reason)).toEqual(['invalid', 'invalid', 'invalid', 'invalid']);

@@ -19,6 +19,8 @@ import type { MarketTools } from './market-tools';
 
 /** Index cards with an option-chain summary on the dashboard. */
 export const DASHBOARD_CHAINS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+/** MCX chains shown on the dashboard when the commodity is listed (options on futures). */
+export const DASHBOARD_COMMODITY_CHAINS = ['CRUDEOIL', 'GOLD'] as const;
 /** Rows per mover table. */
 export const DASHBOARD_MOVERS = 6;
 /** Official FII/DII days shown. */
@@ -27,6 +29,8 @@ export const DASHBOARD_FII_DII_DAYS = 5;
 export interface DashboardOptions {
   /** Index underlyings for the quote cards. */
   indices: string[];
+  /** MCX commodities for their quote cards (price = near-month future). */
+  commodities?: string[];
   /** Unexpected (non-data) errors of a card: reported here; the card reads "Internal error". */
   onError?: (where: string, e: unknown) => void;
 }
@@ -88,8 +92,10 @@ async function chainCard(md: MarketDataProvider, analytics: Analytics, tools: Ma
     const o = await analytics.orb(symbol, ts);
     const ev = o.evaluation;
     // Before 09:15 (and on a non-trading day) the range shown is the last session's: say so.
-    const today = md.calendar.session(ts).date;
-    const note = o.date === today ? null : md.calendar.isTradingDay(today) ? `Previous session (${o.date}): today's session opens at 09:15` : `Last session (${o.date}): ${today} is not a trading day`;
+    const cal = md.calendarOf(symbol);
+    const today = cal.session(ts).date;
+    const opens = cal.exchange === 'MCX' ? '09:00' : '09:15';
+    const note = o.date === today ? null : cal.isTradingDay(today) ? `Previous session (${o.date}): today's session opens at ${opens}` : `Last session (${o.date}): ${today} is not a trading day`;
     card.orb = { date: o.date, live: o.live, note, high: ev.high, low: ev.low, trend: ev.trend, whipsaw: ev.whipsaw, reentered: ev.reentered, summary: o.summary };
   } catch (e) {
     gaps.add('orb', reasonOf(e, `dashboard.${symbol}.orb`, onError));
@@ -128,6 +134,19 @@ export async function buildDashboard(md: MarketDataProvider, analytics: Analytic
   // The same reason for every index (e.g. the instrument master not loaded) is said once.
   const reasons = [...new Set(missing)];
   if (reasons.length) gaps.add('indices', reasons.slice(0, 4).join('; ') + (reasons.length > 4 ? ` (+${reasons.length - 4} more)` : ''));
+
+  // MCX commodity cards: the near-month future's live-session price (MCX trades 09:00–23:30/23:55).
+  const commodities: Quote[] = [];
+  const cMissing: string[] = [];
+  for (const s of opts.commodities ?? []) {
+    try {
+      commodities.push(underlyingQuote(md, s));
+    } catch (e) {
+      cMissing.push(`${s}: ${reasonOf(e, `dashboard.commodities.${s}`, onError)}`);
+    }
+  }
+  if (!(opts.commodities ?? []).length) gaps.add('commodities', 'No MCX commodity in the instrument master (the mcx_fo file is not loaded)');
+  else if (cMissing.length) gaps.add('commodities', cMissing.slice(0, 4).join('; ') + (cMissing.length > 4 ? ` (+${cMissing.length - 4} more)` : ''));
 
   // Stock movers: live spot change; near-future OI change and build-up.
   let gainers: DashboardMover[] = [];
@@ -184,6 +203,7 @@ export async function buildDashboard(md: MarketDataProvider, analytics: Analytic
   // Index chain cards, each part on its own.
   const chains: DashboardChain[] = [];
   for (const s of DASHBOARD_CHAINS) chains.push(await chainCard(md, analytics, tools, s, ts, onError));
+  for (const s of DASHBOARD_COMMODITY_CHAINS) if ((opts.commodities ?? []).includes(s)) chains.push(await chainCard(md, analytics, tools, s, ts, onError));
 
   // Official FII/DII (published after the close): the latest days loaded.
   let fiiDii: FiiDiiDay[] = [];
@@ -197,6 +217,7 @@ export async function buildDashboard(md: MarketDataProvider, analytics: Analytic
   return {
     clock: clockInfo(md),
     indices,
+    commodities,
     gainers,
     losers,
     oiGainers,

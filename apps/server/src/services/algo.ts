@@ -21,7 +21,6 @@ import {
   ALGO_PRESETS,
   ALGOS,
   algoById,
-  expiryTs,
   formatTimeIST,
   hhmmToMinutes,
   istParts,
@@ -47,13 +46,12 @@ import { NoLiveData } from '../live/types';
 import type { InstrumentKey, LiveQuote, MarketDataProvider, MinuteRecord, RawChain, UserContract } from '../live/types';
 import type { Db } from '../store/db';
 import type { Notifier } from './alerts';
-import { Gaps, httpError, liveDates, liveOptionExpiries, livePrice, notRecordedReason, optKey, r2, requireDate, sessionsBack, spotKey } from './live';
+import { Gaps, httpError, liveDates, liveOptionExpiries, livePrice, mdFor, notRecordedReason, optKey, r2, requireDate, sessionsBack, spotKey } from './live';
 import { instrumentLabel, type Pricer } from './pricer';
 import type { PaperBroker } from './trading';
 
 const MINUTE = 60_000;
 /** Session minutes (09:15 → 15:30). */
-const SESSION_MINUTES = 375;
 const MAX_RUNNING = 5;
 const MAX_EVENTS_PER_DAY = 400;
 const MAX_HISTORY = 250;
@@ -345,7 +343,7 @@ export class AlgoService {
 
   /** Snapshot at an expiry's close whose premiums are the settlement values (spot unknown here). */
   private settledSnapshot(symbol: string, day: { date: string; expiry: string }, lotSize: number, prices: Map<string, number>): AlgoSnapshot {
-    const ts = expiryTs(day.expiry);
+    const ts = this.md.calendarOf(symbol).expiryTs(day.expiry);
     return {
       ts,
       minuteOfDay: istParts(ts).minuteOfDay,
@@ -368,8 +366,8 @@ export class AlgoService {
    * that time only.
    */
   private replayDay(algo: AnyAlgo, p: Record<string, unknown>, date: string, opts: { until?: number; withSeries: boolean; recorded?: ReadonlySet<string> }): ReplayOutcome {
-    const md = this.md;
     const symbol = String(p.symbol);
+    const md = mdFor(this.md, symbol);
     const recordedDates = opts.recorded ?? new Set(md.intraday.sessions());
     if (!recordedDates.has(date)) return { ok: false, reason: notRecordedReason(md, date, 'market data') };
 
@@ -430,7 +428,8 @@ export class AlgoService {
     let maxLevel = 0;
     let last: AlgoSnapshot | null = null;
     let lastAlive: number | null = null;
-    const lastM = opts.until !== undefined ? Math.min(SESSION_MINUTES, Math.floor(md.calendar.session(opts.until).minute)) : SESSION_MINUTES;
+    const len = md.calendar.sessionMinutes(date);
+    const lastM = opts.until !== undefined ? Math.min(len, Math.floor(md.calendar.session(opts.until).minute)) : len;
     for (let m = 0; m <= lastM; m++) {
       const ts = md.calendar.ts(date, m);
       tape.seek(ts);
@@ -468,7 +467,7 @@ export class AlgoService {
       if (!opts.withSeries && isFinal(algo.phase(state))) break;
     }
 
-    const partial = opts.until !== undefined && opts.until < md.calendar.ts(date, SESSION_MINUTES);
+    const partial = opts.until !== undefined && opts.until < md.calendar.ts(date, md.calendar.sessionMinutes(date));
     const dayRec = { date, expiry, state, events, maxProfit, maxLoss, maxLevel };
     let unrealized: number | null = 0;
     let incomplete: string | undefined;
@@ -481,7 +480,7 @@ export class AlgoService {
       const exit = typeof p.exitTime === 'string' ? `the ${p.exitTime} exit` : 'the exit';
       if (!open.length) {
         incomplete = `Recording of ${date} ended at ${ended}, before the algo finished the day`;
-      } else if (expiryTs(expiry) <= md.calendar.ts(date, SESSION_MINUTES)) {
+      } else if (md.calendar.expiryTs(expiry) <= md.calendar.ts(date, md.calendar.sessionMinutes(date))) {
         const st = this.settlements(symbol, expiry, open);
         if (!st.missing.length) {
           const snap = this.settledSnapshot(symbol, { date, expiry }, lotSize, st.prices);
@@ -511,9 +510,9 @@ export class AlgoService {
   async backtestDay(algoId: string, input: Record<string, unknown>, date: string | undefined, nowTs: number = this.md.clock.now()): Promise<AlgoBacktestDay> {
     const algo = this.algo(algoId);
     const p = this.params(algo, input);
-    const md = this.md;
+    const md = mdFor(this.md, String(p.symbol));
     const d = requireDate(md, date);
-    const inProgress = d === md.calendar.session(nowTs).date && nowTs < md.calendar.ts(d, SESSION_MINUTES);
+    const inProgress = d === md.calendar.session(nowTs).date && nowTs < md.calendar.ts(d, md.calendar.sessionMinutes(d));
     const r = this.replayDay(algo, p, d, { withSeries: true, ...(inProgress ? { until: nowTs } : {}) });
     if (!r.ok) throw new NoLiveData(r.reason);
     return { ...r.day.sum, algoId, symbol: String(p.symbol), lotSize: r.day.lotSize, partial: inProgress, series: r.day.series, events: r.day.events };
@@ -527,13 +526,13 @@ export class AlgoService {
   async backtestRange(algoId: string, input: Record<string, unknown>, days: number, nowTs: number = this.md.clock.now()): Promise<AlgoBacktestRange> {
     const algo = this.algo(algoId);
     const p = this.params(algo, input);
-    const md = this.md;
+    const md = mdFor(this.md, String(p.symbol));
     const recordedDates = md.intraday.sessions();
     if (!recordedDates.length) throw new NoLiveData('No session has been recorded yet: backtests replay only sessions the app recorded from the live feed');
     const n = Math.max(1, Math.min(MAX_HISTORY, Math.floor(Number.isFinite(days) ? days : 1)));
     const today = md.calendar.session(nowTs).date;
     // Completed sessions only: today counts once the market has closed.
-    const lastDone = md.calendar.isTradingDay(today) && nowTs >= md.calendar.ts(today, SESSION_MINUTES) ? today : md.calendar.prev(today);
+    const lastDone = md.calendar.isTradingDay(today) && nowTs >= md.calendar.ts(today, md.calendar.sessionMinutes(today)) ? today : md.calendar.prev(today);
     const window = sessionsBack(md, lastDone, n);
     const recorded = new Set(recordedDates);
     const out: AlgoDaySummary[] = [];
@@ -723,7 +722,7 @@ export class AlgoService {
    * which fills only against a live bid/ask.
    */
   private async liveSnapshot(symbol: string, expiry: string, lotSize: number, ts: number): Promise<{ snap: AlgoSnapshot; waiting?: string }> {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const dates = liveDates(md);
     let chain: RawChain | null = null;
     let waiting: string | undefined;
@@ -833,7 +832,7 @@ export class AlgoService {
     const symbol = String(run.params.symbol);
     const lotSize = this.dayLotSize(day);
     const open = algo.openLegs(day.state) as AlgoLeg[];
-    if (expiryTs(day.expiry) <= ts) {
+    if (this.md.calendarOf(symbol).expiryTs(day.expiry) <= ts) {
       if (!open.length) {
         const snap = this.settledSnapshot(symbol, day, lotSize, new Map());
         const none: FillFn = () => {
@@ -886,7 +885,7 @@ export class AlgoService {
 
   private async tickRun(uid: string, run: StoredAlgoRun): Promise<void> {
     if (run.status !== 'running') return;
-    const md = this.md;
+    const md = mdFor(this.md, String(run.params.symbol));
     const ts = md.clock.now();
     const session = md.calendar.session(ts);
     if (session.status !== 'open') {
@@ -949,7 +948,7 @@ export class AlgoService {
 
   private view(run: StoredAlgoRun): AlgoRunView {
     const algo = this.algo(run.algoId);
-    const md = this.md;
+    const md = mdFor(this.md, String(run.params.symbol));
     const gaps = new Gaps();
     const day = run.day;
     let today: AlgoRunView['today'] = null;

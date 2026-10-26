@@ -3,7 +3,7 @@
  * breakevens, max profit / loss, probability of profit and net Greeks.
  */
 import { bsGreeks, bsPrice, intrinsic, type OptionType } from './bs';
-import { expiryTs, formatExpiry, yearsBetween } from './dates';
+import { expiryTs, formatExpiry, yearsBetween, type ExchangeCode } from './dates';
 import { normPdf } from './math';
 
 export type Side = 'BUY' | 'SELL';
@@ -44,6 +44,8 @@ export interface ValuationContext {
   carry?: (expiry: string) => number | null;
   /** Additive IV shift in vol points as decimal (0.02 = +2%). */
   ivShift?: number;
+  /** Exchange of the legs: their expiry instant is its close (NSE/BSE 15:30; MCX 23:30/23:55). Default NSE. */
+  exchange?: ExchangeCode;
 }
 
 /** A leg left out of a theoretical figure, and why. */
@@ -84,7 +86,7 @@ function carryOf(expiry: string, ctx: ValuationContext): number | null {
  */
 function legGapReason(leg: Leg, evalTs: number, ctx: ValuationContext, greeks = false): string | null {
   if (!isActive(leg) || leg.exitPrice != null) return null;
-  if (yearsBetween(evalTs, expiryTs(leg.expiry)) <= 0) return null;
+  if (yearsBetween(evalTs, expiryTs(leg.expiry, ctx.exchange)) <= 0) return null;
   if (leg.type === 'FUT' && greeks) return null;
   if (carryOf(leg.expiry, ctx) === null) return `no live forward (carry) for the ${formatExpiry(leg.expiry)} expiry`;
   if (leg.type !== 'FUT' && legIv(leg, ctx) === null) return 'no implied volatility (none could be solved from a live premium)';
@@ -110,7 +112,7 @@ export function strategyGaps(legs: readonly Leg[], evalTs: number, ctx: Valuatio
  * valued (an option before expiry with no IV, or no known carry). Intrinsic at/after expiry.
  */
 export function legTheoPrice(leg: Leg, S: number, evalTs: number, ctx: ValuationContext): number | null {
-  const T = yearsBetween(evalTs, expiryTs(leg.expiry));
+  const T = yearsBetween(evalTs, expiryTs(leg.expiry, ctx.exchange));
   if (T <= 0) return leg.type === 'FUT' ? S : intrinsic(leg.type, S, leg.strike); // settles at the underlying / intrinsic
   const q = carryOf(leg.expiry, ctx);
   if (q === null) return null;
@@ -140,11 +142,11 @@ export function strategyPnl(legs: readonly Leg[], S: number, evalTs: number, ctx
 }
 
 /** Timestamp of the first expiry among open legs (the payoff "at expiry" horizon). */
-export function nearestExpiryTs(legs: readonly Leg[]): number {
+export function nearestExpiryTs(legs: readonly Leg[], exchange?: ExchangeCode): number {
   let best = Infinity;
   for (const leg of legs) {
     if (!isActive(leg) || leg.exitPrice != null) continue;
-    best = Math.min(best, expiryTs(leg.expiry));
+    best = Math.min(best, expiryTs(leg.expiry, exchange));
   }
   return best;
 }
@@ -170,7 +172,7 @@ export function payoffCurve(
   for (const p of opts.extraPrices ?? []) if (p >= opts.lo && p <= opts.hi) set.add(p);
   for (const leg of legs) if (leg.type !== 'FUT' && leg.strike >= opts.lo && leg.strike <= opts.hi) set.add(leg.strike);
   const prices = [...set].sort((a, b) => a - b);
-  const expTs = nearestExpiryTs(legs);
+  const expTs = nearestExpiryTs(legs, ctx.exchange);
   const atExpiry = Number.isFinite(expTs) ? expTs : opts.targetTs;
   return {
     prices,
@@ -231,7 +233,7 @@ export function strategyGreeks(legs: readonly Leg[], S: number, nowTs: number, c
       g.delta += qty;
       return;
     }
-    const T = yearsBetween(nowTs, expiryTs(leg.expiry));
+    const T = yearsBetween(nowTs, expiryTs(leg.expiry, ctx.exchange));
     const reason = legGapReason(leg, nowTs, ctx, true);
     if (reason) {
       g.missing.push({ index, id: leg.id, label: legLabel(leg), reason });
@@ -279,7 +281,7 @@ export function probabilityOfProfit(
   nowTs: number,
   ctx: ValuationContext,
 ): { pop: number; expected: number } {
-  const expTs = nearestExpiryTs(legs);
+  const expTs = nearestExpiryTs(legs, ctx.exchange);
   if (!Number.isFinite(expTs)) {
     const v = strategyPnl(legs, S, nowTs, ctx);
     return { pop: v > 0 ? 1 : 0, expected: v };
@@ -327,7 +329,7 @@ export function analyzeStrategy(
   const greeks = strategyGreeks(legs, S, nowTs, ctx);
   const currentPnl = strategyPnl(active, S, nowTs, ctx);
   const missingNow = strategyGaps(legs, nowTs, ctx);
-  const expTs = nearestExpiryTs(active);
+  const expTs = nearestExpiryTs(active, ctx.exchange);
   if (!active.length || !Number.isFinite(expTs)) {
     return { maxProfit: realizedPnl, maxLoss: realizedPnl, breakevens: [], netPremium, pop: realizedPnl > 0 ? 1 : 0, expectedPnl: realizedPnl, riskReward: null, greeks, currentPnl, realizedPnl, missingNow, missingAtExpiry: [] };
   }

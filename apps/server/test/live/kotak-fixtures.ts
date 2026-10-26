@@ -265,7 +265,7 @@ export const nseExpiry = (date: string) => Date.parse(`${date}T09:00:00Z`) / 100
 export const bseExpiry = (date: string) => Date.parse(`${date}T10:00:00Z`) / 1000;
 
 export function foRow(o: {
-  seg?: 'nse_fo' | 'bse_fo';
+  seg?: 'nse_fo' | 'bse_fo' | 'mcx_fo';
   token: string | number;
   inst: string;
   name: string;
@@ -293,7 +293,7 @@ export function foRow(o: {
     lMultiplier: -1,
     lPrecision: 2,
     'dStrikePrice;': o.strike,
-    pExchange: seg === 'nse_fo' ? 'NSE' : 'BSE',
+    pExchange: seg === 'nse_fo' ? 'NSE' : seg === 'mcx_fo' ? 'MCX' : 'BSE',
     pInstName: o.inst,
     pExpiryDate: o.expiry,
     pCreditRating: '"            "',

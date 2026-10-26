@@ -4,6 +4,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
 import { ErrorBox, Spinner } from './components/ui';
 import { ApiError, ensureSession } from './lib/api';
+import { useMeta } from './lib/hooks';
 import { useApp } from './lib/store';
 import { useLiveConnection } from './lib/ws';
 
@@ -32,7 +33,6 @@ export function preloadPages(): void {
 const Home = page(() => import('./pages/Home'));
 const Tools = page(() => import('./pages/Tools'));
 const OptionChainPage = page(() => import('./pages/OptionChain'));
-const McxChain = page(() => import('./pages/McxChain'));
 const Top10 = page(() => import('./pages/Top10'));
 const Watchlist = page(() => import('./pages/Watchlist'));
 const FnoMarket = page(() => import('./pages/FnoMarket'));
@@ -82,6 +82,18 @@ export function ServerWaiting({ tries, reason }: { tries: number; reason: string
       </ul>
     </div>
   );
+}
+
+/** The old MCX Option Chain address: the Option Chain on the first listed commodity. */
+function McxRedirect() {
+  const meta = useMeta();
+  const setSymbol = useApp((s) => s.setSymbol);
+  const first = meta.data?.symbols.find((x) => x.kind === 'commodity')?.symbol;
+  useEffect(() => {
+    if (first) setSymbol(first);
+  }, [first, setSymbol]);
+  if (meta.isLoading) return <Spinner />;
+  return <Navigate to="/option-chain" replace />;
 }
 
 export function App() {
@@ -148,7 +160,8 @@ export function App() {
             <Route path="/" element={<Home />} />
             <Route path="/tools" element={<Tools />} />
             <Route path="/option-chain" element={<OptionChainPage />} />
-            <Route path="/mcx-chain" element={<McxChain />} />
+            {/* MCX commodities are ordinary symbols of every tab now (GOLD, CRUDEOIL … in the symbol picker). */}
+            <Route path="/mcx-chain" element={<McxRedirect />} />
             <Route path="/nifty-top10" element={<Top10 />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/fno-market" element={<FnoMarket />} />

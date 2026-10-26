@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { formatExpiry, type OptionChain } from '@q26/core';
+import { formatExpiry, type OptionChain, type UnderlyingKind } from '@q26/core';
 import { errorText } from '../lib/api';
 import { useExpiries, useMeta } from '../lib/hooks';
 import { cx } from './ui';
 
-/** Searchable underlying picker (indices first, then stocks). */
-export function SymbolSelect({ value, onChange, kind, className }: { value: string; onChange: (s: string) => void; kind?: 'index' | 'stock'; className?: string }) {
+/** Group order and headings of the symbol picker. */
+const KIND_ORDER: Record<UnderlyingKind, number> = { index: 0, commodity: 1, stock: 2 };
+const KIND_HEADING: Record<UnderlyingKind, string> = { index: 'Indices (NSE · BSE)', commodity: 'Commodities (MCX)', stock: 'Stocks (NSE F&O)' };
+
+/** Searchable underlying picker: indices, then MCX commodities, then stocks (each group headed). */
+export function SymbolSelect({ value, onChange, kind, className }: { value: string; onChange: (s: string) => void; kind?: UnderlyingKind; className?: string }) {
   const meta = useMeta();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -13,7 +17,9 @@ export function SymbolSelect({ value, onChange, kind, className }: { value: stri
   const list = useMemo(() => {
     const all = (meta.data?.symbols ?? []).filter((s) => !kind || s.kind === kind);
     const qq = q.trim().toUpperCase();
-    return qq ? all.filter((s) => s.symbol.includes(qq) || s.name.toUpperCase().includes(qq)) : all;
+    const hit = qq ? all.filter((s) => s.symbol.includes(qq) || s.name.toUpperCase().includes(qq)) : all;
+    // Stable within a group (the server's order), groups in KIND_ORDER.
+    return hit.map((s, i) => ({ s, i })).sort((a, b) => KIND_ORDER[a.s.kind] - KIND_ORDER[b.s.kind] || a.i - b.i).map((x) => x.s);
   }, [meta.data, q, kind]);
   useEffect(() => {
     if (!open) return;
@@ -29,10 +35,11 @@ export function SymbolSelect({ value, onChange, kind, className }: { value: stri
       </button>
       {open && (
         <div className="absolute left-0 z-40 mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-panel shadow-xl">
-          <input autoFocus className="input rounded-b-none border-0 border-b" placeholder="Search NIFTY, RELIANCE…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input autoFocus className="input rounded-b-none border-0 border-b" placeholder="Search NIFTY, GOLD, CRUDEOIL, RELIANCE…" value={q} onChange={(e) => setQ(e.target.value)} />
           <ul role="listbox" className="max-h-72 overflow-y-auto py-1">
-            {list.map((s) => (
+            {list.map((s, i) => (
               <li key={s.symbol}>
+                {(i === 0 || list[i - 1].kind !== s.kind) && !kind && <div className="px-3 pb-0.5 pt-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">{KIND_HEADING[s.kind]}</div>}
                 <button
                   className={cx('flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-panel2', s.symbol === value && 'text-accent')}
                   onClick={() => {
@@ -42,7 +49,7 @@ export function SymbolSelect({ value, onChange, kind, className }: { value: stri
                   }}
                 >
                   <span className="font-medium">{s.symbol}</span>
-                  <span className="ml-2 truncate text-2xs text-muted">{s.kind === 'index' ? `${s.exchange} index` : s.sector}</span>
+                  <span className="ml-2 truncate text-2xs text-muted">{s.kind === 'index' ? `${s.exchange} index` : s.kind === 'commodity' ? `MCX · ${s.name}` : s.sector}</span>
                 </button>
               </li>
             ))}
@@ -58,7 +65,6 @@ export function SymbolSelect({ value, onChange, kind, className }: { value: stri
   );
 }
 
-/** `at`: list the expiries that were recorded at that time (a recorded view) instead of the listed ones. */
 export function ExpirySelect({ symbol, value, onChange, futures, at }: { symbol: string; value: string | undefined; onChange: (e: string) => void; futures?: boolean; at?: number }) {
   const q = useExpiries(symbol, { at });
   const list = (futures ? q.data?.futures : q.data?.options) ?? [];

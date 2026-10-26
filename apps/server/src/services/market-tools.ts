@@ -16,13 +16,13 @@
  * (`coverage`); a response with nothing live is NoLiveData (HTTP 503).
  */
 import {
+  type UnderlyingKind,
   classifyBuildUp,
   expiryTs,
   formatCompact,
   formatExpiry,
   formatTimeIST,
   ORDER_FLOW_METHOD,
-  SESSION_MINUTES,
   type BuildUp,
   type DepthLevel,
   type OrderBookResponse,
@@ -58,6 +58,7 @@ import {
   sessionDateOf,
   spotKey,
   underlyingQuote,
+  mdFor,
 } from './live';
 
 const MINUTE = 60_000;
@@ -154,7 +155,7 @@ interface SnapRow {
 
 interface NearFutureRow {
   symbol: string;
-  kind: 'index' | 'stock';
+  kind: UnderlyingKind;
   expiry: string;
   ltp: number | null;
   changePct: number | null;
@@ -265,7 +266,7 @@ export class MarketTools {
     const out: SnapRow[] = [];
     const spots = new Map<string, number | null>();
     const liveSpot = (symbol: string): number | null => {
-      if (!spots.has(symbol)) spots.set(symbol, livePrice(md, md.live.quote(spotKey(symbol))));
+      if (!spots.has(symbol)) spots.set(symbol, livePrice(mdFor(md, symbol), md.live.quote(spotKey(symbol))));
       return spots.get(symbol) ?? null;
     };
     for (const r of raw) {
@@ -282,7 +283,7 @@ export class MarketTools {
       let atp = isPos(r.atp) ? r.atp : null;
       if (atp === null && ltp !== null) {
         const q = md.live.quote(optKey(r.symbol, expiry, type, strike));
-        if (q && isPos(q.atp) && livePrice(md, q) !== null) atp = q.atp;
+        if (q && isPos(q.atp) && livePrice(mdFor(md, r.symbol), q) !== null) atp = q.atp;
       }
       out.push({
         symbol: r.symbol,
@@ -321,7 +322,7 @@ export class MarketTools {
     const rows: NearFutureRow[] = [];
     let listed = 0;
     for (const u of md.ref.underlyings()) {
-      const fe = nearFuture(md, u.symbol);
+      const fe = nearFuture(mdFor(md, u.symbol), u.symbol);
       if (!fe) continue;
       listed++;
       let q: ReturnType<typeof futuresQuotes>[number] | undefined;
@@ -705,7 +706,7 @@ export class MarketTools {
 
   /** Live reference price of an underlying: spot, else the same-expiry future, else the near future. */
   private refPrice(symbol: string, expiry?: string): number | null {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const spot = livePrice(md, md.live.quote(spotKey(symbol)));
     if (spot !== null) return spot;
     for (const fe of [expiry, nearFuture(md, symbol)]) {
@@ -718,10 +719,10 @@ export class MarketTools {
 
   /** A contract listed now (400 when unlisted); the default option strike is the one nearest the live price. */
   private resolveListed(symbol: string, spec: ContractSpec, now: number): Contract {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     if (spec.type === 'FUT') {
-      const list = [...md.ref.expiries(s, 'FUT')].sort().filter((e) => expiryTs(e) > now);
+      const list = [...md.ref.expiries(s, 'FUT')].sort().filter((e) => md.calendar.expiryTs(e) > now);
       if (spec.expiry && !list.includes(spec.expiry)) throw httpError(400, `${s} future ${spec.expiry} is not listed`);
       const expiry = spec.expiry || list[0];
       if (!expiry) throw httpError(400, `${s} has no listed future`);
@@ -746,7 +747,7 @@ export class MarketTools {
 
   /** A contract recorded on a past (or finished) session; NoLiveData when it was not recorded. */
   private resolveRecorded(symbol: string, spec: ContractSpec, date: string): Contract {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const s = md.ref.underlying(symbol).symbol;
     requireRecorded(md, date, 'order flow');
     const keys = md.intraday.recordedKeys(date).filter((k) => k.symbol === s && k.kind === spec.type && !!k.expiry && k.expiry >= date);
@@ -772,7 +773,7 @@ export class MarketTools {
 
   /** Lot size of a contract: instrument master, else the official file of `date`; null when unknown. */
   private lotSizeOf(key: InstrumentKey, date: string): number | null {
-    const md = this.md;
+    const md = mdFor(this.md, key.symbol);
     const l = md.ref.listing(key);
     if (l) return l.lotSize;
     if (key.kind === 'FUT') return md.history.dailyFutures(key.symbol, date, date).find((f) => f.expiry === key.expiry)?.lotSize ?? null;
@@ -783,7 +784,7 @@ export class MarketTools {
   /** Previous-session close of a contract: the quote's, else the official close when it traded that day. */
   private prevCloseOf(key: InstrumentKey, q: LiveQuote): number | null {
     if (isPos(q.prevClose)) return q.prevClose;
-    const md = this.md;
+    const md = mdFor(this.md, key.symbol);
     const prevDate = md.calendar.prev(sessionDateOf(md, q.ts));
     if (key.kind === 'FUT') {
       const row = md.history.dailyFutures(key.symbol, prevDate, prevDate).find((f) => f.expiry === key.expiry);
@@ -802,7 +803,7 @@ export class MarketTools {
    * of its time with `bookLive: false`. History: the recorder's minutes of the session.
    */
   orderBook(symbol: string, spec: ContractSpec, ts: number, opts: ToolViewOptions = {}): OrderBookResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const now = ts;
     const c = this.resolveListed(symbol, spec, now);
     opts.touch?.(c.key, 'depth');
@@ -941,7 +942,7 @@ export class MarketTools {
    * ORDER_FLOW alerts); null (reason to `why`) when that future was not recorded this session.
    */
   lastMinuteFlow(symbol: string, ts: number, why?: (reason: string) => void): LastMinuteFlow | null {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     const fail = (reason: string): null => {
       why?.(reason);
       return null;
@@ -973,11 +974,11 @@ export class MarketTools {
    * a past session: a contract recorded that day. NoLiveData when nothing was recorded.
    */
   orderFlow(symbol: string, spec: ContractSpec, ts: number, opts: { date?: string; limit?: number } & ToolViewOptions = {}): OrderFlowResponse {
-    const md = this.md;
+    const md = mdFor(this.md, symbol);
     md.ref.underlying(symbol);
     const today = md.calendar.session(ts).date;
     const date = requireDate(md, opts.date || undefined);
-    const live = date === today && md.calendar.isTradingDay(today) && ts < md.calendar.ts(date, SESSION_MINUTES);
+    const live = date === today && md.calendar.isTradingDay(today) && ts < md.calendar.ts(date, md.calendar.sessionMinutes(date));
     let c: Contract;
     if (live) {
       c = this.resolveListed(symbol, spec, ts);
@@ -1072,7 +1073,7 @@ export class MarketTools {
     }
     const coverage = `${recs.length} recorded minutes ${formatTimeIST(first)}–${formatTimeIST(last.ts + MINUTE)}${missing > 0 ? `; ${missing} minutes in between have no record (no ticks received)` : ''}`;
 
-    const limit = Math.max(1, Math.min(SESSION_MINUTES, Math.floor(opts.limit ?? 60) || 60));
+    const limit = Math.max(1, Math.min(md.calendar.sessionMinutes(date), Math.floor(opts.limit ?? 60) || 60));
     return {
       symbol: c.symbol,
       instrument: c.label,

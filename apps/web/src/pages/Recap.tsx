@@ -161,7 +161,7 @@ export default function Recap() {
             <input className="input w-auto" type="date" value={effDate} min={recordingSince ?? undefined} max={clockDate} onChange={(e) => { setDate(e.target.value); setLegs([]); setNote(null); replay.reset(); }} />
           </Field>
           <Field label="Time (IST)">
-            <input className="input w-auto" type="time" min="09:15" max="15:29" value={time} onChange={(e) => { setTime(e.target.value); setLegs([]); setNote(null); replay.reset(); }} />
+            <input className="input w-auto" type="time" min="09:00" max="23:54" value={time} onChange={(e) => { setTime(e.target.value); setLegs([]); setNote(null); replay.reset(); }} />
           </Field>
           <Field label="Expiry (as recorded then)">
             <select className="input w-auto" value={ch?.expiry ?? ''} onChange={(e) => { setExpiry(e.target.value); setLegs([]); setNote(null); }} disabled={!ch}>

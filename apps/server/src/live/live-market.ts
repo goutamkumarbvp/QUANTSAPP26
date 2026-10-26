@@ -73,6 +73,8 @@ export interface KotakLiveMarketOptions {
   rest: LiveRest | null;
   restUnavailable?: string;
   calendar: TradingCalendar;
+  /** Calendar of a symbol's exchange (MCX for commodities); default `calendar`. */
+  calendarOf?: (symbol: string) => TradingCalendar;
   now?: () => number;
   timers?: LiveMarketTimers;
   logger?: LiveMarketLogger;
@@ -366,22 +368,42 @@ export class KotakLiveMarket implements LiveMarket {
 
   /** The cached quote when it has an LTP and is dated a live session (see liveDates); else undefined. */
   quote(key: InstrumentKey): LiveQuote | undefined {
-    return this.liveQuote(key, this.liveDates(this.now()));
+    return this.liveQuote(key, this.liveDates(this.now(), key.symbol));
   }
 
   quotes(keys: InstrumentKey[]): Map<string, LiveQuote> {
     const out = new Map<string, LiveQuote>();
-    const dates = this.liveDates(this.now());
+    const now = this.now();
+    const bySymbol = new Map<string, Set<string>>();
     for (const k of keys) {
+      let dates = bySymbol.get(k.symbol);
+      if (!dates) bySymbol.set(k.symbol, (dates = this.liveDates(now, k.symbol)));
       const q = this.liveQuote(k, dates);
       if (q) out.set(keyId(q.key), q);
     }
     return out;
   }
 
+  /**
+   * The instrument whose quotes stand for `key` (ReferenceData.quoteKey: an MCX commodity's SPOT is
+   * its near-month future), canonical. Identity while the master is not loaded.
+   */
+  private alias(key: InstrumentKey): InstrumentKey {
+    const k = canonicalKey(key);
+    try {
+      return canonicalKey(this.ref.quoteKey(k));
+    } catch {
+      return k;
+    }
+  }
+
+  /** The live quote of `key` (through its alias), reported under the key asked for. */
   private liveQuote(key: InstrumentKey, dates: Set<string>): LiveQuote | undefined {
-    const c = this.cells.get(keyId(canonicalKey(key)));
-    return c && c.q.ltp !== undefined && dates.has(this.dayOf(c.q.ts)) ? copyQuote(c.q) : undefined;
+    const c = this.cells.get(keyId(this.alias(key)));
+    if (!c || c.q.ltp === undefined || !dates.has(this.dayOf(c.q.ts))) return undefined;
+    const q = copyQuote(c.q);
+    q.key = canonicalKey(key);
+    return q;
   }
 
   onTick(listener: (q: LiveQuote, meta?: TickMeta) => void): () => void {
@@ -429,8 +451,8 @@ export class KotakLiveMarket implements LiveMarket {
    * session). A quote of an older session is never served as live (quote(), quotes(), refresh(),
    * chain()), even while no update of today has replaced it in the cache yet.
    */
-  private liveDates(now: number): Set<string> {
-    const cal = this.opts.calendar;
+  private liveDates(now: number, symbol?: string): Set<string> {
+    const cal = (symbol && this.opts.calendarOf?.(symbol)) || this.opts.calendar;
     const s = cal.session(now);
     const dates = new Set([s.date]);
     if (s.status !== 'open') dates.add(cal.isTradingDay(s.date) && now >= cal.ts(s.date, 0) ? s.date : cal.prev(s.date));
@@ -441,13 +463,20 @@ export class KotakLiveMarket implements LiveMarket {
   async refresh(keys: InstrumentKey[]): Promise<Map<string, LiveQuote>> {
     const out = new Map<string, LiveQuote>();
     if (!this.opts.rest) throw new NoLiveData(this.restUnavailable);
-    const byNeo = new Map<string, { key: InstrumentKey; listing: Listing }>();
+    // Keys asked for, by the instrument whose quotes stand for them (a commodity SPOT: its future).
+    const byNeo = new Map<string, { key: InstrumentKey; listing: Listing; asked: InstrumentKey[] }>();
     const unknown: string[] = [];
     for (const k of keys) {
-      const key = canonicalKey(k);
+      const asked = canonicalKey(k);
+      const key = this.alias(asked);
       const l = this.listingOf(key);
-      if (!l) unknown.push(keyId(key));
-      else byNeo.set(ScripMaster.neosymbol(l), { key, listing: l });
+      if (!l) unknown.push(keyId(asked));
+      else {
+        const neo = ScripMaster.neosymbol(l);
+        const hit = byNeo.get(neo);
+        if (hit) hit.asked.push(asked);
+        else byNeo.set(neo, { key, listing: l, asked: [asked] });
+      }
     }
     if (!byNeo.size) {
       if (unknown.length) throw new NoLiveData(`Not in the instrument master: ${unknown.slice(0, 5).join(', ')}${unknown.length > 5 ? ` (+${unknown.length - 5})` : ''}`);
@@ -462,7 +491,6 @@ export class KotakLiveMarket implements LiveMarket {
     }
     if (res.errors.length) this.noteRestError(new Error(res.errors[0].error));
     const receivedAt = this.now();
-    const dates = this.liveDates(receivedAt);
     for (const kq of res.quotes.values()) {
       let hit = byNeo.get(kq.neosymbol);
       if (!hit) {
@@ -476,7 +504,9 @@ export class KotakLiveMarket implements LiveMarket {
       if (!q) continue; // no LTP: nothing to report
       const merged = this.merge(q, { book: !indexSpot, stream: false });
       // An instrument whose latest update is of an older session (e.g. not traded today) is not live.
-      if (merged && dates.has(this.dayOf(merged.ts))) out.set(keyId(hit.key), merged);
+      if (merged && this.liveDates(receivedAt, hit.key.symbol).has(this.dayOf(merged.ts))) {
+        for (const asked of hit.asked) out.set(keyId(asked), { ...merged, key: asked });
+      }
     }
     return out;
   }
@@ -489,14 +519,14 @@ export class KotakLiveMarket implements LiveMarket {
 
   /** Replace the pinned (universe) subscriptions; callers pass them in priority order. */
   setPinned(entries: readonly WatchEntry[]): void {
-    this.pinned = entries.map((e) => ({ key: canonicalKey(e.key), tier: e.tier, level: e.level ?? 'quote' }));
+    this.pinned = entries.map((e) => ({ key: this.alias(e.key), tier: e.tier, level: e.level ?? 'quote' }));
     this.scheduleSync();
   }
 
   watch(keys: InstrumentKey[], level: WatchLevel = 'quote', ttlMs: number = this.adhocTtlMs): void {
     const now = this.now();
     for (const k of keys) {
-      const key = canonicalKey(k);
+      const key = this.alias(k);
       const id = keyId(key);
       const prev = this.adhoc.get(id);
       const keepLevel = prev && prev.expiresAt > now && LEVEL_RANK[prev.level] > LEVEL_RANK[level];
@@ -563,7 +593,7 @@ export class KotakLiveMarket implements LiveMarket {
 
   /** Whether an instrument is in the desired stream set (after the budget cut). */
   isStreamed(key: InstrumentKey): boolean {
-    return this.subscribedIds.has(keyId(canonicalKey(key)));
+    return this.subscribedIds.has(keyId(this.alias(key)));
   }
 
   private scheduleSync(): void {
@@ -732,8 +762,17 @@ export class KotakLiveMarket implements LiveMarket {
   }
 
   /** RawChain from the cache (live-date quotes only); null when no leg has a quote. */
+  /** Expiry of the future the options of `expiry` are written on (MCX: the one they settle into). */
+  private futureExpiry(symbol: string, expiry: string): string {
+    try {
+      return this.ref.underlyingFuture(symbol, expiry) ?? expiry;
+    } catch {
+      return expiry;
+    }
+  }
+
   private buildChain(symbol: string, expiry: string, now: number): RawChain | null {
-    const dates = this.liveDates(now);
+    const dates = this.liveDates(now, symbol);
     const live = (k: InstrumentKey): LiveQuote | undefined => this.liveQuote(k, dates);
     const rows: ChainRowLive[] = [];
     let ts = -Infinity;
@@ -751,7 +790,7 @@ export class KotakLiveMarket implements LiveMarket {
     const chain: RawChain = { symbol, expiry, ts, rows };
     const spot = live({ symbol, kind: 'SPOT' });
     if (spot) chain.spot = spot;
-    const futKey: InstrumentKey = { symbol, kind: 'FUT', expiry };
+    const futKey: InstrumentKey = { symbol, kind: 'FUT', expiry: this.futureExpiry(symbol, expiry) };
     const future = this.listingOf(futKey) ? live(futKey) : undefined;
     if (future) chain.future = future;
     return chain;
@@ -791,7 +830,8 @@ export class KotakLiveMarket implements LiveMarket {
     }
     // The chain's spot and future over REST when the stream does not carry them.
     const want: InstrumentKey[] = [{ symbol, kind: 'SPOT' }];
-    if (this.listingOf({ symbol, kind: 'FUT', expiry })) want.push({ symbol, kind: 'FUT', expiry });
+    const futKey: InstrumentKey = { symbol, kind: 'FUT', expiry: this.futureExpiry(symbol, expiry) };
+    if (this.listingOf(futKey)) want.push(futKey);
     const missing = want.filter((k) => !this.isStreamed(k) || !this.quote(k));
     if (missing.length) await this.refresh(missing).catch((e) => this.noteRestError(e));
   }
