@@ -50,6 +50,7 @@ import Surface from '../src/pages/vol/Surface';
 import FiiDii from '../src/pages/FiiDii';
 import Orb from '../src/pages/Orb';
 import OrderBook from '../src/pages/OrderBook';
+import { OrderTradeChart } from '../src/components/OrderTradeChart';
 import Participants from '../src/pages/Participants';
 import Recap from '../src/pages/Recap';
 import Scanners from '../src/pages/Scanners';
@@ -555,13 +556,23 @@ describe('Order Flow & Book (order flow)', () => {
     expect(out).toContain('Nothing in this minute could be classified as buy or sell');
     expect(out).not.toContain('Simulated');
   });
-  it('Order & Trade chart: buyer and seller initiated on ONE axis, cumulative delta on its own pane; the x axis runs to the last minute', () => {
+  type OtOption = { yAxis: unknown[]; xAxis: { max: number }[]; series: { name: string; type: string; yAxisIndex: number; xAxisIndex: number }[] };
+  it('Order & Trade chart, Line (Quantsapp) layout by default: price as a thin line over volume, buyer and seller initiated on ONE axis below; the x axis runs to the last minute', () => {
     render(<OrderBook />, [[key, data]]);
-    const ot = charts.find((c) => JSON.stringify(c.option).includes('Cumulative delta'))!.option as { yAxis: unknown[]; xAxis: { max: number }[]; series: { name: string; yAxisIndex: number; xAxisIndex: number }[] };
+    const ot = charts.find((c) => JSON.stringify(c.option).includes('Buyer initiated'))!.option as OtOption;
     const axisOf = (name: string) => ot.series.find((x) => x.name === name)!.yAxisIndex;
+    expect(ot.series.find((x) => x.name === 'Price')!.type).toBe('line');
+    expect(axisOf('Buyer initiated')).toBe(axisOf('Seller initiated'));
+    expect(ot.series.some((x) => x.name === 'Cumulative delta')).toBe(false);
+    expect(ot.xAxis[0].max).toBeGreaterThanOrEqual(data.minutes.at(-1)!.ts);
+  });
+  it('Order & Trade chart, Candles + delta layout: candles, and the cumulative delta on its own pane', () => {
+    render(<OrderTradeChart d={data} initialStyle="detailed" />, []);
+    const ot = charts.find((c) => JSON.stringify(c.option).includes('Cumulative delta'))!.option as OtOption;
+    const axisOf = (name: string) => ot.series.find((x) => x.name === name)!.yAxisIndex;
+    expect(ot.series.find((x) => x.name === 'Price')!.type).toBe('candlestick');
     expect(axisOf('Buyer initiated')).toBe(axisOf('Seller initiated'));
     expect(axisOf('Cumulative delta')).not.toBe(axisOf('Buyer initiated'));
-    expect(ot.xAxis[0].max).toBeGreaterThanOrEqual(data.minutes.at(-1)!.ts);
   });
   it('a window with no trades is "No trades", not a 50/50 bar', () => {
     const none = sum({ volume: 0, buyVolume: 0, sellVolume: 0, unclassified: 0, delta: 0, buyPct: null, unclassifiedPct: null, sentiment: 'No trades' });
