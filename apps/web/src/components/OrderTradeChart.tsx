@@ -6,14 +6,17 @@ import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/fo
 
 /**
  * Order & Trade chart (as on Quantsapp): 1-minute candles of the contract with volume, and below them the
- * buyer-initiated and seller-initiated quantity of every minute since the open, on one time axis.
+ * buyer-initiated (green) and seller-initiated (red) quantity of every minute since the open, superimposed on
+ * one scale, on one time axis.
  * Spikes (≥ 3× the median of the previous 30 minutes) mark large aggressive orders; the direction read
  * compares who initiated more quantity with what the price did. Recorded minutes only: a minute without
  * a record is a gap, never filled.
  */
 
 const MIN = 60_000;
-type Layout = 'overlay' | 'separate';
+/** Buyer initiated = green, seller initiated = red (fixed, the same in light and dark theme). */
+const GREEN = '#16a34a';
+const RED = '#dc2626';
 type Unit = 'qty' | 'lots';
 
 /** `[ts, v]` pairs with a null where whole minutes are missing, so a line never bridges a gap. */
@@ -31,7 +34,6 @@ const LABEL: Record<string, string> = { buyers: 'Buyers in control', sellers: 'S
 
 export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
   const c = useChartColors();
-  const [layout, setLayout] = useState<Layout>('overlay');
   const [unit, setUnit] = useState<Unit>('qty');
   const [lookback, setLookback] = useState(15);
   const lot = d.lotSize && d.lotSize > 0 ? d.lotSize : null;
@@ -45,11 +47,9 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
 
   const option = useMemo(() => {
     const m = d.minutes;
-    const sep = layout === 'separate';
-    // Pixel layout of the panes (the chart is 640 px high).
-    const grids = sep
-      ? [{ top: 34, height: 250 }, { top: 290, height: 50 }, { top: 362, height: 110 }, { top: 492, height: 110 }]
-      : [{ top: 34, height: 270 }, { top: 310, height: 60 }, { top: 392, height: 210 }];
+    // Pixel layout of the panes (the chart is 640 px high): price, volume, and buyer vs seller
+    // initiated quantity SUPERIMPOSED on ONE scale, so their sizes compare at a glance.
+    const grids = [{ top: 34, height: 270 }, { top: 310, height: 60 }, { top: 392, height: 210 }];
     const n = grids.length;
     const xMin = m.length ? m[0].ts - MIN / 2 : undefined;
     const xMax = m.length ? m[m.length - 1].ts + MIN / 2 : undefined;
@@ -63,16 +63,16 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
     }));
     const qtyAxis = (i: number) => ({ type: 'value', gridIndex: i, scale: false, min: 0, ...axis(c), axisLabel: { color: c.muted, fontSize: 10, formatter: (v: number) => formatCompact(v, 1) }, splitNumber: 3 });
     // Pane captions in the top-left corner of each pane.
-    const captions = (sep ? [`Volume`, `Buyer initiated (${unitLabel})`, `Seller initiated (${unitLabel})`] : [`Volume`, `Buyer vs seller initiated (${unitLabel})`]).map((text, i) => ({ text, left: 14, top: grids[i + 1].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
+    const captions = [`Volume`, `Buyer (green) vs seller (red) initiated — same scale (${unitLabel})`].map((text, i) => ({ text, left: 14, top: grids[i + 1].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
     const yAxis: Record<string, unknown>[] = [
       { type: 'value', gridIndex: 0, scale: true, ...axis(c), axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => formatIndian(v, 0) } },
       { type: 'value', gridIndex: 1, min: 0, ...axis(c, { splitLine: { show: false } }), axisLabel: { show: false } },
-      ...(sep ? [qtyAxis(2), qtyAxis(3)] : [qtyAxis(2)]),
+      qtyAxis(2),
     ];
     const spikePoints = (side: FlowSpike['side']) =>
       spikes
         .filter((s) => s.side === side)
-        .map((s) => ({ coord: [s.ts, s.qty / u], value: `${s.ratio}×`, itemStyle: { color: side === 'buy' ? c.up : c.down } }));
+        .map((s) => ({ coord: [s.ts, s.qty / u], value: `${s.ratio}×`, itemStyle: { color: side === 'buy' ? GREEN : RED } }));
     const markPoint = (side: FlowSpike['side']) => ({ symbol: 'pin', symbolSize: 28, label: { fontSize: 9, color: '#fff' }, data: spikePoints(side) });
     const candles = m.filter((x) => isNum(x.open) && isNum(x.close) && isNum(x.low) && isNum(x.high)).map((x) => [x.ts, x.open, x.close, x.low, x.high]);
     return {
@@ -95,11 +95,11 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
           barMaxWidth: 6,
           data: m.map((x) => ({ value: [x.ts, x.volume / u], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: x.partial ? 0.35 : 0.7 } })),
         },
-        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1.2 }, itemStyle: { color: c.up }, data: gapped(m, (x) => x.buyVolume / u), markPoint: markPoint('buy') },
-        { name: 'Seller initiated', type: 'line', xAxisIndex: sep ? 3 : 2, yAxisIndex: sep ? 3 : 2, symbol: 'none', lineStyle: { width: 1.2 }, itemStyle: { color: c.down }, data: gapped(m, (x) => x.sellVolume / u), markPoint: markPoint('sell') },
+        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1.5, color: GREEN }, itemStyle: { color: GREEN }, areaStyle: { color: GREEN, opacity: 0.08 }, data: gapped(m, (x) => x.buyVolume / u), markPoint: markPoint('buy') },
+        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1.5, color: RED }, itemStyle: { color: RED }, areaStyle: { color: RED, opacity: 0.08 }, data: gapped(m, (x) => x.sellVolume / u), markPoint: markPoint('sell') },
       ],
     };
-  }, [d.minutes, layout, c, spikes, u, unitLabel]);
+  }, [d.minutes, c, spikes, u, unitLabel]);
 
   const recent = [...spikes].reverse().slice(0, 8);
   return (
@@ -107,7 +107,6 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
       title={`Order & Trade chart — ${d.instrument} (1-minute, buyer vs seller initiated quantity)`}
       actions={
         <>
-          <Segmented size="xs" value={layout} onChange={setLayout} options={[{ value: 'overlay', label: 'One pane' }, { value: 'separate', label: 'Two panes' }]} />
           <Segmented size="xs" value={unit} onChange={setUnit} options={[{ value: 'qty', label: 'Qty' }, { value: 'lots', label: 'Lots' }]} />
           <Segmented size="xs" value={lookback} onChange={setLookback} options={[5, 15, 30].map((v) => ({ value: v, label: `${v}m` }))} />
         </>

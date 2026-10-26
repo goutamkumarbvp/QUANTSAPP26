@@ -34,6 +34,7 @@ describe('Order & Trade chart', () => {
     expect(html).toContain('1 buy · 0 sell');
     expect(html).toMatch(/Latest spikes:.*BUY 900 \(9×\)/);
     expect(html).toContain('Spike = at least 3× the median');
+    expect(html).not.toContain('Two panes'); // superimposed, one scale
     expect(html).not.toMatch(/NaN|undefined|Infinity/);
   });
 

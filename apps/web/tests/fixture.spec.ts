@@ -90,7 +90,8 @@ test('order book: Order & Trade chart — 1-min candles with buyer vs seller ini
   await expect(card.getByText(/Buyers in control|Sellers in control|Buying absorbed|Selling absorbed|Balanced/).first()).toBeVisible();
   await expect(card.getByText(/Spike = at least 3× the median/)).toBeVisible();
   await expect(card.locator('canvas').first()).toBeVisible();
-  await card.getByRole('tab', { name: 'Two panes' }).click();
+  // Buyer and seller initiated quantity are superimposed on ONE scale (no separate panes).
+  await expect(card.getByRole('tab', { name: 'Two panes' })).toHaveCount(0);
   await card.scrollIntoViewIfNeeded();
   await shot(page, info, 'order-trade-chart');
   await clean(page, watch);
