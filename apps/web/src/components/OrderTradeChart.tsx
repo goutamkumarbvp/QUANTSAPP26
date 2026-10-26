@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { flowDirection, flowSpikes, formatTimeIST, type FlowSpike, type OrderFlowResponse } from '@q26/core';
+import { flowDirection, flowSpikes, formatTimeIST, type OrderFlowResponse } from '@q26/core';
 import { Chart, axis, baseOption, useChartColors } from './Chart';
 import { Card, Coverage, cx, Segmented, Stat } from './ui';
 import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
@@ -49,7 +49,7 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
     const m = d.minutes;
     // Pixel layout of the panes (the chart is 640 px high): price, volume, and buyer vs seller
     // initiated quantity SUPERIMPOSED on ONE scale, so their sizes compare at a glance.
-    const grids = [{ top: 34, height: 270 }, { top: 310, height: 60 }, { top: 392, height: 210 }];
+    const grids = [{ top: 34, height: 250 }, { top: 290, height: 50 }, { top: 362, height: 250 }];
     const n = grids.length;
     const xMin = m.length ? m[0].ts - MIN / 2 : undefined;
     const xMax = m.length ? m[m.length - 1].ts + MIN / 2 : undefined;
@@ -69,11 +69,6 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
       { type: 'value', gridIndex: 1, min: 0, ...axis(c, { splitLine: { show: false } }), axisLabel: { show: false } },
       qtyAxis(2),
     ];
-    const spikePoints = (side: FlowSpike['side']) =>
-      spikes
-        .filter((s) => s.side === side)
-        .map((s) => ({ coord: [s.ts, s.qty / u], value: `${s.ratio}×`, itemStyle: { color: side === 'buy' ? GREEN : RED } }));
-    const markPoint = (side: FlowSpike['side']) => ({ symbol: 'pin', symbolSize: 28, label: { fontSize: 9, color: '#fff' }, data: spikePoints(side) });
     const candles = m.filter((x) => isNum(x.open) && isNum(x.close) && isNum(x.low) && isNum(x.high)).map((x) => [x.ts, x.open, x.close, x.low, x.high]);
     return {
       ...baseOption(c, { grid: grids.map((g) => ({ left: 8, right: 64, top: g.top, height: g.height, containLabel: false })) }),
@@ -95,8 +90,8 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
           barMaxWidth: 6,
           data: m.map((x) => ({ value: [x.ts, x.volume / u], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: x.partial ? 0.35 : 0.7 } })),
         },
-        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1.5, color: GREEN }, itemStyle: { color: GREEN }, areaStyle: { color: GREEN, opacity: 0.08 }, data: gapped(m, (x) => x.buyVolume / u), markPoint: markPoint('buy') },
-        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1.5, color: RED }, itemStyle: { color: RED }, areaStyle: { color: RED, opacity: 0.08 }, data: gapped(m, (x) => x.sellVolume / u), markPoint: markPoint('sell') },
+        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapped(m, (x) => x.buyVolume / u) },
+        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapped(m, (x) => x.sellVolume / u) },
       ],
     };
   }, [d.minutes, c, spikes, u, unitLabel]);
@@ -125,7 +120,7 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
           <p className={cx('text-sm', TONE[dir.read] === 'up' && 'text-up', TONE[dir.read] === 'down' && 'text-down', TONE[dir.read] === 'warn' && 'text-warn')}>{dir.text}</p>
         </div>
       )}
-      <Chart option={option} height={640} blank={d.minutes.length ? undefined : 'No recorded minute of this contract yet this session'} />
+      <Chart option={option} height={660} blank={d.minutes.length ? undefined : 'No recorded minute of this contract yet this session'} />
       {recent.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1 text-2xs">
           <span className="text-muted">Latest spikes:</span>
@@ -137,7 +132,7 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
         </div>
       )}
       <div className="mt-2 space-y-1">
-        <Coverage text={`Buyer initiated = trades at or above the ask; seller initiated = at or below the bid (estimated from live ticks; the rest is unclassified). Spike = at least 3× the median of the previous 30 minutes and larger than the other side. ${d.coverage}`} />
+        <Coverage text={`Each minute counts the quantity actually traded in that minute (the rise in cumulative volume, trade by trade): a trade at or above the ask is buyer initiated, at or below the bid seller initiated, inside the spread unclassified (estimated from live ticks). Spike = at least 3× the median of the previous 30 minutes and larger than the other side. ${d.coverage}`} />
         <Coverage text="Read: aggressive side ≥ 55% with the price moving its way = in control; moving the other way = absorbed (the passive side is soaking it up). An estimate to support a view, not a trading signal." />
       </div>
     </Card>
