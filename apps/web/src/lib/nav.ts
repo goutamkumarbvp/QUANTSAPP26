@@ -21,6 +21,7 @@ export const NAV: NavGroup[] = [
     items: [
       { to: '/', label: 'Home', icon: '⌂', desc: 'Indices, MCX commodities, movers, build-up and flows at a glance' },
       { to: '/watchlist', label: 'Watchlist', icon: '☆', desc: 'Track underlyings, futures and option contracts' },
+      { to: '/terminal', label: 'Market Terminal', icon: '▣', desc: 'Price with EMA, total CE vs PE OI with build-up, PCR (OI & COI) and volume vs OI on one screen' },
       { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up — indices, stocks and MCX commodities (GOLD, CRUDEOIL …)' },
       { to: '/nifty-top10', label: 'NIFTY Top 10 Desk', icon: '★', desc: 'The index heavyweights: futures, options and order flow side by side, with a transparent bias' },
       { to: '/fno-market', label: 'F&O Market', icon: '▦', desc: 'Every F&O future: heat-map, price vs OI build-up, sector breadth' },

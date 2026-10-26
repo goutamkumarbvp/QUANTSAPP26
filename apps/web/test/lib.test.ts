@@ -253,3 +253,15 @@ describe('feed state (clock chip)', () => {
     expect(feedView(clock({}, null), true).state).toBe('CONNECTING');
   });
 });
+
+describe('Market Terminal EMA', () => {
+  it('is blank until n closes, then the SMA seed and the exponential update', async () => {
+    const { ema } = await import('../src/pages/Terminal');
+    const e = ema([1, 2, 3, 4, 5], 3);
+    expect(e.slice(0, 2)).toEqual([null, null]);
+    expect(e[2]).toBe(2); // SMA of 1, 2, 3
+    expect(e[3]).toBeCloseTo(3); // 4·0.5 + 2·0.5
+    expect(e[4]).toBeCloseTo(4);
+    expect(ema([10], 20)).toEqual([null]);
+  });
+});

@@ -118,6 +118,18 @@ test('MCX commodities are ordinary symbols: home card, ticker, picker group and 
   await clean(page, watch);
 });
 
+test('Market Terminal: price with EMA, total CE vs PE OI with build-up, PCR (OI & COI) and volume vs OI blocks (test data)', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/terminal', /Market Terminal/);
+  for (const t of ['Price Chart (NIFTY)', 'Total OI (CE vs PE) with build-up', 'PCR (OI & COI)', 'Volume vs OI Analysis']) await expect(page.getByText(t, { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'MCX: CRUDE' })).toBeVisible();
+  await expect(page.getByText(/^PCR OI \d/)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(/^CE OI \d/).first()).toBeVisible();
+  await page.waitForTimeout(1500);
+  await shot(page, info, 'market-terminal');
+  await clean(page, watch);
+});
+
 test('PCR: change-in-OI PCR for today (put OI added ÷ call OI added) from the open', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/oi/pcr', /PCR & OI Trend/);
