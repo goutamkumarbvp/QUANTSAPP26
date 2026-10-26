@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { MaxPainResponse } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, Gaps, Loadable, PageHeader, Stat } from '../../components/ui';
 import { qs } from '../../lib/api';
@@ -12,16 +12,6 @@ import { useApp } from '../../lib/store';
 const HISTORY_STEP = 15 * 60_000;
 
 type Point = MaxPainResponse['history'][number];
-
-/** `[ts, value]` pairs of the recorded points; a null breaks the line where more than a step of recording is missing. */
-function line(pts: Point[], pick: (p: Point) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > HISTORY_STEP * 1.5) out.push([pts[i - 1].ts + HISTORY_STEP, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function MaxPain() {
   const symbol = useApp((s) => s.symbol);
@@ -61,8 +51,8 @@ export default function MaxPain() {
       xAxis: timeAxis(c),
       yAxis: { type: 'value', scale: true, ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => formatIndian(v, 0) } },
       series: [
-        { name: 'Max pain', type: 'line', symbol: 'none', itemStyle: { color: c.warn }, data: line(h, (p) => p.maxPain) },
-        { name: 'Spot', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, data: line(h, (p) => p.spot) },
+        { name: 'Max pain', type: 'line', symbol: 'none', itemStyle: { color: c.warn }, data: gapLine(h, HISTORY_STEP, (p) => p.maxPain) },
+        { name: 'Spot', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, data: gapLine(h, HISTORY_STEP, (p) => p.spot) },
       ],
     };
   }, [q.data, c]);

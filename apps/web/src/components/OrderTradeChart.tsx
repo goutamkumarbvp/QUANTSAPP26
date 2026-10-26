@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { flowDirection, flowSpikes, formatTimeIST, type Candle, type OrderFlowResponse } from '@q26/core';
-import { Chart, axis, baseOption, useChartColors } from './Chart';
+import { Chart, axis, baseOption, gapLine, useChartColors } from './Chart';
+import { Link } from 'react-router-dom';
+import { FlowSplit } from './trend';
 import { Card, Coverage, cx, Segmented, Stat } from './ui';
 import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
 
@@ -18,16 +20,6 @@ const MIN = 60_000;
 const GREEN = '#16a34a';
 const RED = '#dc2626';
 type Unit = 'qty' | 'lots';
-
-/** `[ts, v]` pairs with a null where whole minutes are missing, so a line never bridges a gap. */
-function gapped<T extends { ts: number }>(rows: readonly T[], pick: (r: T) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  rows.forEach((r, i) => {
-    if (i > 0 && r.ts - rows[i - 1].ts > MIN * 1.5) out.push([rows[i - 1].ts + MIN, null]);
-    out.push([r.ts, pick(r)]);
-  });
-  return out;
-}
 
 const TONE: Record<string, 'up' | 'down' | 'warn' | undefined> = { buyers: 'up', sellers: 'down', 'buying-absorbed': 'warn', 'selling-absorbed': 'warn', balanced: undefined };
 const LABEL: Record<string, string> = { buyers: 'Buyers in control', sellers: 'Sellers in control', 'buying-absorbed': 'Buying absorbed', 'selling-absorbed': 'Selling absorbed', balanced: 'Balanced' };
@@ -134,8 +126,8 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
           barMaxWidth: 6,
           data: m.map((x) => ({ value: [x.ts, x.volume / u], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: x.partial ? 0.35 : 0.7 } })),
         },
-        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapped(m, (x) => x.buyVolume / u) },
-        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapped(m, (x) => x.sellVolume / u) },
+        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapLine(m, MIN, (x) => x.buyVolume / u) },
+        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapLine(m, MIN, (x) => x.sellVolume / u) },
       ],
     };
   }, [d.minutes, d.instrument, c, spikes, u, unitLabel, spotCandles, forming, useSpot, topCaption, price?.live]);
@@ -148,6 +140,7 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
         <>
           <Segmented size="xs" value={unit} onChange={setUnit} options={[{ value: 'qty', label: 'Qty' }, { value: 'lots', label: 'Lots' }]} />
           <Segmented size="xs" value={lookback} onChange={setLookback} options={[5, 15, 30].map((v) => ({ value: v, label: `${v}m` }))} />
+          <Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>
         </>
       }
     >
@@ -162,6 +155,12 @@ export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: Pr
             <Stat label="Spikes today" value={`${sessionBuySpikes} buy · ${sessionSellSpikes} sell`} sub={`${dir.buySpikes} buy · ${dir.sellSpikes} sell in the window`} />
           </div>
           <p className={cx('text-sm', TONE[dir.read] === 'up' && 'text-up', TONE[dir.read] === 'down' && 'text-down', TONE[dir.read] === 'warn' && 'text-warn')}>{dir.text}</p>
+        </div>
+      )}
+      {d.currentMinute && (
+        <div className="mb-2 max-w-md">
+          <div className="mb-1 text-2xs text-muted">Minute in progress {formatTimeIST(d.currentMinute.ts)} ({d.currentMinute.elapsedSec}s so far)</div>
+          <FlowSplit flow={d.currentMinute} />
         </div>
       )}
       <Chart option={option} height={660} blank={d.minutes.length ? undefined : 'No recorded minute of this contract yet this session'} />

@@ -203,7 +203,7 @@ describe('Order book', () => {
     ...over,
   });
   const key = ['order-book', 'NIFTY', 'FUT', undefined, undefined];
-  const seeds = (b: OrderBookResponse | ApiError, flow?: OrderFlowResponse | ApiError): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [key, b], ...(flow ? ([[['order-flow', 'NIFTY', 'FUT', undefined, undefined, '', 5], flow]] as Seed[]) : [])];
+  const seeds = (b: OrderBookResponse | ApiError, flow?: OrderFlowResponse | ApiError): Seed[] => [[['meta'], meta], [['expiries', 'NIFTY', 'live'], expiries], [key, b], ...(flow ? ([[['order-trade', 'NIFTY', 'FUT', undefined, undefined], flow]] as Seed[]) : [])];
 
   it('shows only the levels the feed sent, blanks what it did not, and never invents totals', () => {
     const html = render(<OrderBook />, seeds(book()));
@@ -228,18 +228,19 @@ describe('Order book', () => {
     expect(html).not.toContain('border-down/40');
   });
 
-  it('order flow: feed gaps and partial minutes are labelled, unclassified is not split', () => {
+  it('order & trade card: the minute in progress labels feed gaps and partial minutes; unclassified is not split', () => {
     const sum = (over: Partial<OrderFlowSummary> = {}): OrderFlowSummary => ({ buyVolume: 150, sellVolume: 75, unclassified: 75, volume: 300, gapVolume: 1500, partialMinutes: 1, delta: 75, buyPct: 66.7, unclassifiedPct: 25, sentiment: 'Feed gap', ...over });
     const flow = {
       symbol: 'NIFTY', instrument: 'NIFTY 27-Oct-26 FUT', type: 'FUT', expiry: '2026-10-27', date: '2026-10-19', live: true, lotSize: 75, method: ORDER_FLOW_METHOD,
-      lastMinute: { ...sum(), ts: ts - 60_000, close: 24130 }, currentMinute: null, last5: null, session: sum(), minutes: [], signal: '', coverage: '10:30–10:41 recorded', expiries: [], strikes: [],
+      lastMinute: { ...sum(), ts: ts - 60_000, close: 24130 }, currentMinute: { ...sum(), ts, elapsedSec: 25 }, last5: null, session: sum(), minutes: [], signal: '', coverage: '10:30–10:41 recorded', expiries: [], strikes: [],
     } as unknown as OrderFlowResponse;
     const html = render(<OrderBook />, seeds(book(), flow));
     expect(html).toContain('feed gap: 1.5K not counted');
     expect(html).toContain('partial (lower bound)');
     expect(html).toContain('unclassified 75');
-    expect(html).toContain('estimated from live ticks (quote rule)');
-    expect(html).toContain('No recorded minute yet'); // last5 is null
+    expect(html).toContain('Minute in progress');
+    expect(html).toContain('(25s so far)');
+    expect(html).toContain('No recorded minute of this contract yet this session'); // no completed minute: blank chart, with the reason
     expect(html).not.toMatch(BAD);
   });
 });

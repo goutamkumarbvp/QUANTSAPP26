@@ -112,6 +112,19 @@ export function timeAxis(c: ChartColors, extra: Record<string, unknown> = {}): R
  */
 export const LINE_GAPS = { connectNulls: false, smooth: false } as const;
 
+/**
+ * `[ts, value]` line points; a null is inserted where more than one step (× 1.5) of data is missing, so a
+ * line never bridges a gap. `shift` moves every x (e.g. to the middle of a minute bar).
+ */
+export function gapLine<T extends { ts: number }>(pts: readonly T[], stepMs: number, pick: (p: T) => number | null, shift = 0): [number, number | null][] {
+  const out: [number, number | null][] = [];
+  pts.forEach((p, i) => {
+    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs + shift, null]);
+    out.push([p.ts + shift, pick(p)]);
+  });
+  return out;
+}
+
 type Series = { type?: string; data?: unknown[]; [k: string]: unknown };
 
 /** Whether a data point holds a real value (the value of `[x, y]`, of `{ value }`, of a tree node's children, or the number itself). */

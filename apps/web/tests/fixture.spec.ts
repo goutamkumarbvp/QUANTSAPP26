@@ -97,6 +97,30 @@ test('order book: Order & Trade chart — 1-min candles with buyer vs seller ini
   await clean(page, watch);
 });
 
+test('MCX option chain: commodity options priced on their future (test contracts), IV from premiums', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/mcx-chain', /MCX Option Chain/);
+  await expect(page.getByText(/CRUDEOIL options · expiry/)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('combobox', { name: 'Commodity' })).toContainText('GOLD');
+  await expect(page.getByText('5,480.00').first()).toBeVisible(); // the future it settles into
+  await expect(page.getByText('ATM strike')).toBeVisible();
+  await expect(page.getByText('Max pain', { exact: true })).toBeVisible();
+  await shot(page, info, 'mcx-chain');
+  await clean(page, watch);
+});
+
+test('PCR: change-in-OI PCR for today (put OI added ÷ call OI added) from the open', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/oi/pcr', /Put-Call Ratio/);
+  // Today's test chain is recorded for the monthly expiry (the weekly stays unrecorded today).
+  await page.getByRole('combobox', { name: 'Expiry' }).selectOption('2026-10-27');
+  await expect(page.getByText(/Change-in-OI PCR — today only/)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('Put OI added today')).toBeVisible();
+  await page.waitForTimeout(1500); // the line charts animate in
+  await shot(page, info, 'pcr-change');
+  await clean(page, watch);
+});
+
 test('IV chart: ATM IV solved from live premiums; IV rank blank with its reason', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/vol/iv-chart', /IV Chart/);
@@ -155,8 +179,10 @@ test('algo: one-day backtest replays only a recorded session', async ({ page }) 
   const watch = watchErrors(page);
   await open(page, '/algo', /Algo Strategies/);
   await page.getByRole('tab', { name: 'Backtest · one day' }).click();
-  // Today has no recorded chain: the reason, not a made-up replay.
-  await expect(page.locator('main [role="status"]').filter({ hasText: 'No recorded NIFTY option chain for 2026-10-12' })).toBeVisible({ timeout: 20_000 });
+  // A session with nothing recorded (before the recording started): the reason, not a made-up replay.
+  await page.getByRole('textbox', { name: 'Session date' }).fill('2026-10-08');
+  await expect(page.locator('main [role="status"]').filter({ hasText: /2026-10-08/ }).filter({ hasText: /recorded|recording/ })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('Trade log')).toHaveCount(0);
   // The previous session was recorded (fixture): it replays.
   await page.getByRole('textbox', { name: 'Session date' }).fill('2026-10-09');
   await expect(page.getByText('Trade log')).toBeVisible({ timeout: 20_000 });

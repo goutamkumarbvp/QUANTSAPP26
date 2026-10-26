@@ -195,7 +195,7 @@ function httpError(statusCode: number, message: string) {
 }
 
 /** IST calendar date of an epoch-ms instant. */
-const istDate = (ms: number) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+export const istDate = (ms: number) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
 
 /** lExpiryDate → IST 'YYYY-MM-DD' (undefined for -1/blank/garbage). */
 export function decodeExpiry(raw: string, segment: string): string | undefined {
@@ -305,7 +305,8 @@ export function strikeStepOf(...expiryStrikes: readonly (readonly number[])[]): 
 }
 
 const roundStrike = (k: number) => Math.round(k * 100) / 100;
-const fmtStrike = (k: number) => (Number.isInteger(k) ? String(k) : String(roundStrike(k)));
+/** A strike as the trading symbols spell it ('17500', '57.5'). */
+export const fmtStrike = (k: number) => (Number.isInteger(k) ? String(k) : String(roundStrike(k)));
 
 /** A downloaded/cached file that failed validation (nothing from it is used). */
 class FileRejected extends NoLiveData {}

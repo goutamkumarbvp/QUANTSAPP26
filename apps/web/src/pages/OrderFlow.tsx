@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { formatExpiry, ORDER_FLOW_METHOD, type OrderFlowMinute, type OrderFlowResponse, type OrderFlowSummary } from '@q26/core';
-import { Chart, axis, baseOption, LINE_GAPS, timeAxis, useChartColors } from '../components/Chart';
+import { Chart, axis, baseOption, gapLine, LINE_GAPS, timeAxis, useChartColors } from '../components/Chart';
 import { ExpirySelect, SessionDate, SymbolSelect } from '../components/pickers';
 import { Card, Chg, Coverage, cx, Dash, flowTone, Gaps, Loadable, PageHeader, Segmented } from '../components/ui';
 import { qs } from '../lib/api';
@@ -9,16 +9,6 @@ import { useChain, useLive } from '../lib/hooks';
 import { useApp, useTicks } from '../lib/store';
 
 type Unit = 'qty' | 'lots';
-
-/** `[x, value]` line points of the recorded minutes; a null breaks the line where whole minutes have no record. */
-function minuteLine(m: OrderFlowMinute[], pick: (x: OrderFlowMinute) => number | null, shift = 0): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  m.forEach((x, i) => {
-    if (i > 0 && x.ts - m[i - 1].ts > 60_000) out.push([m[i - 1].ts + 60_000 + shift, null]);
-    out.push([x.ts + shift, pick(x)]);
-  });
-  return out;
-}
 
 /**
  * Buyers / sellers / unclassified split of a window of recorded minutes (an estimate from live ticks, quote rule).
@@ -126,8 +116,8 @@ export default function OrderFlow() {
         // A faded bar is a partial minute: recording of the contract started inside it, so its volume is a lower bound.
         { name: 'Buy volume', type: 'bar', stack: 'flow', itemStyle: { color: c.up }, tooltip: { valueFormatter: (v: number | null) => formatCompact(v === null ? null : Math.abs(v)) }, data: m.map((x) => ({ value: [x.ts, u(x.buyVolume)], itemStyle: { opacity: x.partial ? 0.45 : 1 } })) },
         { name: 'Sell volume', type: 'bar', stack: 'flow', itemStyle: { color: c.down }, tooltip: { valueFormatter: (v: number | null) => formatCompact(v === null ? null : Math.abs(v)) }, data: m.map((x) => ({ value: [x.ts, u(-x.sellVolume)], itemStyle: { opacity: x.partial ? 0.45 : 1 } })) },
-        { name: 'Unclassified (not buy or sell)', type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1, type: 'dotted', color: c.muted }, itemStyle: { color: c.muted }, tooltip: { valueFormatter: (v: number | null) => formatCompact(v) }, data: minuteLine(m, (x) => u(x.unclassified)) },
-        { name: 'Price', type: 'line', yAxisIndex: 1, symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1.5 }, itemStyle: { color: c.accent }, tooltip: { valueFormatter: (v: number | null) => formatIndian(v, 2) }, data: minuteLine(m, (x) => x.close, 60_000) },
+        { name: 'Unclassified (not buy or sell)', type: 'line', symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1, type: 'dotted', color: c.muted }, itemStyle: { color: c.muted }, tooltip: { valueFormatter: (v: number | null) => formatCompact(v) }, data: gapLine(m, 60_000, (x) => u(x.unclassified)) },
+        { name: 'Price', type: 'line', yAxisIndex: 1, symbol: 'none', ...LINE_GAPS, lineStyle: { width: 1.5 }, itemStyle: { color: c.accent }, tooltip: { valueFormatter: (v: number | null) => formatIndian(v, 2) }, data: gapLine(m, 60_000, (x) => x.close, 60_000) },
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,7 +141,7 @@ export default function OrderFlow() {
       dataZoom: [{ type: 'inside' }],
       series: [
         { name: 'Delta (buy − sell)', type: 'bar', yAxisIndex: 0, itemStyle: { color: c.muted, opacity: 0.5 }, data: m.map((x) => ({ value: [x.ts, u(x.delta)], itemStyle: { color: x.delta >= 0 ? c.up : c.down, opacity: 0.5 } })) },
-        { name: 'Cumulative delta (classified volume)', type: 'line', yAxisIndex: 1, symbol: 'none', ...LINE_GAPS, lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: minuteLine(m, (x) => u(x.cumDelta)) },
+        { name: 'Cumulative delta (classified volume)', type: 'line', yAxisIndex: 1, symbol: 'none', ...LINE_GAPS, lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: gapLine(m, 60_000, (x) => u(x.cumDelta)) },
       ],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

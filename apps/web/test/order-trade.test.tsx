@@ -1,4 +1,6 @@
+import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ORDER_FLOW_METHOD, type OrderFlowMinute, type OrderFlowResponse } from '@q26/core';
 import { OrderTradeChart } from '../src/components/OrderTradeChart';
@@ -16,6 +18,8 @@ const D: OrderFlowResponse = {
   method: ORDER_FLOW_METHOD, lastMinute: null, currentMinute: null, last5: null, session: summary, minutes, signal: '', coverage: '21 recorded minutes 09:15–09:36', expiries: [], strikes: [],
 };
 
+const html = (node: ReactElement) => renderToStaticMarkup(<MemoryRouter>{node}</MemoryRouter>);
+
 beforeAll(() => {
   const g = globalThis as Record<string, unknown>;
   g.document ??= { documentElement: { classList: { contains: () => true, toggle: () => undefined } }, querySelector: () => null };
@@ -28,26 +32,26 @@ beforeAll(() => {
 
 describe('Order & Trade chart', () => {
   it('names the contract, reads the direction from buyer vs seller initiated quantity and the price, and lists spikes', () => {
-    const html = renderToStaticMarkup(<OrderTradeChart d={D} />).replaceAll('&amp;', '&');
-    expect(html).toContain('Order & Trade chart — NIFTY 27-Oct-26 FUT');
-    expect(html).toContain('Buyers in control');
-    expect(html).toContain('1 buy · 0 sell');
-    expect(html).toMatch(/Latest spikes:.*BUY 900 \(9×\)/);
-    expect(html).toContain('Spike = at least 3× the median');
-    expect(html).not.toContain('Two panes'); // superimposed, one scale
-    expect(html).not.toMatch(/NaN|undefined|Infinity/);
+    const out = html(<OrderTradeChart d={D} />).replaceAll('&amp;', '&');
+    expect(out).toContain('Order & Trade chart — NIFTY 27-Oct-26 FUT');
+    expect(out).toContain('Buyers in control');
+    expect(out).toContain('1 buy · 0 sell');
+    expect(out).toMatch(/Latest spikes:.*BUY 900 \(9×\)/);
+    expect(out).toContain('Spike = at least 3× the median');
+    expect(out).not.toContain('Two panes'); // superimposed, one scale
+    expect(out).not.toMatch(/NaN|undefined|Infinity/);
   });
 
   it('the security itself on top (its candles and live price); the contract\'s order flow below', () => {
     const candles = minutes.map((m) => ({ ts: m.ts, open: 24_990, high: 25_000, low: 24_980, close: 24_995, volume: null }));
-    const html = renderToStaticMarkup(<OrderTradeChart d={D} price={{ label: 'NIFTY', candles, live: { ltp: 24_996, ts: T0 + 21 * 60_000 } }} />).replaceAll('&amp;', '&');
-    expect(html).toContain('Order & Trade chart — NIFTY price · NIFTY 27-Oct-26 FUT order flow (1-minute)');
-    expect(html).toContain('Price change (future)');
+    const out = html(<OrderTradeChart d={D} price={{ label: 'NIFTY', candles, live: { ltp: 24_996, ts: T0 + 21 * 60_000 } }} />).replaceAll('&amp;', '&');
+    expect(out).toContain('Order & Trade chart — NIFTY price · NIFTY 27-Oct-26 FUT order flow (1-minute)');
+    expect(out).toContain('Price change (future)');
   });
 
   it('no recorded minute: the chart is blank with the reason, no read', () => {
-    const html = renderToStaticMarkup(<OrderTradeChart d={{ ...D, minutes: [] }} />);
-    expect(html).toContain('No recorded minute of this contract yet this session');
-    expect(html).not.toContain('Buyers in control');
+    const out = html(<OrderTradeChart d={{ ...D, minutes: [] }} />);
+    expect(out).toContain('No recorded minute of this contract yet this session');
+    expect(out).not.toContain('Buyers in control');
   });
 });

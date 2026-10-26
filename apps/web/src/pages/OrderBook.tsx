@@ -1,14 +1,12 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { type Candle, type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
-import { FlowSplit } from '../components/trend';
 import { OrderTradeChart, type PriceSource } from '../components/OrderTradeChart';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
 import { ExpirySelect, pickStrike, StrikeSelect, SymbolSelect } from '../components/pickers';
-import { AsOf, Card, Chg, Coverage, cx, Dash, ErrorState, flowTone, Gaps, Loadable, PageHeader, Segmented, Stat, Val } from '../components/ui';
+import { AsOf, Card, Chg, cx, Dash, ErrorState, Gaps, Loadable, PageHeader, Segmented, Stat, Val } from '../components/ui';
 import { errorText, isNoLiveData, qs } from '../lib/api';
-import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
+import { formatCompact, formatIndian, isNum } from '../lib/format';
 import { useChain, useLive } from '../lib/hooks';
 import { useApp, useTicks } from '../lib/store';
 import { useSubscribe } from '../lib/ws';
@@ -32,9 +30,8 @@ export default function OrderBook() {
   // For options wait for the strike, so the book and the flow are for the same contract.
   const ready = type === 'FUT' || k !== undefined;
   const q = useLive<OrderBookResponse>(['order-book', symbol, type, expiry, k], `/order-book/${symbol}${qs({ type, expiry, strike: k })}`, 1000, ready);
-  const flow = useLive<OrderFlowResponse>(['order-flow', symbol, type, expiry, k, '', 5], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 5 })}`, 2000, ready);
-  // The whole session, minute by minute, for the Order & Trade chart.
-  const trade = useLive<OrderFlowResponse>(['order-trade', symbol, type, expiry, k], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 375 })}`, 5000, ready);
+  // The whole session, minute by minute, for the Order & Trade chart (also its current-minute readout).
+  const trade = useLive<OrderFlowResponse>(['order-trade', symbol, type, expiry, k], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 375 })}`, 2000, ready);
   const tradeData = trade.isPlaceholderData || isNoLiveData(trade.error) ? undefined : trade.data;
   // The security itself on top of the chart: its recorded 1-minute candles and its live price.
   const spot = useLive<Candle[]>(['order-trade-spot', symbol], `/candles/${symbol}${qs({ interval: '1', days: 1 })}`, 5000);
@@ -49,7 +46,6 @@ export default function OrderBook() {
   const c = useChartColors();
   // Depth of another contract (kept while the new one loads) is never shown as this one's.
   const d = q.isPlaceholderData || isNoLiveData(q.error) ? undefined : q.data;
-  const f = flow.isPlaceholderData || isNoLiveData(flow.error) ? undefined : flow.data;
   const option = useMemo(() => {
     const h = d?.history ?? [];
     return {
@@ -156,34 +152,6 @@ export default function OrderBook() {
                 </div>
               </Card>
             </div>
-            {f ? (
-              <Card title={`1-minute order flow — ${f.instrument}`} actions={<Link to="/order-flow" className="text-xs text-accent">Full order flow →</Link>}>
-                <div className="grid gap-4 md:grid-cols-3">
-                  <div>
-                    <div className="mb-1 flex justify-between text-2xs text-muted">
-                      <span>Last minute {f.lastMinute ? `${formatSessionTime(f.lastMinute.ts)}–${formatSessionTime(f.lastMinute.ts + 60_000)}` : ''}</span>
-                      {f.lastMinute && <span className={flowTone(f.lastMinute.sentiment)}>{f.lastMinute.sentiment}</span>}
-                    </div>
-                    {f.lastMinute ? <FlowSplit flow={f.lastMinute} /> : <div className="text-xs text-muted">No completed recorded minute yet</div>}
-                  </div>
-                  <div>
-                    <div className="mb-1 text-2xs text-muted">Current minute {f.currentMinute ? `(${f.currentMinute.elapsedSec}s)` : ''}</div>
-                    {f.currentMinute ? <FlowSplit flow={f.currentMinute} /> : <div className="text-xs text-muted">—</div>}
-                  </div>
-                  <div>
-                    <div className="mb-1 flex justify-between text-2xs text-muted"><span>Last 5 minutes</span>{f.last5 && <span className={flowTone(f.last5.sentiment)}>{f.last5.sentiment}</span>}</div>
-                    {f.last5 ? <FlowSplit flow={f.last5} /> : <div className="text-xs text-muted">No recorded minute yet</div>}
-                  </div>
-                </div>
-                <div className="mt-3 space-y-0.5">
-                  <div className="text-2xs text-muted">Buyers / sellers are {f.method}; trades that cannot be classified are shown apart.</div>
-                  <Coverage text={f.coverage} label="Covers" />
-                  <Gaps gaps={f.gaps} />
-                </div>
-              </Card>
-            ) : flow.error ? (
-              <Card title="1-minute order flow"><ErrorState error={flow.error} compact title="No order flow" /></Card>
-            ) : null}
             <Card title="Depth & price through the session">
               <Chart option={option} height={300} blank={d.history.length ? undefined : d.gaps?.history ?? 'Nothing is recorded for this contract yet. The history is built from the recorder\'s minutes only (one point per 5 minutes), never filled in.'} />
               {d.history.length > 0 && <div className="mt-1 text-2xs text-muted">Recorded minutes only (one point per 5 minutes); a minute without a record is a gap in the line.</div>}

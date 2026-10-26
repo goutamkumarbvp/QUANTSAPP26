@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { describeStrategy, type StrategyChartPoint } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../components/Chart';
 import { IntervalSelect, SessionDate } from '../components/pickers';
 import { Card, Coverage, Empty, Loadable, PageHeader, Segmented, Stat } from '../components/ui';
 import { api, isNoLiveData } from '../lib/api';
@@ -10,16 +10,6 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useBuilder, useTicks } from '../lib/store';
 
 const MIN = 60_000;
-
-/** `[ts, value]` pairs of the points; a null breaks the line where more than a step of data is missing. */
-function line(pts: StrategyChartPoint[], stepMs: number, pick: (p: StrategyChartPoint) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function StrategyChart() {
   const b = useBuilder();
@@ -43,11 +33,11 @@ export default function StrategyChart() {
     const main =
       metric === 'greeks'
         ? [
-            { name: 'Delta', type: 'line', symbol: 'none', itemStyle: { color: c.series[0] }, data: line(pts, step, (p) => p.delta) },
-            { name: 'Theta (₹/day)', type: 'line', symbol: 'none', itemStyle: { color: c.series[1] }, data: line(pts, step, (p) => p.theta) },
-            { name: 'Vega (₹/1%)', type: 'line', symbol: 'none', itemStyle: { color: c.series[4] }, data: line(pts, step, (p) => p.vega) },
+            { name: 'Delta', type: 'line', symbol: 'none', itemStyle: { color: c.series[0] }, data: gapLine(pts, step, (p) => p.delta) },
+            { name: 'Theta (₹/day)', type: 'line', symbol: 'none', itemStyle: { color: c.series[1] }, data: gapLine(pts, step, (p) => p.theta) },
+            { name: 'Vega (₹/1%)', type: 'line', symbol: 'none', itemStyle: { color: c.series[4] }, data: gapLine(pts, step, (p) => p.vega) },
           ]
-        : [{ name: metric === 'pnl' ? 'P&L (₹)' : 'Net premium (pts)', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, areaStyle: { opacity: 0.06 }, data: line(pts, step, (p) => (metric === 'pnl' ? p.pnl : p.premium)) }];
+        : [{ name: metric === 'pnl' ? 'P&L (₹)' : 'Net premium (pts)', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, areaStyle: { opacity: 0.06 }, data: gapLine(pts, step, (p) => (metric === 'pnl' ? p.pnl : p.premium)) }];
     return {
       ...baseOption(c),
       tooltip: { ...(baseOption(c).tooltip as object), valueFormatter: (v: number | null) => formatFixed(v, 2) },
@@ -57,7 +47,7 @@ export default function StrategyChart() {
         { type: 'value', scale: true, ...axis(c, { splitLine: { show: false } }), axisLabel: { color: c.muted, formatter: (v: number) => formatIndian(v, 0) } },
       ],
       dataZoom: [{ type: 'inside' }],
-      series: [...main, { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: line(pts, step, (p) => p.spot) }],
+      series: [...main, { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(pts, step, (p) => p.spot) }],
     };
   }, [q.data, metric, interval, c]);
   // The latest window in which every leg traded (a window with a missing leg has no premium / P&L).

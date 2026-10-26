@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { formatTimeIST, pcrSentiment, type PcrResponse } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, Gaps, Loadable, PageHeader, Stat } from '../../components/ui';
 import { qs } from '../../lib/api';
@@ -14,16 +14,6 @@ const MIN = 60_000;
 const subset = (gaps: Record<string, string> | undefined, keep: (section: string) => boolean) => Object.fromEntries(Object.entries(gaps ?? {}).filter(([k]) => keep(k)));
 
 type Intraday = PcrResponse['intraday'][number];
-
-/** `[ts, value]` pairs of the recorded points; a null breaks the line where more than a step of recording is missing. */
-function line(pts: Intraday[], stepMs: number, pick: (p: Intraday) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function Pcr() {
   const symbol = useApp((s) => s.symbol);
@@ -46,8 +36,8 @@ export default function Pcr() {
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: line(pts, step, (p) => p.pcr), markLine: { symbol: 'none', silent: true, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
-        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: line(pts, step, (p) => p.spot) },
+        { name: 'PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: gapLine(pts, step, (p) => p.pcr), markLine: { symbol: 'none', silent: true, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
+        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(pts, step, (p) => p.spot) },
       ],
     };
   }, [q.data, interval, c]);
@@ -64,9 +54,9 @@ export default function Pcr() {
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'Change PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: line(pts, step, (p) => p.changePcr), markLine: { symbol: 'none', silent: true, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
-        { name: 'Put OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.up }, data: line(pts, step, (p) => p.peChange) },
-        { name: 'Call OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.down }, data: line(pts, step, (p) => p.ceChange) },
+        { name: 'Change PCR', type: 'line', symbol: 'none', itemStyle: { color: c.accent }, lineStyle: { width: 2 }, data: gapLine(pts, step, (p) => p.changePcr), markLine: { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 1 }] } },
+        { name: 'Put OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.up }, data: gapLine(pts, step, (p) => p.peChange) },
+        { name: 'Call OI added', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.down }, data: gapLine(pts, step, (p) => p.ceChange) },
       ],
     };
   }, [q.data, interval, c]);

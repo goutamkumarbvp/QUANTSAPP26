@@ -12,10 +12,11 @@
  */
 import { buildApp } from '../../src/app';
 import { loadConfig } from '../../src/config';
-import type { MinuteRecord } from '../../src/live/types';
+import type { InstrumentKey, MinuteRecord } from '../../src/live/types';
 import { futKey, spotKey } from '../../src/services/live';
 import { createServices } from '../../src/services';
 import { FakeProvider, loadSampleBook, type SampleBook } from './fake-provider';
+import { testMcx } from './e2e-mcx';
 
 const port = Number(process.env.E2E_FIXTURE_PORT ?? 8791);
 const host = process.env.HOST ?? '127.0.0.1';
@@ -62,18 +63,55 @@ function officialPreviousSession(): void {
     const [symbol, expiry] = id.split('|');
     return { symbol, date: d, expiry, close: Math.round(price * 0.995 * 20) / 20, oi: 1_000_000, volume: 250_000 };
   });
-  const w1 = book.expiries.NIFTY[0];
   const options = [];
-  for (const strike of p.ref.strikes('NIFTY', w1)) {
-    for (const type of ['CE', 'PE'] as const) {
-      const q = p.live.quote({ symbol: 'NIFTY', kind: type, expiry: w1, strike });
-      if (!q || q.oi === undefined) continue;
-      options.push({ symbol: 'NIFTY', date: d, expiry: w1, strike, type, close: Math.round(q.ltp * 1.02 * 20) / 20, oi: Math.round(q.oi * 0.9), volume: 20_000, lotSize: 75 });
+  // The weekly and the monthly NIFTY chain (the monthly carries today's recorded test chain, below).
+  for (const exp of [book.expiries.NIFTY[0], book.expiries.NIFTY[1]]) {
+    for (const strike of p.ref.strikes('NIFTY', exp)) {
+      for (const type of ['CE', 'PE'] as const) {
+        const q = p.live.quote({ symbol: 'NIFTY', kind: type, expiry: exp, strike });
+        if (!q || q.oi === undefined) continue;
+        options.push({ symbol: 'NIFTY', date: d, expiry: exp, strike, type, close: Math.round(q.ltp * 1.02 * 20) / 20, oi: Math.round(q.oi * 0.9), volume: 20_000, lotSize: 75 });
+      }
     }
   }
   p.history.writeFo(d, { futures, options });
 }
 officialPreviousSession();
+
+/**
+ * TEST chain minutes of today for the NIFTY MONTHLY (so the OI trend and the change-in-OI PCR have a
+ * session to draw; the weekly stays unrecorded today, which the algo replay test relies on): every strike's OI moves from the previous official close (90 %) to today's live OI,
+ * puts a little ahead of calls in the morning. Test values only.
+ */
+function recordTodayChain(): void {
+  const w1 = book.expiries.NIFTY[1];
+  const legs: { key: InstrumentKey; from: number; to: number; ltp: number; put: boolean }[] = [];
+  for (const strike of p.ref.strikes('NIFTY', w1)) {
+    for (const type of ['CE', 'PE'] as const) {
+      const key: InstrumentKey = { symbol: 'NIFTY', kind: type, expiry: w1, strike };
+      const q = p.live.quote(key);
+      if (!q || q.oi === undefined) continue;
+      legs.push({ key, from: Math.round(q.oi * 0.9), to: q.oi, ltp: q.ltp, put: type === 'PE' });
+    }
+  }
+  for (let m = 0; m < 105; m++) {
+    const ts = p.calendar.ts(book.date, m);
+    const share = (put: boolean) => Math.min(1, ((m + 1) / 105) * (put ? 1 + 0.4 * Math.sin(m / 17) : 1 - 0.2 * Math.sin(m / 23)));
+    let ceOi = 0;
+    let peOi = 0;
+    for (const l of legs) {
+      const oi = Math.round(l.from + (l.to - l.from) * Math.max(0, share(l.put)));
+      p.intraday.addMinutes(l.key, [{ ts, open: l.ltp, high: l.ltp, low: l.ltp, close: l.ltp, traded: true, oi }]);
+      if (l.put) peOi += oi;
+      else ceOi += oi;
+    }
+    p.intraday.writeChainMinutes([{ symbol: 'NIFTY', expiry: w1, rec: { ts, spot: 25000, ceOi, peOi, ceVolume: null, peVolume: null, pcr: ceOi > 0 ? peOi / ceOi : null, maxPain: 25000, atmStrike: 25000, atmIv: 0.14 } }]);
+  }
+}
+recordTodayChain();
+
+// TEST-ONLY MCX contracts and quotes (synthetic), so the MCX Option Chain page has something to show.
+(p as unknown as { mcx: ReturnType<typeof testMcx> }).mcx = testMcx(() => p.now(), book.date);
 
 const config = loadConfig({ port, host, persist: false, authSecret: process.env.AUTH_SECRET || 'e2e-fixture' });
 const svc = createServices(config, { provider: p, onError: (where, e) => console.warn(`${where} failed: ${e instanceof Error ? e.message : String(e)}`) });

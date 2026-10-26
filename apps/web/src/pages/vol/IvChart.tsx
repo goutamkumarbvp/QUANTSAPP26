@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { IvChartResponse } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Coverage, Gaps, Loadable, PageHeader, Segmented, Stat } from '../../components/ui';
 import { qs } from '../../lib/api';
@@ -11,16 +11,6 @@ import { useApp, useTicks } from '../../lib/store';
 const MIN = 60_000;
 
 type Intraday = IvChartResponse['intraday'][number];
-
-/** `[ts, value]` pairs of the recorded points; a null breaks the line where more than a step of recording is missing. */
-function line(pts: Intraday[], stepMs: number, pick: (p: Intraday) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function IvChart() {
   const symbol = useApp((s) => s.symbol);
@@ -45,10 +35,10 @@ export default function IvChart() {
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: 'ATM IV', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: line(pts, step, (p) => p.atmIv) },
-        { name: 'Call IV', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.down }, data: line(pts, step, (p) => p.ceIv) },
-        { name: 'Put IV', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.up }, data: line(pts, step, (p) => p.peIv) },
-        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: line(pts, step, (p) => p.spot) },
+        { name: 'ATM IV', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, data: gapLine(pts, step, (p) => p.atmIv) },
+        { name: 'Call IV', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.down }, data: gapLine(pts, step, (p) => p.ceIv) },
+        { name: 'Put IV', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.up }, data: gapLine(pts, step, (p) => p.peIv) },
+        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(pts, step, (p) => p.spot) },
       ],
     };
   }, [q.data, interval, c]);

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { OiTrendPoint, OiTrendResponse } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../../components/pickers';
 import { Card, Chg, Coverage, Gaps, Loadable, PageHeader, Segmented, Stat } from '../../components/ui';
 import { isNoLiveData, qs } from '../../lib/api';
@@ -9,19 +9,6 @@ import { useLive } from '../../lib/hooks';
 import { useApp, useTicks } from '../../lib/store';
 
 const MIN = 60_000;
-
-/**
- * `[ts, value]` pairs of the recorded points. Where more than one step is missing between two recorded
- * points a null is put in, so the line breaks there instead of bridging a stretch nothing was recorded for.
- */
-function line(pts: OiTrendPoint[], stepMs: number, pick: (p: OiTrendPoint) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function OiTrend() {
   const symbol = useApp((s) => s.symbol);
@@ -48,9 +35,9 @@ export default function OiTrend() {
       ],
       dataZoom: [{ type: 'inside' }],
       series: [
-        { name: view === 'change' ? 'Call OI change' : 'Call OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.down }, data: line(p, step, (x) => x[k[0]]) },
-        { name: view === 'change' ? 'Put OI change' : 'Put OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.up }, data: line(p, step, (x) => x[k[1]]) },
-        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: line(p, step, (x) => x.spot) },
+        { name: view === 'change' ? 'Call OI change' : 'Call OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.down }, data: gapLine(p, step, (x) => x[k[0]]) },
+        { name: view === 'change' ? 'Put OI change' : 'Put OI', type: 'line', symbol: 'none', areaStyle: { opacity: 0.08 }, itemStyle: { color: c.up }, data: gapLine(p, step, (x) => x[k[1]]) },
+        { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(p, step, (x) => x.spot) },
       ],
     };
   }, [pts, view, interval, c]);

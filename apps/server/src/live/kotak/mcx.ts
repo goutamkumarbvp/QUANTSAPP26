@@ -11,10 +11,10 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { bsGreeks, impliedVol, YEAR_MS, IST_OFFSET_MS, type McxChainResponse, type McxChainRow, type McxLeg, type McxSymbolsResponse } from '@q26/core';
+import { bsGreeks, DAY_MS, impliedVol, YEAR_MS, IST_OFFSET_MS, type McxChainResponse, type McxChainRow, type McxLeg, type McxSymbolsResponse } from '@q26/core';
 import { NoLiveData } from '../types';
 import type { KotakQuote, KotakRest } from './rest';
-import { csvRecords, decodeExpiry, pickScripFile } from './scripmaster';
+import { csvRecords, decodeExpiry, fmtStrike, istDate, pickScripFile } from './scripmaster';
 import type { FetchLike, KotakLogger } from './session';
 
 export interface McxContract {
@@ -39,9 +39,6 @@ export interface McxMaster {
   warnings: string[];
 }
 
-const DAY_MS = 86_400_000;
-const istDate = (ms: number) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
-const fmtStrike = (k: number) => String(Math.round(k * 100) / 100);
 /** Paise is the documented unit for nse_fo/bse_fo strikes; MCX is checked, not assumed. */
 const STRIKE_DIVISORS = [100, 1, 10_000, 10] as const;
 

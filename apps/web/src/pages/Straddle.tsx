@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { StraddlePoint, StraddleResponse } from '@q26/core';
-import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
+import { Chart, axis, baseOption, gapLine, timeAxis, useChartColors } from '../components/Chart';
 import { ExpirySelect, IntervalSelect, SessionDate, SymbolSelect } from '../components/pickers';
 import { Card, Coverage, Field, Gaps, Loadable, PageHeader, Segmented, Stat, Toggle } from '../components/ui';
 import { isNoLiveData, qs } from '../lib/api';
@@ -15,16 +15,6 @@ const SOURCE: Record<StraddleResponse['source'], string> = {
   kotak: 'Kotak 1-minute history',
   mixed: 'recorded data and Kotak 1-minute history',
 };
-
-/** `[ts, value]` pairs of the points; a null breaks the line where more than a step of data is missing. */
-function line(pts: StraddlePoint[], stepMs: number, pick: (p: StraddlePoint) => number | null): [number, number | null][] {
-  const out: [number, number | null][] = [];
-  pts.forEach((p, i) => {
-    if (i > 0 && p.ts - pts[i - 1].ts > stepMs * 1.5) out.push([pts[i - 1].ts + stepMs, null]);
-    out.push([p.ts, pick(p)]);
-  });
-  return out;
-}
 
 export default function Straddle() {
   const symbol = useApp((s) => s.symbol);
@@ -51,12 +41,12 @@ export default function Straddle() {
     const pts = q.data?.points ?? [];
     const stepMs = interval * MIN;
     const series: unknown[] = [
-      { name: width ? 'Strangle premium' : 'Straddle premium', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, areaStyle: { opacity: 0.06 }, data: line(pts, stepMs, (p) => p.straddle) },
-      { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: line(pts, stepMs, (p) => p.spot) },
+      { name: width ? 'Strangle premium' : 'Straddle premium', type: 'line', symbol: 'none', lineStyle: { width: 2 }, itemStyle: { color: c.accent }, areaStyle: { opacity: 0.06 }, data: gapLine(pts, stepMs, (p) => p.straddle) },
+      { name: 'Spot', type: 'line', yAxisIndex: 1, symbol: 'none', lineStyle: { width: 1 }, itemStyle: { color: c.muted }, data: gapLine(pts, stepMs, (p) => p.spot) },
     ];
     if (legsShown) {
-      series.push({ name: 'Call', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.down }, data: line(pts, stepMs, (p) => p.ce) });
-      series.push({ name: 'Put', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.up }, data: line(pts, stepMs, (p) => p.pe) });
+      series.push({ name: 'Call', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.down }, data: gapLine(pts, stepMs, (p) => p.ce) });
+      series.push({ name: 'Put', type: 'line', symbol: 'none', lineStyle: { width: 1, type: 'dashed' }, itemStyle: { color: c.up }, data: gapLine(pts, stepMs, (p) => p.pe) });
     }
     return {
       ...baseOption(c),
