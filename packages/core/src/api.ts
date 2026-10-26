@@ -1383,3 +1383,54 @@ export interface McxSymbolsResponse {
   symbols: { symbol: string; lotSize: number; optionExpiries: string[]; futureExpiries: string[] }[];
   warnings: string[];
 }
+
+// ---- NIFTY heavyweights desk (GET /api/top10): futures + options + flow of each stock, live ----
+
+export interface Top10Row extends DataGaps {
+  /** Position in the configured list (1 = first). */
+  rank: number;
+  symbol: string;
+  name: string;
+  sector: string;
+  lotSize: number | null;
+  spot: { ltp: number | null; changePct: number | null; ts: number | null };
+  future: { expiry: string; ltp: number | null; changePct: number | null; basis: number | null; basisPct: number | null; oi: number | null; oiChangePct: number | null; buildUp: import('./oi').BuildUp | null } | null;
+  options: {
+    expiry: string;
+    daysToExpiry: number;
+    atm: number | null;
+    atmIv: number | null;
+    ivChange: number | null;
+    pcr: number | null;
+    /** Today's put OI added ÷ call OI added (vs the previous close). */
+    changePcr: number | null;
+    maxPain: number | null;
+    /** Highest put-OI strike (support) and highest call-OI strike (resistance). */
+    support: number | null;
+    resistance: number | null;
+    /** ATM call + put premium (live), and as % of spot: the move the market prices to expiry. */
+    straddle: number | null;
+    straddlePct: number | null;
+  } | null;
+  flow: { window: number; buyPct: number | null; read: import('./ordertrade').FlowRead; sessionDelta: number | null; spikes: number } | null;
+  orbTrend: import('./orb').OrbTrend | null;
+  bias: import('./top10').Bias;
+}
+
+export interface Top10Response extends DataGaps {
+  ts: number;
+  /** Where the list of stocks comes from (configured; index weights are not in any live feed). */
+  listSource: string;
+  rows: Top10Row[];
+  basket: {
+    bullish: number;
+    bearish: number;
+    neutral: number;
+    /** Buyer share of all initiated quantity across the stocks' futures in the flow window (%). */
+    buyPct: number | null;
+    /** Median ATM IV across the stocks (%). */
+    medianIv: number | null;
+    advancing: number;
+    declining: number;
+  };
+}

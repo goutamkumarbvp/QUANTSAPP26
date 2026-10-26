@@ -11,6 +11,7 @@ const Home = lazy(() => import('./pages/Home'));
 const Tools = lazy(() => import('./pages/Tools'));
 const OptionChainPage = lazy(() => import('./pages/OptionChain'));
 const McxChain = lazy(() => import('./pages/McxChain'));
+const Top10 = lazy(() => import('./pages/Top10'));
 const Watchlist = lazy(() => import('./pages/Watchlist'));
 const FnoMarket = lazy(() => import('./pages/FnoMarket'));
 const FiiDii = lazy(() => import('./pages/FiiDii'));
@@ -75,6 +76,7 @@ export function App() {
             <Route path="/tools" element={<Tools />} />
             <Route path="/option-chain" element={<OptionChainPage />} />
             <Route path="/mcx-chain" element={<McxChain />} />
+            <Route path="/nifty-top10" element={<Top10 />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/fno-market" element={<FnoMarket />} />
             {/* Merged tabs: the old addresses still work. */}

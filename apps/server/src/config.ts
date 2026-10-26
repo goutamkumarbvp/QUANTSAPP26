@@ -41,7 +41,16 @@ export interface AppConfig {
   eodBackfillDays: number;
   /** Hard cap of SFeed (token, intent) subscriptions (SFEED_TOKEN_BUDGET, at most 2,700 of the server's 3,000, DESIGN.md §3). */
   sfeedTokenBudget: number;
+  /**
+   * NIFTY_TOP10: the heavyweight stocks of the NIFTY desk (comma-separated F&O symbols). Index weights
+   * are not in any live feed (NSE publishes them in monthly factsheets), so the list is configuration;
+   * their option chains are streamed tick by tick after the index chains.
+   */
+  focusStocks: string[];
 }
+
+/** Default NIFTY heavyweights (edit with NIFTY_TOP10 when the index weights change). */
+export const DEFAULT_TOP10 = ['HDFCBANK', 'RELIANCE', 'ICICIBANK', 'INFY', 'BHARTIARTL', 'LT', 'ITC', 'TCS', 'AXISBANK', 'SBIN'] as const;
 
 /** Kotak credentials, or the reason they are unusable (variable names only). */
 export function neoFromEnv(env: Record<string, string | undefined> = process.env): { neo: NeoEnv | null; neoError?: string } {
@@ -78,6 +87,12 @@ export function trustProxyFrom(raw: string | undefined): { trustProxy?: string |
   return { trustProxy: v };
 }
 
+/** NIFTY_TOP10 → up to 10 upper-case symbols, de-duplicated; empty or unset → DEFAULT_TOP10. */
+export function focusStocksFrom(raw: string | undefined): string[] {
+  const list = [...new Set((raw ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))].slice(0, 10);
+  return list.length ? list : [...DEFAULT_TOP10];
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const base: AppConfig = {
     port: num('PORT', 8787),
@@ -97,6 +112,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     ...neoFromEnv(),
     eodBackfillDays: Math.max(0, Math.floor(num('EOD_BACKFILL_DAYS', 30))),
     sfeedTokenBudget: Math.min(2700, Math.max(1, Math.floor(num('SFEED_TOKEN_BUDGET', 2700)))),
+    focusStocks: focusStocksFrom(process.env.NIFTY_TOP10),
   };
   return { ...base, ...overrides };
 }

@@ -8,7 +8,8 @@
  *   underlying near-month future of every underlying, and the stock spots (the chain spot of the
  *              stock-option sweep and the forward of stock options without a live future)
  *   chain      index option chains: the 2 nearest expiries, strikes within ±8 % of the centre,
- *              nearest strikes first so a budget cut drops the far wings
+ *              nearest strikes first so a budget cut drops the far wings; then the focus stocks'
+ *              (NIFTY heavyweights) nearest chains within ±5 %, after every index leg
  *   (ad-hoc watches are added by KotakLiveMarket.watch, below all of these)
  *
  * The chain centre is the live spot (else the live near future) and moves only when the price has
@@ -28,6 +29,10 @@ export interface UniverseOptions {
   recentrePct?: number;
   /** Stream the stock spots in the 'underlying' tier, default true. */
   stockSpots?: boolean;
+  /** Stocks whose nearest option chain is streamed too, after the index chains (the NIFTY heavyweights desk). */
+  focusStocks?: readonly string[];
+  /** Half-width of a focus stock's streamed strike band, default 0.05. */
+  focusBandPct?: number;
 }
 
 export type { UserContract } from './types';
@@ -52,7 +57,7 @@ export interface UniverseResult {
 /** Spot-only listings streamed with the indices. */
 export const EXTRA_INDEX_SPOTS: readonly string[] = ['INDIAVIX'];
 
-const DEFAULTS = { indexExpiries: 2, strikeBandPct: 0.08, recentrePct: 0.02, stockSpots: true } as const;
+const DEFAULTS = { indexExpiries: 2, strikeBandPct: 0.08, recentrePct: 0.02, stockSpots: true, focusBandPct: 0.05 } as const;
 
 const isPos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
 
@@ -137,6 +142,33 @@ export function computeUniverse(
   legs.sort((a, b) => a.dist - b.dist || a.order - b.order);
   for (const l of legs) add(l.key, 'chain');
 
+  // 5. Focus stocks (NIFTY heavyweights): the nearest expiry, a narrower band, after every index leg.
+  const focusLegs: typeof legs = [];
+  for (const symbol of o.focusStocks ?? []) {
+    let u;
+    try {
+      u = ref.underlying(symbol);
+    } catch {
+      notes.push(`${symbol}: focus stock not in the instrument master`);
+      continue;
+    }
+    const centre = centres.get(u.symbol);
+    if (!isPos(centre)) {
+      notes.push(`${u.symbol}: no live price to centre its option chain on yet`);
+      continue;
+    }
+    const expiry = ref.expiries(u.symbol, 'OPT')[0];
+    if (!expiry) continue;
+    const strikes = ref.strikes(u.symbol, expiry).filter((k) => k >= centre * (1 - o.focusBandPct) && k <= centre * (1 + o.focusBandPct));
+    chains.push({ symbol: u.symbol, expiry, centre, strikes });
+    for (const strike of strikes) {
+      const dist = Math.abs(strike / centre - 1);
+      for (const kind of ['CE', 'PE'] as const) focusLegs.push({ key: { symbol: u.symbol, kind, expiry, strike }, dist, order: focusLegs.length });
+    }
+  }
+  focusLegs.sort((a, b) => a.dist - b.dist || a.order - b.order);
+  for (const l of focusLegs) add(l.key, 'chain');
+
   return { entries, chains, notes };
 }
 
@@ -167,8 +199,9 @@ export class LiveUniverse {
     const { ref, priceOf } = this.opts;
     const pct = this.opts.options?.recentrePct ?? DEFAULTS.recentrePct;
     if (ref.ready()) {
+      const focus = new Set(this.opts.options?.focusStocks ?? []);
       for (const u of ref.underlyings()) {
-        if (u.kind !== 'index') continue;
+        if (u.kind !== 'index' && !focus.has(u.symbol)) continue;
         const p = priceOf(u.symbol);
         if (!isPos(p)) continue;
         const c = this.centres.get(u.symbol);

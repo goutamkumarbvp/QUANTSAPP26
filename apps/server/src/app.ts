@@ -13,6 +13,7 @@ import { SCANNERS, type ToolViewOptions } from './services/market-tools';
 import type { Services } from './services';
 import type { Operations } from './ops';
 import { buildDashboard } from './services/dashboard';
+import { buildTop10 } from './services/top10';
 import {
   buildOptionChain,
   candles,
@@ -492,6 +493,8 @@ export async function buildApp(
 
   // Home: every card filled on its own (index quotes, stock movers, build-up, 3 chain cards with
   // opening range and last-minute flow, official FII/DII); a card without data is blank with its gap.
+  // NIFTY heavyweights desk: futures + options + order flow of each configured stock (NIFTY_TOP10).
+  app.get('/api/top10', async () => buildTop10(md, an, svc.tools, svc.config.focusStocks, now(), (where, err) => app.log.error({ err, where }, 'top10 row failed')));
   app.get('/api/dashboard', async () => buildDashboard(md, an, svc.tools, { indices: indexSymbols(), onError: (where, err) => app.log.error({ err, where }, 'dashboard card failed') }));
 
   /* ---------------------------- trend: opening range & order flow ---------------------------- */

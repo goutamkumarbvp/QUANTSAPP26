@@ -59,6 +59,8 @@ export interface LiveProviderConfig {
   sfeedTokenBudget: number;
   /** Recorded sessions kept on disk; unset = keep all. */
   intradayRetentionDays?: number;
+  /** Stocks whose nearest option chain is streamed after the index chains (NIFTY_TOP10); unset = none. */
+  focusStocks?: readonly string[];
 }
 
 export interface ProviderTimers {
@@ -449,6 +451,8 @@ export class LiveProvider implements MarketDataProvider {
           return undefined;
         }
       },
+      // The NIFTY heavyweights desk: their option chains are streamed too (after the index chains).
+      options: { focusStocks: config.focusStocks ?? [] },
     });
 
     this.session?.onChange((st) => {

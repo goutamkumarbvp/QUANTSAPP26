@@ -12,3 +12,4 @@ export * from './algo';
 export * from './format';
 export * from './api';
 export * from './ordertrade';
+export * from './top10';

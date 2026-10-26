@@ -57,6 +57,7 @@ const provider = new LiveProvider(
     neoError: config.neoError,
     eodBackfillDays: config.eodBackfillDays,
     sfeedTokenBudget: config.sfeedTokenBudget,
+    focusStocks: config.focusStocks,
   },
   {
     logger: {

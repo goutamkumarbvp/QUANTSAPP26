@@ -61,6 +61,20 @@ describe('computeUniverse', () => {
     expect(narrow.chains[0].strikes).toEqual([24900, 24950, 25000, 25050, 25100]);
   });
 
+  it('focus stocks (NIFTY heavyweights): their nearest chain within ±5 %, after every index leg; no price → noted, never centred', () => {
+    const u = computeUniverse(sm, centres({ NIFTY: 25000, RELIANCE: 1400 }), { focusStocks: ['RELIANCE', 'INFY', 'NOPE'] });
+    const rel = u.chains.find((c) => c.symbol === 'RELIANCE')!;
+    expect(rel.expiry).toBe(MONTHLY);
+    expect(Math.min(...rel.strikes)).toBeGreaterThanOrEqual(1400 * 0.95);
+    expect(Math.max(...rel.strikes)).toBeLessThanOrEqual(1400 * 1.05);
+    const chain = u.entries.filter((e) => e.tier === 'chain');
+    const firstStock = chain.findIndex((e) => e.key.symbol === 'RELIANCE');
+    expect(firstStock).toBeGreaterThan(0);
+    expect(chain.slice(firstStock).every((e) => e.key.symbol === 'RELIANCE')).toBe(true); // after every NIFTY leg
+    expect(chain[firstStock].key.strike).toBe(1400); // nearest the money first
+    expect(u.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^INFY: no live price/), expect.stringMatching(/^NOPE: focus stock not in the instrument master/)]));
+  });
+
   it('an index without a live price gets no chain (noted), never a guessed centre', () => {
     const u = computeUniverse(sm, centres({ NIFTY: 25000 }));
     expect(u.chains.map((c) => c.symbol)).toEqual(['NIFTY', 'NIFTY']);

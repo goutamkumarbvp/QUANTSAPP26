@@ -152,11 +152,11 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
   start and the date of each official file loaded. A banner under the header explains blanks while the feed is
   not live.
 
-## Features (33 tabs, no tab repeats another's data)
+## Features (34 tabs, no tab repeats another's data)
 
 | Area | Tabs |
 |---|---|
-| Market | Home dashboard, Watchlist, Option Chain, MCX Option Chain, F&O Market (heat-map · futures build-up · sector breadth) |
+| Market | Home dashboard, Watchlist, Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), MCX Option Chain, F&O Market (heat-map · futures build-up · sector breadth) |
 | Order flow & trend | Order Flow & Book (Order & Trade chart: the security's price, buyer vs seller initiated quantity per minute on one scale, cumulative delta; session split; 5-level depth; minute table; past sessions), Opening range breakout |
 | Open interest | OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
 | Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |

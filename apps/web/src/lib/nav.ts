@@ -22,6 +22,7 @@ export const NAV: NavGroup[] = [
       { to: '/', label: 'Home', icon: '⌂', desc: 'Indices, movers, build-up and flows at a glance' },
       { to: '/watchlist', label: 'Watchlist', icon: '☆', desc: 'Track underlyings, futures and option contracts' },
       { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up' },
+      { to: '/nifty-top10', label: 'NIFTY Top 10 Desk', icon: '★', desc: 'The index heavyweights: futures, options and order flow side by side, with a transparent bias' },
       { to: '/mcx-chain', label: 'MCX Option Chain', icon: '⛽', desc: 'Commodity options (crude, gold, silver …) on live Kotak quotes' },
       { to: '/fno-market', label: 'F&O Market', icon: '▦', desc: 'Every F&O future: heat-map, price vs OI build-up, sector breadth' },
     ],

@@ -11,6 +11,7 @@ const ROUTES: [string, RegExp][] = [
   ['/', /Market Overview/],
   ['/tools', /All Tools/],
   ['/option-chain', /Option Chain/],
+  ['/nifty-top10', /NIFTY Top 10 — F&O Desk/],
   ['/watchlist', /Watchlist/],
   ['/fno-market', /Synopsis/],
   // Merged tabs: the old addresses redirect to the tab that now holds their data.

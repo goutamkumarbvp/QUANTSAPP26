@@ -55,7 +55,7 @@ test('scanners: a build-up row with its coverage note', async ({ page }, info) =
   const row = page.getByRole('row', { name: /RELIANCE/ }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toContainText('1,403.20');
-  await expect(page.getByText(/3 of 3 near-month futures/).first()).toBeVisible();
+  await expect(page.getByText(/12 of 12 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE + the 9 test heavyweights
   await shot(page, info, 'scanners');
   await clean(page, watch);
 });
@@ -118,6 +118,25 @@ test('PCR: change-in-OI PCR for today (put OI added ÷ call OI added) from the o
   await expect(page.getByText('Put OI added today')).toBeVisible();
   await page.waitForTimeout(1500); // the line charts animate in
   await shot(page, info, 'pcr-change');
+  await clean(page, watch);
+});
+
+test('NIFTY Top 10 desk: ten heavyweights with futures, options, flow and a bias with reasons (test stocks)', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/nifty-top10', /NIFTY Top 10 — F&O Desk/);
+  const table = page.locator('table').first();
+  await expect(table.locator('tbody tr')).toHaveCount(10, { timeout: 20_000 });
+  for (const s of ['HDFCBANK', 'RELIANCE', 'ICICIBANK', 'INFY', 'TCS', 'SBIN']) await expect(table.getByText(s, { exact: true })).toBeVisible();
+  await expect(page.getByText('Advancing / declining')).toBeVisible();
+  await expect(page.getByText(/Bullish|Bearish|Neutral/).first()).toBeVisible();
+  // A stock's readings: four votes, each with its reason.
+  await table.getByText('HDFCBANK', { exact: true }).click();
+  await expect(page.getByText('Bias readings')).toBeVisible();
+  await expect(page.getByText(/^Future: /).first()).toBeVisible();
+  await expect(page.getByText(/^Flow: /).first()).toBeVisible();
+  await expect(page.getByText(/^Options: change PCR /).first()).toBeVisible();
+  await page.waitForTimeout(500);
+  await shot(page, info, 'nifty-top10');
   await clean(page, watch);
 });
 
