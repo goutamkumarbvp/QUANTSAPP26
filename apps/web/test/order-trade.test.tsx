@@ -38,6 +38,13 @@ describe('Order & Trade chart', () => {
     expect(html).not.toMatch(/NaN|undefined|Infinity/);
   });
 
+  it('the security itself on top (its candles and live price); the contract\'s order flow below', () => {
+    const candles = minutes.map((m) => ({ ts: m.ts, open: 24_990, high: 25_000, low: 24_980, close: 24_995, volume: null }));
+    const html = renderToStaticMarkup(<OrderTradeChart d={D} price={{ label: 'NIFTY', candles, live: { ltp: 24_996, ts: T0 + 21 * 60_000 } }} />).replaceAll('&amp;', '&');
+    expect(html).toContain('Order & Trade chart — NIFTY price · NIFTY 27-Oct-26 FUT order flow (1-minute)');
+    expect(html).toContain('Price change (future)');
+  });
+
   it('no recorded minute: the chart is blank with the reason, no read', () => {
     const html = renderToStaticMarkup(<OrderTradeChart d={{ ...D, minutes: [] }} />);
     expect(html).toContain('No recorded minute of this contract yet this session');

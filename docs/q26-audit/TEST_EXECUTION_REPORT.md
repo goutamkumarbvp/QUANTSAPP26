@@ -8,7 +8,7 @@ baseline (`ea1be96`) results are in Q26_BASELINE_TEST_REPORT.md.
 | # | Command | Result | Log |
 |---|---|---|---|
 | 1 | `npm run typecheck` (core, server, web) | exit 0 | `typecheck.log` |
-| 2 | `npm test` | **974 passed, 0 failed**: core 87 (5 files), server 710 (41 files), web 177 (10 files) | `unit-tests.log` |
+| 2 | `npm test` | **975 passed, 0 failed**: core 87 (5 files), server 710 (41 files), web 178 (10 files) | `unit-tests.log` |
 | 3 | `npm run build` | exit 0 | `build.log` |
 | 4 | `npm run test:e2e` (Playwright, preinstalled Chromium; live-empty desktop and mobile, live-master, fixture) | **99 passed** (1.9 min) | `e2e.log` |
 | 5 | `npm audit --omit=dev` (runtime) | **0 vulnerabilities** | `npm-audit-prod.log` |
@@ -18,7 +18,7 @@ baseline (`ea1be96`) results are in Q26_BASELINE_TEST_REPORT.md.
 | 10 | Backup / restore drill: back up `db.json` + `.auth-secret`, wipe DATA_DIR, restore, start | Login works, data back, a token issued before the backup still valid | `restore-drill.log` |
 | 9 | Terminal output before and after | Baseline 2,073 lines (68 % per-request JSON); release about 20 readable IST lines at start-up | `terminal-run1-baseline-summary.log`, `terminal-run2.log` |
 
-Baseline → release: 867 → 974 unit tests and 96 → 99 e2e tests. No existing test was removed or weakened.
+Baseline → release: 867 → 975 unit tests and 96 → 99 e2e tests. No existing test was removed or weakened.
 
 ## 2. What the tests do NOT prove
 

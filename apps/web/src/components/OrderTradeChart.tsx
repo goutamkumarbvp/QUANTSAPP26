@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { flowDirection, flowSpikes, formatTimeIST, type OrderFlowResponse } from '@q26/core';
+import { useMemo, useRef, useState } from 'react';
+import { flowDirection, flowSpikes, formatTimeIST, type Candle, type OrderFlowResponse } from '@q26/core';
 import { Chart, axis, baseOption, useChartColors } from './Chart';
 import { Card, Coverage, cx, Segmented, Stat } from './ui';
 import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
@@ -32,7 +32,34 @@ function gapped<T extends { ts: number }>(rows: readonly T[], pick: (r: T) => nu
 const TONE: Record<string, 'up' | 'down' | 'warn' | undefined> = { buyers: 'up', sellers: 'down', 'buying-absorbed': 'warn', 'selling-absorbed': 'warn', balanced: undefined };
 const LABEL: Record<string, string> = { buyers: 'Buyers in control', sellers: 'Sellers in control', 'buying-absorbed': 'Buying absorbed', 'selling-absorbed': 'Selling absorbed', balanced: 'Balanced' };
 
-export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
+/** The security itself on top: its 1-minute candles, and its live price for the minute in progress. */
+export interface PriceSource {
+  /** e.g. "NIFTY (index)". */
+  label: string;
+  /** Recorded 1-minute candles of today (oldest first); undefined while loading or unavailable. */
+  candles?: readonly Candle[];
+  /** Why the candles are unavailable (then the contract's own candles are drawn instead). */
+  error?: string;
+  /** Live price and its time (WebSocket ticks). */
+  live?: { ltp: number; ts: number } | null;
+}
+
+/** OHLC of the minute in progress, built from the live ticks seen in this browser (open = first tick seen). */
+function useFormingCandle(live: PriceSource['live'], lastTs: number | null): [number, number, number, number, number] | null {
+  const ref = useRef<{ ts: number; o: number; h: number; l: number; c: number } | null>(null);
+  if (live && isNum(live.ltp)) {
+    const ts = Math.floor(live.ts / MIN) * MIN;
+    const cur = ref.current;
+    if (!cur || cur.ts !== ts) ref.current = { ts, o: live.ltp, h: live.ltp, l: live.ltp, c: live.ltp };
+    else ref.current = { ...cur, h: Math.max(cur.h, live.ltp), l: Math.min(cur.l, live.ltp), c: live.ltp };
+  }
+  const f = ref.current;
+  // Once the minute is recorded on the server, the recorded candle is drawn instead.
+  if (!f || (lastTs !== null && f.ts <= lastTs)) return null;
+  return [f.ts, f.o, f.c, f.l, f.h];
+}
+
+export function OrderTradeChart({ d, price }: { d: OrderFlowResponse; price?: PriceSource }) {
   const c = useChartColors();
   const [unit, setUnit] = useState<Unit>('qty');
   const [lookback, setLookback] = useState(15);
@@ -45,14 +72,27 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
   const sessionBuySpikes = spikes.filter((s) => s.side === 'buy').length;
   const sessionSellSpikes = spikes.length - sessionBuySpikes;
 
+  // Top pane: the security itself (e.g. the index); the contract's own candles only when it is unavailable.
+  const spotCandles = useMemo(
+    () => (price?.candles ?? []).filter((x) => isNum(x.open) && isNum(x.high) && isNum(x.low) && isNum(x.close)).map((x) => [x.ts, x.open, x.close, x.low, x.high] as [number, number, number, number, number]),
+    [price?.candles],
+  );
+  const useSpot = !!price && (spotCandles.length > 0 || !!price.live);
+  const lastSpotTs = spotCandles.length ? spotCandles[spotCandles.length - 1][0] : null;
+  const forming = useFormingCandle(useSpot ? price?.live : null, lastSpotTs);
+  const topCaption = useSpot
+    ? `${price!.label} · 1-minute · live`
+    : `${d.instrument} · 1-minute${price?.error ? ` (${price.label} not available: ${price.error})` : ''}`;
   const option = useMemo(() => {
     const m = d.minutes;
+    const sc = spotCandles;
     // Pixel layout of the panes (the chart is 640 px high): price, volume, and buyer vs seller
     // initiated quantity SUPERIMPOSED on ONE scale, so their sizes compare at a glance.
     const grids = [{ top: 34, height: 250 }, { top: 290, height: 50 }, { top: 362, height: 250 }];
     const n = grids.length;
-    const xMin = m.length ? m[0].ts - MIN / 2 : undefined;
-    const xMax = m.length ? m[m.length - 1].ts + MIN / 2 : undefined;
+    const times = [...m.map((x) => x.ts), ...sc.map((x) => x[0] as number), ...(forming ? [forming[0]] : [])];
+    const xMin = times.length ? Math.min(...times) - MIN / 2 : undefined;
+    const xMax = times.length ? Math.max(...times) + MIN / 2 : undefined;
     const xAxis = grids.map((_, i) => ({
       type: 'time',
       gridIndex: i,
@@ -63,13 +103,17 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
     }));
     const qtyAxis = (i: number) => ({ type: 'value', gridIndex: i, scale: false, min: 0, ...axis(c), axisLabel: { color: c.muted, fontSize: 10, formatter: (v: number) => formatCompact(v, 1) }, splitNumber: 3 });
     // Pane captions in the top-left corner of each pane.
-    const captions = [`Volume`, `Buyer (green) vs seller (red) initiated — same scale (${unitLabel})`].map((text, i) => ({ text, left: 14, top: grids[i + 1].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
+    const captions = [topCaption, `Volume — ${d.instrument}`, `Buyer (green) vs seller (red) initiated — ${d.instrument}, same scale (${unitLabel})`].map((text, i) => ({ text, left: 14, top: i === 0 ? grids[0].top - 2 : grids[i].top - 2, textStyle: { color: c.muted, fontSize: 10, fontWeight: 'normal' } }));
     const yAxis: Record<string, unknown>[] = [
       { type: 'value', gridIndex: 0, scale: true, ...axis(c), axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => formatIndian(v, 0) } },
       { type: 'value', gridIndex: 1, min: 0, ...axis(c, { splitLine: { show: false } }), axisLabel: { show: false } },
       qtyAxis(2),
     ];
-    const candles = m.filter((x) => isNum(x.open) && isNum(x.close) && isNum(x.low) && isNum(x.high)).map((x) => [x.ts, x.open, x.close, x.low, x.high]);
+    const own = m.filter((x) => isNum(x.open) && isNum(x.close) && isNum(x.low) && isNum(x.high)).map((x) => [x.ts, x.open, x.close, x.low, x.high]);
+    const candles = useSpot ? [...sc, ...(forming ? [forming] : [])] : own;
+    const liveLine = useSpot && price?.live && isNum(price.live.ltp)
+      ? { symbol: 'none', silent: true, lineStyle: { color: c.accent, type: 'dashed', width: 1 }, label: { position: 'end', color: '#fff', backgroundColor: c.accent, padding: [2, 4], fontSize: 10, formatter: () => formatIndian(price.live!.ltp, 2) }, data: [{ yAxis: price.live.ltp }] }
+      : undefined;
     return {
       ...baseOption(c, { grid: grids.map((g) => ({ left: 8, right: 64, top: g.top, height: g.height, containLabel: false })) }),
       // Refreshed every few seconds with a whole session of minutes: drawn at once, not animated.
@@ -81,7 +125,7 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
       yAxis: yAxis.map((y) => ({ ...y, position: 'right' })),
       dataZoom: [{ type: 'inside', xAxisIndex: grids.map((_, i) => i) }],
       series: [
-        { name: 'Price', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 8, itemStyle: { color: c.up, color0: c.down, borderColor: c.up, borderColor0: c.down }, data: candles },
+        { name: 'Price', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, barMaxWidth: 8, itemStyle: { color: c.up, color0: c.down, borderColor: c.up, borderColor0: c.down }, data: candles, ...(liveLine ? { markLine: liveLine } : {}) },
         {
           name: 'Volume',
           type: 'bar',
@@ -94,12 +138,12 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
         { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapped(m, (x) => x.sellVolume / u) },
       ],
     };
-  }, [d.minutes, c, spikes, u, unitLabel]);
+  }, [d.minutes, d.instrument, c, spikes, u, unitLabel, spotCandles, forming, useSpot, topCaption, price?.live]);
 
   const recent = [...spikes].reverse().slice(0, 8);
   return (
     <Card
-      title={`Order & Trade chart — ${d.instrument} (1-minute, buyer vs seller initiated quantity)`}
+      title={`Order & Trade chart — ${price && useSpot ? `${price.label} price · ` : ''}${d.instrument} order flow (1-minute)`}
       actions={
         <>
           <Segmented size="xs" value={unit} onChange={setUnit} options={[{ value: 'qty', label: 'Qty' }, { value: 'lots', label: 'Lots' }]} />
@@ -114,7 +158,7 @@ export function OrderTradeChart({ d }: { d: OrderFlowResponse }) {
             <Stat label="Buyer initiated" value={formatCompact(dir.buy / u, 2)} tone="up" sub={unitLabel} />
             <Stat label="Seller initiated" value={formatCompact(dir.sell / u, 2)} tone="down" sub={unitLabel} />
             <Stat label="Buyer share" value={isNum(dir.buyPct) ? `${dir.buyPct}%` : '—'} reason="Nothing was initiated" tone={isNum(dir.buyPct) ? (dir.buyPct >= 55 ? 'up' : dir.buyPct <= 45 ? 'down' : undefined) : undefined} />
-            <Stat label="Price change" value={isNum(dir.priceChange) ? (dir.priceChange > 0 ? `+${dir.priceChange}` : String(dir.priceChange)) : '—'} reason="No traded minute" tone={isNum(dir.priceChange) ? (dir.priceChange > 0 ? 'up' : dir.priceChange < 0 ? 'down' : undefined) : undefined} />
+            <Stat label={`Price change (${d.type === 'FUT' ? 'future' : 'contract'})`} value={isNum(dir.priceChange) ? (dir.priceChange > 0 ? `+${dir.priceChange}` : String(dir.priceChange)) : '—'} reason="No traded minute" tone={isNum(dir.priceChange) ? (dir.priceChange > 0 ? 'up' : dir.priceChange < 0 ? 'down' : undefined) : undefined} />
             <Stat label="Spikes today" value={`${sessionBuySpikes} buy · ${sessionSellSpikes} sell`} sub={`${dir.buySpikes} buy · ${dir.sellSpikes} sell in the window`} />
           </div>
           <p className={cx('text-sm', TONE[dir.read] === 'up' && 'text-up', TONE[dir.read] === 'down' && 'text-down', TONE[dir.read] === 'warn' && 'text-warn')}>{dir.text}</p>

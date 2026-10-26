@@ -1,16 +1,17 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
+import { type Candle, type OrderBookResponse, type OrderFlowResponse } from '@q26/core';
 import { FlowSplit } from '../components/trend';
-import { OrderTradeChart } from '../components/OrderTradeChart';
+import { OrderTradeChart, type PriceSource } from '../components/OrderTradeChart';
 import { Chart, axis, baseOption, timeAxis, useChartColors } from '../components/Chart';
 import { OrderTicket, type TicketSpec } from '../components/OrderTicket';
 import { ExpirySelect, pickStrike, StrikeSelect, SymbolSelect } from '../components/pickers';
 import { AsOf, Card, Chg, Coverage, cx, Dash, ErrorState, flowTone, Gaps, Loadable, PageHeader, Segmented, Stat, Val } from '../components/ui';
-import { isNoLiveData, qs } from '../lib/api';
+import { errorText, isNoLiveData, qs } from '../lib/api';
 import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/format';
 import { useChain, useLive } from '../lib/hooks';
-import { useApp } from '../lib/store';
+import { useApp, useTicks } from '../lib/store';
+import { useSubscribe } from '../lib/ws';
 
 /** "a / b" of two figures, each "—" when missing; null when both are. */
 function pair(a: number | null, b: number | null, f: (x: number) => string = (x) => x.toFixed(2)): string | null {
@@ -35,6 +36,16 @@ export default function OrderBook() {
   // The whole session, minute by minute, for the Order & Trade chart.
   const trade = useLive<OrderFlowResponse>(['order-trade', symbol, type, expiry, k], `/order-flow/${symbol}${qs({ type, expiry, strike: k, limit: 375 })}`, 5000, ready);
   const tradeData = trade.isPlaceholderData || isNoLiveData(trade.error) ? undefined : trade.data;
+  // The security itself on top of the chart: its recorded 1-minute candles and its live price.
+  const spot = useLive<Candle[]>(['order-trade-spot', symbol], `/candles/${symbol}${qs({ interval: '1', days: 1 })}`, 5000);
+  const spotLive = useTicks((s) => s.quotes[symbol]);
+  useSubscribe([symbol]);
+  const price: PriceSource = {
+    label: symbol,
+    candles: spot.isPlaceholderData ? undefined : spot.data,
+    error: spot.error ? errorText(spot.error) : undefined,
+    live: spotLive && isNum(spotLive.ltp) ? { ltp: spotLive.ltp, ts: spotLive.ts } : null,
+  };
   const c = useChartColors();
   // Depth of another contract (kept while the new one loads) is never shown as this one's.
   const d = q.isPlaceholderData || isNoLiveData(q.error) ? undefined : q.data;
@@ -182,7 +193,7 @@ export default function OrderBook() {
       </Loadable>
       <div className="mt-3">
         {tradeData ? (
-          <OrderTradeChart d={tradeData} />
+          <OrderTradeChart d={tradeData} price={price} />
         ) : trade.error ? (
           <Card title="Order & Trade chart"><ErrorState error={trade.error} compact title="No order & trade data" /></Card>
         ) : null}
