@@ -120,10 +120,15 @@ export function eodAtmIv(input: { date: string; underlying?: number; options: re
   return atm ? { iv: atm.iv, expiry } : null;
 }
 
+/** How long a file found missing is taken as missing without looking again (files appear by this store's writes). */
+const MISSING_TTL_MS = 60_000;
+
 export class HistoryFiles implements HistoryStore, HistoryWriter {
   private readonly root: string;
   private readonly cacheMax: number;
   private readonly cache = new Map<string, unknown>();
+  /** Paths found missing → when (see readJson). */
+  private readonly missing = new Map<string, number>();
   private readonly dates = new Map<EodKind, string[]>();
   private readonly ivCache = new Map<string, IvCacheFile>();
   readonly r: number;
@@ -144,6 +149,10 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
       this.cache.set(p, v);
       return v as T;
     }
+    // A file found missing is not looked for again for MISSING_TTL_MS (each look is a failed syscall and a
+    // thrown error, for every symbol and day a request touches); this store's own writes clear the mark.
+    const miss = this.missing.get(p);
+    if (miss !== undefined && Date.now() - miss < MISSING_TTL_MS) return undefined;
     let v: T | undefined;
     try {
       v = JSON.parse(fs.readFileSync(p, 'utf8')) as T;
@@ -152,11 +161,18 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
       if (code !== 'ENOENT' && !(e instanceof SyntaxError)) throw e;
       v = undefined; // missing, or unreadable (left by something other than this store)
     }
-    if (v !== undefined) this.remember(p, v);
+    if (v !== undefined) {
+      this.missing.delete(p);
+      this.remember(p, v);
+    } else {
+      if (this.missing.size >= this.cacheMax) this.missing.clear();
+      this.missing.set(p, Date.now());
+    }
     return v;
   }
 
   private remember(p: string, v: unknown): void {
+    this.missing.delete(p);
     this.cache.delete(p);
     this.cache.set(p, v);
     while (this.cache.size > this.cacheMax) this.cache.delete(this.cache.keys().next().value as string);
@@ -276,7 +292,7 @@ export class HistoryFiles implements HistoryStore, HistoryWriter {
     if (!KINDS.includes(kind)) throw new Error(`unknown EOD kind '${kind}'`);
     this.dates.delete(kind);
     const target = kind === 'fo' ? this.foDir(date) : this.dayFile(kind, date);
-    for (const p of [...this.cache.keys()]) if (p === target || p.startsWith(`${target}${path.sep}`)) this.cache.delete(p);
+    for (const m of [this.cache, this.missing]) for (const p of [...m.keys()]) if (p === target || p.startsWith(`${target}${path.sep}`)) m.delete(p);
   }
 
   /** Root of the EOD files (DATA_DIR/eod). */

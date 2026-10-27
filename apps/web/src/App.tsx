@@ -10,8 +10,11 @@ import { useLiveConnection } from './lib/ws';
 
 /** Every page's code loader, so the tabs can be fetched ahead of the first click. */
 const loaders: Array<() => Promise<unknown>> = [];
-function page<T extends ComponentType<object>>(load: () => Promise<{ default: T }>) {
+/** The loader of each page address (the opened address starts downloading before the session is ready). */
+const loaderOf = new Map<string, () => Promise<unknown>>();
+function page<T extends ComponentType<object>>(load: () => Promise<{ default: T }>, ...paths: string[]) {
   loaders.push(load);
+  for (const p of paths) loaderOf.set(p, load);
   return lazy(load);
 }
 
@@ -30,36 +33,43 @@ export function preloadPages(): void {
   idle(() => next(0));
 }
 
-const Home = page(() => import('./pages/Home'));
-const Tools = page(() => import('./pages/Tools'));
-const OptionChainPage = page(() => import('./pages/OptionChain'));
-const Top10 = page(() => import('./pages/Top10'));
-const Terminal = page(() => import('./pages/Terminal'));
-const ExpectedRange = page(() => import('./pages/ExpectedRange'));
-const Watchlist = page(() => import('./pages/Watchlist'));
-const FnoMarket = page(() => import('./pages/FnoMarket'));
-const Institutions = page(() => import('./pages/Institutions'));
-const StrikeOI = page(() => import('./pages/oi/StrikeOI'));
-const MultiStrike = page(() => import('./pages/oi/MultiStrike'));
-const Pcr = page(() => import('./pages/oi/Pcr'));
-const MaxPain = page(() => import('./pages/oi/MaxPain'));
-const Builder = page(() => import('./pages/Builder'));
-const Templates = page(() => import('./pages/Templates'));
-const Optimizer = page(() => import('./pages/Optimizer'));
-const Straddle = page(() => import('./pages/Straddle'));
-const StrategyChart = page(() => import('./pages/StrategyChart'));
-const Recap = page(() => import('./pages/Recap'));
-const Positions = page(() => import('./pages/Positions'));
-const Strategies = page(() => import('./pages/Strategies'));
-const Alerts = page(() => import('./pages/Alerts'));
-const ScannersHub = page(() => import('./pages/ScannersHub'));
-const OrderBook = page(() => import('./pages/OrderBook'));
-const Orb = page(() => import('./pages/Orb'));
-const Algo = page(() => import('./pages/Algo'));
-const Calculators = page(() => import('./pages/Calculators'));
-const Learn = page(() => import('./pages/Learn'));
+const Home = page(() => import('./pages/Home'), '/');
+const Tools = page(() => import('./pages/Tools'), '/tools');
+const OptionChainPage = page(() => import('./pages/OptionChain'), '/option-chain');
+const Top10 = page(() => import('./pages/Top10'), '/nifty-top10');
+const Terminal = page(() => import('./pages/Terminal'), '/terminal');
+const ExpectedRange = page(() => import('./pages/ExpectedRange'), '/expected-range');
+const Watchlist = page(() => import('./pages/Watchlist'), '/watchlist');
+const FnoMarket = page(() => import('./pages/FnoMarket'), '/fno-market');
+const Institutions = page(() => import('./pages/Institutions'), '/institutions');
+const StrikeOI = page(() => import('./pages/oi/StrikeOI'), '/oi/strikes');
+const MultiStrike = page(() => import('./pages/oi/MultiStrike'), '/oi/multi-strike');
+const Pcr = page(() => import('./pages/oi/Pcr'), '/oi/pcr');
+const MaxPain = page(() => import('./pages/oi/MaxPain'), '/oi/max-pain');
+const Builder = page(() => import('./pages/Builder'), '/builder');
+const Templates = page(() => import('./pages/Templates'), '/templates');
+const Optimizer = page(() => import('./pages/Optimizer'), '/optimizer');
+const Straddle = page(() => import('./pages/Straddle'), '/straddle');
+const StrategyChart = page(() => import('./pages/StrategyChart'), '/strategy-chart');
+const Recap = page(() => import('./pages/Recap'), '/recap');
+const Positions = page(() => import('./pages/Positions'), '/positions');
+const Strategies = page(() => import('./pages/Strategies'), '/strategies');
+const Alerts = page(() => import('./pages/Alerts'), '/alerts');
+const ScannersHub = page(() => import('./pages/ScannersHub'), '/scanners');
+const OrderBook = page(() => import('./pages/OrderBook'), '/order-book');
+const Orb = page(() => import('./pages/Orb'), '/orb');
+const Algo = page(() => import('./pages/Algo'), '/algo');
+const Calculators = page(() => import('./pages/Calculators'), '/calculators');
+const Learn = page(() => import('./pages/Learn'), '/learn');
 const Settings = page(() => import('./pages/Settings'));
 const NotFound = page(() => import('./pages/NotFound'));
+
+// The page of the address the app was opened at downloads now, alongside the session check (not after it).
+// `/learn/<lesson>` is Learn's.
+if (typeof window !== 'undefined') {
+  const at = window.location.pathname.startsWith('/learn/') ? '/learn' : window.location.pathname;
+  loaderOf.get(at)?.().catch(() => undefined);
+}
 
 /** Longest pause between two tries while the server does not answer. */
 const SERVER_RETRY_MAX_MS = 10_000;

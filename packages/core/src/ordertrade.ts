@@ -51,22 +51,23 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-export function flowSpikes(minutes: readonly OrderTradeMinute[], opts: { window?: number; factor?: number; minHistory?: number } = {}): FlowSpike[] {
+export function flowSpikes(minutes: readonly OrderTradeMinute[], opts: { window?: number; factor?: number; minHistory?: number; fromTs?: number } = {}): FlowSpike[] {
   const window = opts.window ?? 30;
   const factor = opts.factor ?? 3;
   const minHistory = opts.minHistory ?? 10;
   const full = minutes.filter((m) => !m.partial);
   const out: FlowSpike[] = [];
   for (let i = minHistory; i < full.length; i++) {
-    const prev = full.slice(Math.max(0, i - window), i);
     const m = full[i];
-    for (const side of ['buy', 'sell'] as const) {
-      const qty = side === 'buy' ? m.buyVolume : m.sellVolume;
-      const other = side === 'buy' ? m.sellVolume : m.buyVolume;
-      const base = median(prev.map((p) => (side === 'buy' ? p.buyVolume : p.sellVolume)));
-      const floor = Math.max(base, 1);
-      if (qty > other && qty >= factor * floor) out.push({ ts: m.ts, side, qty, ratio: Math.round((qty / floor) * 10) / 10 });
-    }
+    // Minutes before `fromTs` are history only (a caller that reads the last few minutes skips the rest).
+    if (opts.fromTs !== undefined && m.ts < opts.fromTs) continue;
+    // A spike needs the side's quantity above the other's, so only that side's median is ever needed.
+    const side = m.buyVolume > m.sellVolume ? 'buy' : m.sellVolume > m.buyVolume ? 'sell' : null;
+    if (!side) continue;
+    const qty = side === 'buy' ? m.buyVolume : m.sellVolume;
+    const prev = full.slice(Math.max(0, i - window), i);
+    const floor = Math.max(median(prev.map((p) => (side === 'buy' ? p.buyVolume : p.sellVolume))), 1);
+    if (qty >= factor * floor) out.push({ ts: m.ts, side, qty, ratio: Math.round((qty / floor) * 10) / 10 });
   }
   return out;
 }
@@ -85,7 +86,7 @@ export function flowDirection(minutes: readonly OrderTradeMinute[], opts: { look
   const firstPx = priced.length ? (typeof priced[0].open === 'number' ? priced[0].open : priced[0].close) : null;
   const lastPx = priced.length ? priced[priced.length - 1].close : null;
   const priceChange = firstPx !== null && lastPx !== null ? Math.round((lastPx - firstPx) * 100) / 100 : null;
-  const spikes = (opts.spikes ?? flowSpikes(minutes)).filter((s) => s.ts >= from);
+  const spikes = (opts.spikes ?? flowSpikes(minutes, { fromTs: from })).filter((s) => s.ts >= from);
   const buySpikes = spikes.filter((s) => s.side === 'buy').length;
   const sellSpikes = spikes.filter((s) => s.side === 'sell').length;
   const span = `last ${win.length} min`;

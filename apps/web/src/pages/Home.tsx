@@ -1,36 +1,28 @@
-import { useMemo } from 'react';
+import { lazy, Suspense, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ORDER_FLOW_METHOD, type BuildUp, type Candle, type DashboardChain, type DashboardMover, type DashboardResponse, type FiiDiiDay, type Quote } from '@q26/core';
 import { OperationsPanel } from '../components/Operations';
 import { TrendBadge } from '../components/trend';
-import { Chart, baseOption, axis, useChartColors } from '../components/Chart';
+import { Sparkline } from '../components/Sparkline';
 import { AsOf, BuildUpBadge, Card, Chg, Coverage, Dash, flowTone, Gaps, Loadable, NoData, PageHeader, Val } from '../components/ui';
 import { useLive } from '../lib/hooks';
 import { useApp, useTicks } from '../lib/store';
 import { formatCompact, formatDate, formatExpiry, formatFixed, formatIndian, formatSessionTime, isNum } from '../lib/format';
 
+/** The FII / DII bar chart (the charting library) loads after the rest of the page is shown. */
+const FlowsChart = lazy(() => import('./HomeFlows'));
+
 /** Sparkline of today's 5-minute closes; blank (not an empty axis) while there are no candles. */
 function Spark({ symbol, up }: { symbol: string; up: boolean }) {
-  const c = useChartColors();
   const q = useLive<Candle[]>(['candles', symbol, 5], `/candles/${symbol}?interval=5`, 30000);
-  const option = useMemo(() => {
-    const data = (q.data ?? []).map((d) => d.close);
-    const color = up ? c.up : c.down;
-    return {
-      animation: false,
-      grid: { left: 0, right: 0, top: 2, bottom: 2 },
-      xAxis: { type: 'category', show: false, data: data.map((_, i) => i) },
-      yAxis: { type: 'value', show: false, scale: true },
-      series: [{ type: 'line', data, symbol: 'none', connectNulls: false, lineStyle: { width: 1.5, color }, areaStyle: { color, opacity: 0.08 } }],
-    };
-  }, [q.data, up, c]);
+  const closes = useMemo(() => (q.data ?? []).map((d) => d.close), [q.data]);
   if (!q.data?.length) return <div className="flex h-11 items-center text-2xs text-muted" title={q.error instanceof Error ? q.error.message : undefined}>No intraday candles</div>;
   // Recorded candles whose volume leaves units out (a recording restart inside a minute, or units reported after a feed gap) say so.
   const partial = q.data.some((d) => d.partial);
   const gap = q.data.some((d) => isNum(d.gapVolume) && d.gapVolume > 0);
   return (
     <>
-      <Chart option={option} height={44} />
+      <Sparkline values={closes} height={44} className={up ? 'text-up' : 'text-down'} />
       {(partial || gap) && (
         <div className="text-2xs text-warn" title="Candle volume counts only the minutes recorded in full; units reported after a feed gap are not placed in any candle's volume">
           {partial ? 'Some candle volumes are partial (recording restarted inside a minute)' : 'Some volume was reported after a feed gap (not in candle volume)'}
@@ -107,24 +99,6 @@ function MoverTable({ title, rows, metric, reason, none }: { title: string; rows
       )}
     </Card>
   );
-}
-
-function FlowsChart({ days }: { days: FiiDiiDay[] }) {
-  const c = useChartColors();
-  const option = useMemo(
-    () => ({
-      ...baseOption(c),
-      tooltip: { ...(baseOption(c).tooltip as object), axisPointer: { type: 'shadow' } },
-      xAxis: { type: 'category', data: days.map((d) => d.date.slice(5)), ...axis(c) },
-      yAxis: { type: 'value', ...axis(c), axisLabel: { color: c.muted, formatter: (v: number) => `${(v / 1000).toFixed(1)}k` } },
-      series: [
-        { name: 'FII net (₹ Cr)', type: 'bar', data: days.map((d) => d.fiiNet), itemStyle: { color: c.series[0] } },
-        { name: 'DII net (₹ Cr)', type: 'bar', data: days.map((d) => d.diiNet), itemStyle: { color: c.series[1] } },
-      ],
-    }),
-    [days, c],
-  );
-  return <Chart option={option} height={200} />;
 }
 
 /** One index chain card (a row of the derivatives snapshot): each part is blank on its own, with its reason. */
@@ -298,7 +272,9 @@ export default function Home() {
               <Card title="FII / DII cash flows (last sessions)" actions={<Link to="/institutions?view=fii-dii" className="text-xs text-accent">More →</Link>}>
                 {d.fiiDii.length ? (
                   <>
-                    <FlowsChart days={d.fiiDii} />
+                    <Suspense fallback={<div style={{ height: 200 }} />}>
+                      <FlowsChart days={d.fiiDii} />
+                    </Suspense>
                     {latest && (
                       <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
                         <div>FII net: <Chg value={latest.fiiNet} /> Cr</div>

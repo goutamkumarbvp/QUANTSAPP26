@@ -34,8 +34,13 @@ function nthSunday(year: number, month: number, n: number): string {
  */
 export function mcxCloseMin(date: string): number {
   const y = Number(date.slice(0, 4));
-  return date > nthSunday(y, 3, 2) && date <= nthSunday(y, 11, 1) ? MCX_CLOSE_SUMMER_MIN : MCX_CLOSE_WINTER_MIN;
+  let dst = US_DST.get(y);
+  if (!dst) US_DST.set(y, (dst = [nthSunday(y, 3, 2), nthSunday(y, 11, 1)]));
+  return date > dst[0] && date <= dst[1] ? MCX_CLOSE_SUMMER_MIN : MCX_CLOSE_WINTER_MIN;
 }
+
+/** US daylight-saving bounds per year (they never change once computed). */
+const US_DST = new Map<number, [string, string]>();
 
 /** Continuous-session hours (minutes of the IST day) of an exchange on `date`. */
 export function sessionHoursOf(exchange: ExchangeCode, date: string): { open: number; close: number } {
@@ -44,14 +49,34 @@ export function sessionHoursOf(exchange: ExchangeCode, date: string): { open: nu
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/*
+ * Date ↔ day-number conversions run for every quote, strike and session the services look at (the same
+ * few hundred dates, thousands of times per request), so both directions are memoised. The caches are
+ * bounded: when one reaches DATE_CACHE_MAX entries it is cleared and refills with the dates in use.
+ */
+const DATE_CACHE_MAX = 50_000;
+const dayNums = new Map<string, number>();
+const dayDates = new Map<number, string>();
+
 export function dateToNum(date: string): number {
-  const [y, m, d] = date.split('-').map(Number);
-  return Math.floor(Date.UTC(y, m - 1, d) / DAY_MS);
+  let n = dayNums.get(date);
+  if (n === undefined) {
+    const [y, m, d] = date.split('-').map(Number);
+    n = Math.floor(Date.UTC(y, m - 1, d) / DAY_MS);
+    if (dayNums.size >= DATE_CACHE_MAX) dayNums.clear();
+    dayNums.set(date, n);
+  }
+  return n;
 }
 
 export function numToDate(n: number): string {
-  const dt = new Date(n * DAY_MS);
-  return dt.toISOString().slice(0, 10);
+  let date = dayDates.get(n);
+  if (date === undefined) {
+    date = new Date(n * DAY_MS).toISOString().slice(0, 10);
+    if (dayDates.size >= DATE_CACHE_MAX) dayDates.clear();
+    dayDates.set(n, date);
+  }
+  return date;
 }
 
 export function addDays(date: string, n: number): string {

@@ -44,11 +44,18 @@ const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** True for a real 'YYYY-MM-DD' calendar date (rejects 2026-02-30 and friends). */
 export function isIsoDate(s: string): boolean {
-  const m = DATE_RE.exec(s);
-  if (!m) return false;
-  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return d.toISOString().slice(0, 10) === s;
+  let ok = isoChecked.get(s);
+  if (ok === undefined) {
+    const m = DATE_RE.exec(s);
+    ok = !!m && new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).toISOString().slice(0, 10) === s;
+    if (isoChecked.size >= 50_000) isoChecked.clear();
+    isoChecked.set(s, ok);
+  }
+  return ok;
 }
+
+/** isIsoDate results (the same dates are checked on every calendar call). */
+const isoChecked = new Map<string, boolean>();
 
 function assertDate(s: string, what: string): void {
   if (!isIsoDate(s)) throw new Error(`${what}: invalid date '${s}' (expected YYYY-MM-DD)`);

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   analyzeStrategy,
@@ -16,7 +16,6 @@ import {
   type PayoffCurve,
   type ValuationContext,
 } from '@q26/core';
-import { Chart, useChartColors, pnlVisualMap } from '../components/Chart';
 import { ExpirySelect, SymbolSelect } from '../components/pickers';
 import { AsOf, Card, Dash, ErrorState, Field, NoData, PageHeader, Pill, Segmented, Spinner, Val } from '../components/ui';
 import { formatINR, isNum } from '../lib/format';
@@ -31,24 +30,47 @@ const VIEWS: { value: MarketView | 'all'; label: string }[] = [
   { value: 'volatile', label: '⚡ Volatile' },
 ];
 
-function MiniPayoff({ prices, values }: { prices: number[]; values: number[] }) {
-  const c = useChartColors();
-  const option = useMemo(
-    () => ({
-      animation: false,
-      grid: { left: 0, right: 0, top: 4, bottom: 4 },
-      xAxis: { type: 'value', show: false, min: prices[0], max: prices[prices.length - 1] },
-      yAxis: { type: 'value', show: false },
-      visualMap: pnlVisualMap(c),
-      series: [
-        { type: 'line', symbol: 'none', data: prices.map((p, i) => [p, values[i]]), areaStyle: { opacity: 0.18 }, lineStyle: { width: 1.5 } },
-        // Markers must not live on the visualMap-coloured series (ECharts throws on 'coord').
-        { type: 'line', symbol: 'none', silent: true, lineStyle: { color: c.muted, opacity: 0.5, width: 1 }, data: [[prices[0], 0], [prices[prices.length - 1], 0]] },
-      ],
-    }),
-    [prices, values, c],
+/**
+ * Payoff at expiry of one card as an inline SVG: profit green above the zero line, loss red below. The wizard
+ * shows up to 49 of these at once, so they are plain SVG paths, not 49 chart engines.
+ */
+export function MiniPayoff({ prices, values }: { prices: number[]; values: number[] }) {
+  const id = `mp${useId().replace(/[^a-zA-Z0-9]/g, '')}`;
+  const g = useMemo(() => {
+    const pts = prices.map((p, i) => [p, values[i]] as const).filter(([p, v]) => Number.isFinite(p) && Number.isFinite(v));
+    if (pts.length < 2) return null;
+    const W = 100;
+    const H = 90;
+    const pad = 4;
+    const x0 = pts[0][0];
+    const x1 = pts[pts.length - 1][0];
+    const lo = Math.min(0, ...pts.map(([, v]) => v));
+    const hi = Math.max(0, ...pts.map(([, v]) => v));
+    const span = hi - lo || 1;
+    const X = (p: number) => ((p - x0) / (x1 - x0 || 1)) * W;
+    const Y = (v: number) => pad + ((hi - v) / span) * (H - 2 * pad);
+    const line = pts.map(([p, v], i) => `${i ? 'L' : 'M'}${X(p).toFixed(2)},${Y(v).toFixed(2)}`).join('');
+    const zero = Y(0);
+    return { W, H, line, zero, area: `${line}L${W},${zero.toFixed(2)}L0,${zero.toFixed(2)}Z` };
+  }, [prices, values]);
+  if (!g) return <div style={{ height: 90 }} />;
+  const up = `${id}-up`;
+  const down = `${id}-down`;
+  return (
+    <svg viewBox={`0 0 ${g.W} ${g.H}`} preserveAspectRatio="none" className="block h-[90px] w-full" role="img" aria-label="Payoff at expiry">
+      <defs>
+        <clipPath id={up}><rect x="0" y="0" width={g.W} height={g.zero} /></clipPath>
+        <clipPath id={down}><rect x="0" y={g.zero} width={g.W} height={g.H - g.zero} /></clipPath>
+      </defs>
+      <line x1="0" x2={g.W} y1={g.zero} y2={g.zero} stroke="currentColor" className="text-muted" strokeOpacity="0.5" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      {[[up, 'text-up'], [down, 'text-down']].map(([clip, tone]) => (
+        <g key={clip} clipPath={`url(#${clip})`} className={tone}>
+          <path d={g.area} fill="currentColor" fillOpacity="0.18" />
+          <path d={g.line} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        </g>
+      ))}
+    </svg>
   );
-  return <Chart option={option} height={90} />;
 }
 
 /**

@@ -299,8 +299,9 @@ export class LivePricing implements Pricing {
     const q = this.opts.getQuote(key);
     if (!q || !isPos(q.ltp) || !isLivePrice(q, cal, dates)) return undefined;
     if (this.opts.maxQuoteAgeMs !== undefined && now - q.ts > this.opts.maxQuoteAgeMs) return undefined;
-    // A pre-open price is newer than the valuation time of the premiums (isAfterValuation).
-    if (isAfterValuation(q, cal, valuationTs(cal, now))) return undefined;
+    // A pre-open price is newer than the valuation time of the premiums (isAfterValuation; spot and future
+    // quotes only, so the valuation time is not worked out for every option quote).
+    if ((key.kind === 'SPOT' || key.kind === 'FUT') && isAfterValuation(q, cal, valuationTs(cal, now))) return undefined;
     return q.ltp;
   }
 

@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { istTs, maxPain, type OptionChain, type Quote, type ServerMessage } from '@q26/core';
 import { gunzipSync } from 'node:zlib';
-import { buildApp, GZIP_MIN_BYTES } from '../src/app';
+import { buildApp, GZIP_MIN_BYTES, WS_BATCH_MS } from '../src/app';
 import { loadConfig } from '../src/config';
 import { optKey, spotKey } from '../src/services/live';
 import { createServices, type Services } from '../src/services';
@@ -550,7 +550,7 @@ describe('websocket fan-out', () => {
     expect([lastLtp(a.messages, 'NIFTY'), lastLtp(bb.messages, 'NIFTY')]).toEqual([25020, 25020]);
   }, 15000);
 
-  it('a burst of ticks is one batch a second per socket; closing sockets and the app releases every listener', async () => {
+  it('a burst of ticks is one batch per WS_BATCH_MS per socket; closing sockets and the app releases every listener', async () => {
     const { app, p, svc } = await setup();
     const ticks = () => (p.live as unknown as { listeners: Set<unknown> }).listeners.size;
     const pushes = () => (svc.notifier as unknown as { listeners: Set<unknown> }).listeners.size;
@@ -570,7 +570,8 @@ describe('websocket fan-out', () => {
     const elapsed = Date.now() - t0;
     const batches = s1.messages.slice(n1).filter((m) => m.type === 'ticks' && m.quotes.length > 0);
     expect(batches.length).toBeGreaterThan(0);
-    expect(batches.length).toBeLessThanOrEqual(Math.ceil(elapsed / 1000) + 1);
+    expect(batches.length).toBeLessThanOrEqual(Math.ceil(elapsed / WS_BATCH_MS) + 1);
+    expect(batches.length).toBeLessThan(40); // the 40 ticks are coalesced, not sent one by one
     expect(lastLtp(s1.messages, 'NIFTY')).toBe(25040);
     s1.ws.terminate();
     s2.ws.terminate();

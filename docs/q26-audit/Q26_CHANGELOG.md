@@ -152,3 +152,23 @@ ranking of 1 Oct 2026, LIC skipped as it is not a NIFTY 50 stock). Every tab (op
 unusual options, Top 10 desk, strategies, streaming, sweeps) and the end-of-day file loads see only these stocks; indices and
 MCX commodities are unchanged. Market caps are in no live feed, so the list is configuration. The e2e fixture's test stocks
 follow the same list. Test: a Kotak master with more stocks yields only the configured ones.
+
+## C-50 — Speed: measured hot spots fixed (server, network, browser)
+
+Measured first (server CPU profile, API timings, Playwright page timings at 4× CPU slowdown), then fixed:
+- Server: date ↔ day-number conversions were ~40 % of request CPU — memoised (bounded caches) in core
+  `dateToNum` / `numToDate`, `isIsoDate` and the MCX DST bounds. History store: a missing EOD file is not looked
+  for again for 60 s (each look was a failed syscall and a thrown error; the store's own writes clear the mark).
+  Order flow: `flowSpikes` works only from the window `flowDirection` reads and medians one side per minute
+  (same result; property-tested against the original rule). Pricing: the valuation time is worked out only for
+  spot / future quotes. dashboard ~45 → ~12 ms, top10 ~33 → ~25 ms, expected-range ~20 → ~6 ms, chain ~7 → ~4 ms.
+- Network: the build pre-compresses every text asset (brotli q11 + gzip 9, web/scripts/compress.mjs); the server
+  sends them as is (`preCompressed`) with `immutable`, one-year caching for hashed /assets and `no-cache` for
+  index.html / sw.js. 1,361 KB → 397 KB over the wire; the chart library 695 → 195 KB. The ECharts theme is
+  registered from data (importing echarts/theme/v5.js pulled in all of ECharts); chunks split by module path.
+- Browser: charts no longer animate on each live refresh and resize at most once per frame; the Strategy Wizard's
+  49 payoff charts and Home's sparklines are inline SVG (no chart engine); Home's FII/DII chart loads after the
+  page, so the first screen does not wait for the chart library; the opened page's code downloads alongside the
+  session check. Wizard 6.3 s → 1.0 s, first page 2.1 s → 0.95 s, Optimizer 1.0 s → 0.2 s, average tab switch
+  0.60 s → 0.37 s (4× CPU slowdown).
+- Live prices reach the browser every 250 ms instead of every second (one message per batch per socket).

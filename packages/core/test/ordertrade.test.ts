@@ -47,3 +47,39 @@ describe('order & trade: direction', () => {
     expect(flowDirection([min(0, 0, 0, null)])!.text).toMatch(/No initiated quantity/);
   });
 });
+
+describe('flowSpikes matches the straightforward definition', () => {
+  // The original, unoptimised rule: for each minute and side, quantity above the other side and ≥ factor × the
+  // side's median over the previous `window` minutes.
+  const reference = (ms: OrderTradeMinute[], window = 30, factor = 3, minHistory = 10) => {
+    const full = ms.filter((m) => !m.partial);
+    const out: { ts: number; side: 'buy' | 'sell'; qty: number; ratio: number }[] = [];
+    const med = (xs: number[]) => {
+      const s = [...xs].sort((a, b) => a - b);
+      const k = s.length >> 1;
+      return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2;
+    };
+    for (let i = minHistory; i < full.length; i++) {
+      const prev = full.slice(Math.max(0, i - window), i);
+      for (const side of ['buy', 'sell'] as const) {
+        const q = side === 'buy' ? full[i].buyVolume : full[i].sellVolume;
+        const o = side === 'buy' ? full[i].sellVolume : full[i].buyVolume;
+        const floor = Math.max(med(prev.map((p) => (side === 'buy' ? p.buyVolume : p.sellVolume))), 1);
+        if (q > o && q >= factor * floor) out.push({ ts: full[i].ts, side, qty: q, ratio: Math.round((q / floor) * 10) / 10 });
+      }
+    }
+    return out;
+  };
+  it('on random sessions, and from a start time', () => {
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let run = 0; run < 25; run++) {
+      const ms = Array.from({ length: 375 }, (_, i) => ({ ...min(i, Math.floor(rnd() * (rnd() < 0.05 ? 5000 : 500)), Math.floor(rnd() * (rnd() < 0.05 ? 5000 : 500)), 0), ...(rnd() < 0.03 ? { partial: true as const } : {}) }));
+      const ref = reference(ms);
+      expect(flowSpikes(ms)).toEqual(ref);
+      const from = ms[300].ts;
+      expect(flowSpikes(ms, { fromTs: from })).toEqual(ref.filter((s) => s.ts >= from));
+      expect(flowDirection(ms)).toEqual(flowDirection(ms, { spikes: ref }));
+    }
+  });
+});

@@ -15,8 +15,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers';
 import { LegacyGridContainLabel } from 'echarts/features';
 import type { EChartsCoreOption } from 'echarts/core';
-// ECharts 6 ships a new default theme; the bundled 'v5' theme keeps the defaults the charts were designed on.
-import 'echarts/theme/v5.js';
+import { V5_THEME } from './chartTheme';
 import { formatSessionTime } from '../lib/format';
 import { useApp } from '../lib/store';
 import { cx, NoData } from './ui';
@@ -28,8 +27,10 @@ echarts.use([
   // Every chart sets `grid.containLabel`; ECharts 6 honours it (v5 layout) only with this feature installed.
   LegacyGridContainLabel,
 ]);
+// ECharts 6 ships a new default theme; the 'v5' theme keeps the defaults the charts were designed on.
+echarts.registerTheme('v5', V5_THEME as object);
 
-/** Theme registered by 'echarts/theme/v5.js' (ECharts 5 defaults). */
+/** Theme registered above (ECharts 5 defaults). */
 export const CHART_THEME = 'v5';
 
 export interface ChartColors {
@@ -173,17 +174,28 @@ export function Chart({ option, height = 320, className, onEvents, blank }: { op
     if (!ref.current) return;
     const chart = echarts.init(ref.current, CHART_THEME, { renderer: 'canvas' });
     inst.current = chart;
-    const ro = new ResizeObserver(() => chart.resize());
+    // At most one resize per frame (a layout change reports many sizes in a row).
+    let frame = 0;
+    const ro = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (!chart.isDisposed()) chart.resize();
+      });
+    });
     ro.observe(ref.current);
     return () => {
       ro.disconnect();
+      if (frame) cancelAnimationFrame(frame);
       chart.dispose();
       inst.current = null;
     };
   }, [theme]);
 
   useEffect(() => {
-    inst.current?.setOption(noInvention(option), { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
+    // Live charts redraw every few seconds: no tweening (an animated update redraws every frame for a second),
+    // so a new value is drawn at once and the page stays responsive. A chart may still ask for animation.
+    inst.current?.setOption({ animation: false, ...noInvention(option) }, { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
   }, [option, theme]);
 
   useEffect(() => {

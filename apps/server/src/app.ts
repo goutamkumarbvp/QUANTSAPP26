@@ -39,8 +39,8 @@ declare module 'fastify' {
 
 /** Index underlyings by name: the websocket default and /api/indices while the instrument master is not loaded. */
 const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
-/** Websocket: at most one batch per socket per second; a heartbeat (clock + feed status) at least this often. */
-const WS_BATCH_MS = 1000;
+/** Websocket: each socket gets the quotes that changed at most every WS_BATCH_MS (one message per batch); a heartbeat (clock + feed status) at least every WS_HEARTBEAT_MS. */
+export const WS_BATCH_MS = 250;
 const WS_HEARTBEAT_MS = 5000;
 const WS_MAX_SYMBOLS = 40;
 /** Open market-data sockets per client address (an IPv6 client: per /64), and in total. */
@@ -913,7 +913,19 @@ export async function buildApp(
 
   const webDist = svc.config.webDist;
   if (opts.serveWeb !== false && fs.existsSync(path.join(webDist, 'index.html'))) {
-    await app.register(fastifyStatic, { root: webDist, prefix: '/', wildcard: false });
+    // The build pre-compresses the assets (.br / .gz, web/scripts/compress.mjs): sent as is, never compressed per request.
+    // Hashed files under /assets never change (a new build gets new names): cached for a year without
+    // revalidation. index.html, the service worker and the manifest are revalidated so a new build is picked up.
+    await app.register(fastifyStatic, {
+      root: webDist,
+      prefix: '/',
+      wildcard: false,
+      preCompressed: true,
+      cacheControl: false,
+      setHeaders: (res, file) => {
+        res.header('cache-control', /[\\/]assets[\\/]/.test(file) ? 'public, max-age=31536000, immutable' : 'no-cache');
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.method === 'GET' && !req.url.startsWith('/api') && !req.url.startsWith('/ws')) return reply.sendFile('index.html');
       return reply.status(404).send({ error: 'Not found' });

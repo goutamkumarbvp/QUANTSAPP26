@@ -19,9 +19,12 @@ export default defineConfig({
     chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
-        manualChunks: {
-          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers'],
-          react: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query', 'zustand'],
+        // By module path, not by entry: naming 'echarts/charts' as an entry would pull every chart type into the
+        // chunk and undo tree-shaking (Chart.tsx imports only the charts and components it draws).
+        manualChunks(id: string) {
+          if (/[\\/]node_modules[\\/](echarts|zrender|tslib)[\\/]/.test(id)) return 'echarts';
+          if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler|@tanstack|zustand|use-sync-external-store)[\\/]/.test(id)) return 'react';
+          return undefined;
         },
       },
     },
