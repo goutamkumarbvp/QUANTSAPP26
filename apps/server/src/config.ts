@@ -47,15 +47,19 @@ export interface AppConfig {
   /** Hard cap of SFeed (token, intent) subscriptions (SFEED_TOKEN_BUDGET, at most 2,700 of the server's 3,000, DESIGN.md §3). */
   sfeedTokenBudget: number;
   /**
-   * NIFTY_TOP10: the heavyweight stocks of the NIFTY desk (comma-separated F&O symbols). Index weights
-   * are not in any live feed (NSE publishes them in monthly factsheets), so the list is configuration;
-   * their option chains are streamed tick by tick after the index chains.
+   * NIFTY_TOP10: the app's whole stock universe — the ten largest NIFTY 50 companies by market
+   * capitalisation (comma-separated F&O symbols). No other stock is listed anywhere in the app (option
+   * chain, scanners, F&O market, streaming, end-of-day files). Market caps are not in any live feed, so
+   * the list is configuration; their option chains are streamed tick by tick after the index chains.
    */
   focusStocks: string[];
 }
 
-/** Default NIFTY heavyweights (edit with NIFTY_TOP10 when the index weights change). */
-export const DEFAULT_TOP10 = ['HDFCBANK', 'RELIANCE', 'ICICIBANK', 'INFY', 'BHARTIARTL', 'LT', 'ITC', 'TCS', 'AXISBANK', 'SBIN'] as const;
+/**
+ * Default: the ten largest NIFTY 50 companies by market capitalisation (screener ranking of 1 Oct 2026;
+ * LIC, ranked ninth, is not a NIFTY 50 stock, so Infosys follows). Edit NIFTY_TOP10 when the ranking changes.
+ */
+export const DEFAULT_TOP10 = ['RELIANCE', 'HDFCBANK', 'BHARTIARTL', 'ICICIBANK', 'SBIN', 'TCS', 'BAJFINANCE', 'LT', 'SUNPHARMA', 'INFY'] as const;
 
 /** Kotak credentials, or the reason they are unusable (variable names only). */
 export function neoFromEnv(env: Record<string, string | undefined> = process.env): { neo: NeoEnv | null; neoError?: string } {

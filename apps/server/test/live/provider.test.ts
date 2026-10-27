@@ -180,6 +180,19 @@ describe('LiveProvider end to end (fake fetch + fake socket)', () => {
     expect(h.p.healthLine()).toMatch(/^live data: Kotak logged in; feed connected \(\d+ subscribed\); instrument master 2026-10-12/);
   });
 
+  it('lists only the configured stocks (the NIFTY top 10 by market cap), however many the Kotak master has', async () => {
+    const stocksOf = async (over: Partial<LiveProviderConfig>) => {
+      const h = harness(over);
+      await h.p.start();
+      await h.p.whenStarted();
+      return h.p.ref.underlyings().filter((u) => u.kind === 'stock').map((u) => u.symbol).sort();
+    };
+    // the test master lists RELIANCE and INFY (both in the default top 10)
+    expect(await stocksOf({})).toEqual(['INFY', 'RELIANCE']);
+    // NIFTY_TOP10 narrows it: INFY is in the file but not offered anywhere
+    expect(await stocksOf({ focusStocks: ['RELIANCE'] })).toEqual(['RELIANCE']);
+  });
+
   it('dates the recorder does not have come from Kotak historical (active contracts only)', async () => {
     const hist = { ...HISTORICAL, data: { candles: [['2026-10-09T09:15:00+0530', 25100, 25120, 25090, 25110, 1500], ['2026-10-09T09:16:00+0530', 25110, 25130, 25100, 25125, 900], ['2026-10-09T09:17:00+0530', 25125, 25126, 25080, 25090, 300]] } };
     const asked: string[] = [];

@@ -25,7 +25,7 @@ export default function Scanners() {
   const label = q.data?.rows[0]?.metricLabel ?? 'Metric';
   return (
     <div className="space-y-3">
-      <PageHeader title="F&O Scanners" subtitle="Pre-built scans across every F&O future and near-expiry option — refreshed live" />
+      <PageHeader title="F&O Scanners" subtitle="Pre-built scans across the indices, the NIFTY top 10 stocks and MCX — futures and near-expiry options, refreshed live" />
       <div className="grid gap-3 lg:grid-cols-4">
         <Card title="Scans" pad={false}>
           {defs.error ? <div className="p-2"><ErrorState error={defs.error} compact title="The scan list is not available" /></div> : null}

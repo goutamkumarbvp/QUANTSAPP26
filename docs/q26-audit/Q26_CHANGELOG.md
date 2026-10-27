@@ -143,3 +143,12 @@ Trade Recap), Portfolio (Positions & Orders · Strategy Manager · Alerts), Algo
 Settings. The view switchers inside F&O Market, F&O Scanners and Institutional Activity were replaced by these tabs.
 The mobile Tools page lists every entry with its pages. Tests: every page is in the menu exactly once; `locate()`;
 an e2e walk through the sidebar and sub-tabs.
+
+## C-49 — Stocks: only the NIFTY top 10 by market cap
+
+The live provider gives the instrument master only the `NIFTY_TOP10` stocks (default: RELIANCE, HDFCBANK, BHARTIARTL,
+ICICIBANK, SBIN, TCS, BAJFINANCE, LT, SUNPHARMA, INFY — the ten largest NIFTY 50 companies by market capitalisation, screener
+ranking of 1 Oct 2026, LIC skipped as it is not a NIFTY 50 stock). Every tab (option chain picker, F&O Market, scanners,
+unusual options, Top 10 desk, strategies, streaming, sweeps) and the end-of-day file loads see only these stocks; indices and
+MCX commodities are unchanged. Market caps are in no live feed, so the list is configuration. The e2e fixture's test stocks
+follow the same list. Test: a Kotak master with more stocks yields only the configured ones.

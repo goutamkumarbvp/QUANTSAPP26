@@ -29,7 +29,7 @@ export default function FuturesOI() {
   const classified = (q.data ?? []).filter((r) => r.buildUp).length;
   return (
     <div className="space-y-3">
-      <PageHeader title="Futures OI & Build-up" subtitle="Near-month futures of every F&O underlying: price change vs OI change">
+      <PageHeader title="Futures OI & Build-up" subtitle="Near-month futures of every underlying (indices, NIFTY top 10 stocks, MCX): price change vs OI change">
         <input className="input w-40" placeholder="Search symbol" value={search} onChange={(e) => setSearch(e.target.value)} />
       </PageHeader>
       <div className="flex flex-wrap gap-2">

@@ -52,7 +52,7 @@ export default function Synopsis() {
   }, [mapped, metric, c]);
   return (
     <div className="space-y-3">
-      <PageHeader title="Synopsis" subtitle="The F&O stock universe in one heat-map — sized by turnover, coloured by price, OI or IV change">
+      <PageHeader title="Synopsis" subtitle="The NIFTY top 10 stocks in one heat-map — sized by turnover, coloured by price, OI or IV change">
         <Segmented value={metric} onChange={setMetric} options={(Object.keys(LABEL) as Metric[]).map((m) => ({ value: m, label: LABEL[m] }))} />
       </PageHeader>
       <Loadable q={q} hint="Needs live stock prices and the near-month futures; stock options refresh about every 90 seconds.">

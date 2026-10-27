@@ -47,9 +47,9 @@ export const NAV: NavGroup[] = [
       {
         label: 'F&O Market',
         icon: '▦',
-        desc: 'The whole F&O universe: heat-map, build-up, breadth, scanners, unusual options and the NIFTY heavyweights',
+        desc: 'The indices, the NIFTY top 10 stocks and MCX: heat-map, build-up, breadth, scanners, unusual options and the Top 10 desk',
         tabs: [
-          { to: '/fno-market?view=heatmap', label: 'Heat-map', desc: 'The F&O stock universe sized by turnover, coloured by price, OI or IV change' },
+          { to: '/fno-market?view=heatmap', label: 'Heat-map', desc: 'The NIFTY top 10 stocks sized by turnover, coloured by price, OI or IV change' },
           { to: '/fno-market?view=futures', label: 'Futures build-up', desc: 'Near-month futures: price change vs OI change' },
           { to: '/fno-market?view=breadth', label: 'Sector breadth', desc: 'Long / short build-up, covering and unwinding by sector' },
           { to: '/scanners', label: 'Scanners', desc: 'Pre-built build-up, OI, price, IV, option and trend scans' },

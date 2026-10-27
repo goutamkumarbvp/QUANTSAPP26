@@ -155,6 +155,10 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
 
 ## Features (13 menu entries in 6 groups; 32 pages as sub-tabs, each in one place)
 
+**Stocks: only the NIFTY top 10 by market cap** — RELIANCE, HDFCBANK, BHARTIARTL, ICICIBANK, SBIN, TCS, BAJFINANCE, LT,
+SUNPHARMA, INFY (ranking of 1 Oct 2026; change with `NIFTY_TOP10` in `.env`). No other stock appears in any tab; the indices
+(NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX) and the MCX commodities are unchanged.
+
 | Area | Tabs |
 |---|---|
 | **MCX commodities** | GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER … are ordinary symbols of **every** tab (symbol picker group *Commodities (MCX)*, ticker, Home card), exactly like NIFTY/SENSEX: option chain, OI, PCR, max pain, IV/skew/surface, order flow & book, opening range, strategy builder, paper trading. MCX runs on its own calendar (09:00–23:30, 23:55 in US winter), its "spot" is the near-month future, and its options are valued with Black-76 on the future they settle into. Previous-session values come from MCX sessions this app recorded from live ticks (no official MCX files are loaded). Units per lot are checked against MCX contract specifications. |

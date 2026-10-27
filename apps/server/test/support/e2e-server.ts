@@ -78,7 +78,7 @@ function officialPreviousSession(): void {
   p.history.writeFo(d, { futures: [...futures, ...heavyPrev.futures], options: [...options, ...heavyPrev.options] });
 }
 /**
- * TEST heavyweights for the NIFTY Top 10 desk (RELIANCE comes from the sample book): each stock gets a
+ * TEST stocks: the NIFTY top 10 by market cap (the app's only stocks; RELIANCE comes from the sample book): each stock gets a
  * spot, a near-month future and a 21-strike chain priced by Black-76 at a flat test volatility, the
  * previous session's official rows (OI change, build-up, change PCR) and today's recorded future
  * minutes with a stock-specific buyer/seller mix. Test values only.
@@ -90,9 +90,9 @@ const HEAVY: [string, string, string, number, number, number][] = [
   ['INFY', 'Infosys', 'IT', 1550, 20, 400],
   ['BHARTIARTL', 'Bharti Airtel', 'Telecom', 1900, 20, 475],
   ['LT', 'Larsen & Toubro', 'Infra', 3600, 50, 175],
-  ['ITC', 'ITC', 'FMCG', 420, 5, 1600],
+  ['SUNPHARMA', 'Sun Pharmaceutical', 'Pharma', 1720, 20, 350],
   ['TCS', 'Tata Consultancy Services', 'IT', 3100, 20, 175],
-  ['AXISBANK', 'Axis Bank', 'Banks', 1150, 10, 625],
+  ['BAJFINANCE', 'Bajaj Finance', 'Financials', 960, 10, 750],
   ['SBIN', 'State Bank of India', 'Banks', 820, 5, 750],
 ];
 const heavyPrev: { futures: { symbol: string; date: string; expiry: string; close: number; oi: number; volume: number }[]; options: { symbol: string; date: string; expiry: string; strike: number; type: 'CE' | 'PE'; close: number; oi: number; volume: number; lotSize: number }[] } = { futures: [], options: [] };

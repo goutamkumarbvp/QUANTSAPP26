@@ -24,7 +24,8 @@ import type { NeoEnv } from './env';
 import { EodJobs, type EodStatus } from './eod';
 import { RateLimiter } from './kotak/ratelimit';
 import { KotakRest } from './kotak/rest';
-import { INDEX_SPECS, REFERENCE_STOCKS, ScripMaster, type ScripMasterStatus } from './kotak/scripmaster';
+import { DEFAULT_TOP10 } from '../config';
+import { INDEX_SPECS, ScripMaster, type ScripMasterStatus } from './kotak/scripmaster';
 import fs from 'node:fs';
 import path from 'node:path';
 import { KotakError, KotakSession, nextIstTime, type FetchLike, type KotakSessionStatus, type LoginStateStore, type SavedLoginState } from './kotak/session';
@@ -61,7 +62,10 @@ export interface LiveProviderConfig {
   sfeedTokenBudget: number;
   /** Recorded sessions kept on disk; unset = keep all. */
   intradayRetentionDays?: number;
-  /** Stocks whose nearest option chain is streamed after the index chains (NIFTY_TOP10); unset = none. */
+  /**
+   * The app's stocks (NIFTY_TOP10: the NIFTY top 10 by market cap): the only stocks listed, and their nearest
+   * option chains are streamed after the index chains; unset = DEFAULT_TOP10.
+   */
   focusStocks?: readonly string[];
 }
 
@@ -391,8 +395,11 @@ export class LiveProvider implements MarketDataProvider {
     const rest = this.rest;
     const kotakError = this.kotakError;
 
+    // The app's stocks: only the NIFTY top 10 by market cap (NIFTY_TOP10); indices and MCX commodities are not affected.
+    const stocks = config.focusStocks?.length ? config.focusStocks : [...DEFAULT_TOP10];
     this.ref = new ScripMaster({
       dataDir: config.dataDir,
+      stocks,
       fetch: deps.kotakFetch,
       logger: this.log,
       filePaths: async () => {
@@ -451,7 +458,7 @@ export class LiveProvider implements MarketDataProvider {
       logger: this.log,
       envHolidays,
       backfillDays: config.eodBackfillDays,
-      symbols: [...INDEX_SPECS.map((s) => s.symbol), ...REFERENCE_STOCKS.map((s) => s.symbol)],
+      symbols: [...INDEX_SPECS.map((s) => s.symbol), ...stocks],
     });
 
     this.universe = new LiveUniverse({
@@ -467,7 +474,7 @@ export class LiveProvider implements MarketDataProvider {
         }
       },
       // The NIFTY heavyweights desk: their option chains are streamed too (after the index chains).
-      options: { focusStocks: config.focusStocks ?? [] },
+      options: { focusStocks: stocks },
     });
 
     this.session?.onChange((st) => {
