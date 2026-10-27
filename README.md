@@ -153,7 +153,7 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
   start and the date of each official file loaded. A banner under the header explains blanks while the feed is
   not live.
 
-## Features (34 tabs, no tab repeats another's data)
+## Features (26 menu entries in 6 groups, each tool in one place)
 
 | Area | Tabs |
 |---|---|
@@ -165,7 +165,7 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
 | Paper Trading | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts, Algo Strategies (Strategy 2 · ₹20 and Strategy 3 · ₹50 premium ladders) |
 | More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
 
-Old addresses of merged tabs (`/order-flow`, `/oi/trend`, `/synopsis`, `/oi/futures`, `/oi/breadth`) redirect to
+Old addresses of merged tabs (`/order-flow`, `/oi/trend`, `/synopsis`, `/oi/futures`, `/oi/breadth`, `/unusual`, `/fii-dii`, `/participants`) redirect to
 the tab that now holds their data.
 
 **Data rule.** Every market value comes from the broker or the exchange: Kotak live ticks (SFeed) first,
