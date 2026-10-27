@@ -213,6 +213,8 @@ export interface AlgoBacktestDay extends AlgoDaySummary {
   lotSize: number;
   /** True when the day is today and not finished yet. */
   partial: boolean;
+  /** Replayed on recorded one-minute bars ('1m') or one-second snapshots ('1s', fills at the recorded bid/ask). */
+  resolution: '1m' | '1s';
   /** One point per replayed minute (minutes without recorded data are left out). */
   series: AlgoSeriesPoint[];
   events: AlgoEvent[];
@@ -257,6 +259,8 @@ export interface AlgoBacktestRange {
   to: string;
   /** First session the app recorded (null before any). */
   recordedFrom: string | null;
+  /** Data the days were replayed on (see AlgoBacktestDay.resolution). */
+  resolution: '1m' | '1s';
   /** Replayed days, complete and incomplete. */
   days: AlgoDaySummary[];
   skipped: AlgoSkippedDay[];

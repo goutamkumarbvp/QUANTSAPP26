@@ -193,6 +193,38 @@ describe('LiveProvider end to end (fake fetch + fake socket)', () => {
     expect(await stocksOf({ focusStocks: ['RELIANCE'] })).toEqual(['RELIANCE']);
   });
 
+  it('one-second recording: live feed ticks → one row per second in the store, with coverage and health', async () => {
+    const h = harness({ seconds: { maxGb: 1, retentionDays: 10 } });
+    await h.p.start();
+    await h.p.whenStarted();
+    const sock = h.sf.last();
+    sock.open();
+    sock.text(AUTH_1117);
+    await flush(2);
+    const ceTok = h.p.ref.listing(ce(25000))!.token;
+    const tick = (ts: number, ltp: number, vol: number) =>
+      encodeMarketPicture({ ...MP_L4_FIELDS, exch: 2, token: Number(ceTok), ltp: Math.round(ltp * 100), ltt: SEC(ts), lut: SEC(ts), vol, oi: 90_000, rows: [[75, Math.round((ltp - 0.05) * 100), 1], [75, Math.round((ltp + 0.05) * 100), 1]] });
+    sock.bin(tick(T0, 120.5, 5000));
+    await h.timers.advance(2_000);
+    sock.bin(tick(T0 + 2_000, 121.25, 5600));
+    await h.timers.advance(10_000);
+    const rows = h.p.seconds!.read(ce(25000), DAY);
+    expect(rows.map((r) => [r.ts - T0, r.ltp, r.bid, r.ask])).toEqual([
+      [0, 120.5, 120.45, 120.55],
+      [2000, 121.25, 121.2, 121.3],
+    ]);
+    expect(rows[1]).toMatchObject({ volume: 5600, oi: 90_000, traded: true });
+    expect(h.p.seconds!.coverage(DAY).length).toBeGreaterThan(0);
+    expect(h.p.healthReport().seconds).toMatchObject({ days: 1, newest: DAY, paused: null, maxBytes: 1024 ** 3, retentionDays: 10 });
+  });
+
+  it('one-second recording is off unless configured', async () => {
+    const h = harness();
+    await h.p.start();
+    expect(h.p.seconds).toBeUndefined();
+    expect(h.p.healthReport().seconds).toBeUndefined();
+  });
+
   it('dates the recorder does not have come from Kotak historical (active contracts only)', async () => {
     const hist = { ...HISTORICAL, data: { candles: [['2026-10-09T09:15:00+0530', 25100, 25120, 25090, 25110, 1500], ['2026-10-09T09:16:00+0530', 25110, 25130, 25100, 25125, 900], ['2026-10-09T09:17:00+0530', 25125, 25126, 25080, 25090, 300]] } };
     const asked: string[] = [];

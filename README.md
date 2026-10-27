@@ -45,6 +45,14 @@ There is no back-catalogue of synthetic history. History comes from:
   `DATA_DIR/market/YYYY-MM-DD/`. Intraday history (OI trend, multi-strike OI, intraday PCR / max pain,
   straddle, strategy chart, ORB, order flow, Trade Recap, as-of chains `GET /api/chain/NIFTY?at=<epoch ms>`,
   algo backtests) exists **from the first recorded session onward** and only for what was streamed.
+- **The one-second recorder** — while the market is open it also writes one row per instrument and second it ticked
+  (last price, best bid/ask with quantities, cumulative volume, OI) to `DATA_DIR/seconds/YYYY-MM-DD/` as compact
+  binary files, gzipped once the day is over (about 0.4–0.6 GB a day for ~2,700 instruments). It keeps
+  `SECONDS_RETENTION_DAYS` (default 183, about six months) within `SECONDS_MAX_GB` (default 75 GB), deleting the
+  oldest days first, and pauses while the disk has under 2 GB free. Algo backtests can replay it second by second
+  (**Algo Strategies → Backtest → Data: 1 second**), filling a buy at the recorded ask and a sell at the recorded bid;
+  Settings shows the space used. Like the minute recording, it exists only from the day it starts and only while
+  the PC runs: Kotak serves no historical ticks or seconds.
 - **Kotak 1-minute historical candles** — fill some intraday charts for contracts that are still listed (recent
   sessions only; expired contracts are not served).
 - **Official EOD backfill** — at start and daily (≈18:30–23:30 IST) the server fetches missing NSE/BSE files for
@@ -108,6 +116,9 @@ logged in, and serves only official EOD files and already-recorded history):
 | `PERSIST` | `true` | `false` keeps user data in memory only |
 | `EOD_BACKFILL_DAYS` | `30` | Sessions checked for missing NSE/BSE files at start and daily (`0` = none) |
 | `SFEED_TOKEN_BUDGET` | `2700` | Cap on streamed SFeed subscriptions (max 2,700 of Kotak's 3,000) |
+| `SECONDS_RECORD` | `true` | Record one-second snapshots for second-level backtests (`false` = off) |
+| `SECONDS_MAX_GB` | `75` | Size cap of the one-second data (oldest days removed first) |
+| `SECONDS_RETENTION_DAYS` | `183` | Days of one-second data kept (about six months) |
 | `WEB_DIST` | `apps/web/dist` | Built web app served by the API |
 | `OPS_ADMIN_EMAILS` | — | Comma-separated e-mails of the registered accounts allowed to run the operations buttons. Empty: only the first account registered on the server (its owner) |
 | `LOG_LEVEL` | `info` | Terminal detail: `trace`, `debug` (adds one line per HTTP request and per retry), `info`, `warn`, `error` |

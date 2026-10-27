@@ -459,6 +459,9 @@ export interface TickMeta {
   stream: boolean;
 }
 
+/** Read side of the one-second store (live/store/seconds.ts). */
+export type SecondReader = Pick<import('./store/seconds').SecondStore, 'read' | 'has' | 'keys' | 'dates' | 'coverage' | 'usage'>;
+
 export interface MarketDataProvider {
   ref: ReferenceData;
   /** NSE/BSE calendar (the app clock, EOD files, indices and stocks). */
@@ -481,6 +484,8 @@ export interface MarketDataProvider {
    * they are streamed in the 'user' tier, above the index chains and ad-hoc watches. Null clears it.
    */
   setUserContracts(fn: (() => Iterable<UserContract>) | null): void;
+  /** One-second snapshots recorded from the live feed (second-level backtests); absent when not recorded. */
+  seconds?: SecondReader;
   start(): Promise<void>;
   stop(): Promise<void>;
 }

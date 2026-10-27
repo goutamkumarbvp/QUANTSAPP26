@@ -312,12 +312,20 @@ function DaysTable({ days, onPick }: { days: AlgoDaySummary[]; onPick?: (d: Algo
 
 /* ----------------------------------- backtests ----------------------------------- */
 
-function DayBacktest({ algoId, params, date, setDate }: { algoId: string; params: Params; date: string; setDate: (d: string) => void }) {
+/** Data a backtest replays: recorded one-minute bars or one-second snapshots. */
+type Resolution = '1m' | '1s';
+
+const RESOLUTION_NOTE: Record<Resolution, string> = {
+  '1m': 'A minute-by-minute replay of what the recorder saw, filling at the recorded last traded price of the minute. A minute without a recorded price is not replayed.',
+  '1s': 'A second-by-second replay of the one-second snapshots: a buy fills at the recorded ask and a sell at the recorded bid (a book at most 10 s old, else the last traded price). Seconds the recorder did not cover are not replayed.',
+};
+
+function DayBacktest({ algoId, params, date, setDate, resolution }: { algoId: string; params: Params; date: string; setDate: (d: string) => void; resolution: Resolution }) {
   const today = useTicks((s) => s.clock?.date);
   const key = JSON.stringify(params);
   const q = useQuery({
-    queryKey: ['algo-bt-day', algoId, key, date],
-    queryFn: () => api<AlgoBacktestDay>(`/algos/${algoId}/backtest`, { body: { params, date: date || undefined } }),
+    queryKey: ['algo-bt-day', algoId, key, date, resolution],
+    queryFn: () => api<AlgoBacktestDay>(`/algos/${algoId}/backtest`, { body: { params, date: date || undefined, resolution } }),
     refetchInterval: adaptivePoll(date ? false : 15_000),
     retry: false,
   });
@@ -325,7 +333,7 @@ function DayBacktest({ algoId, params, date, setDate }: { algoId: string; params
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <SessionDate value={date} onChange={setDate} max={today} />
-        <span className="text-xs text-muted">Recorded sessions only: a minute-by-minute replay of what the recorder saw, filling at the recorded last traded price of the minute. A minute without a recorded price is not replayed.</span>
+        <span className="text-xs text-muted">Recorded sessions only. {RESOLUTION_NOTE[resolution]}</span>
       </div>
       <Loadable q={q} hint="Backtests replay only the sessions the app recorded (it records while it runs): pick a date the recorder was running.">
         {(d) => (
@@ -353,13 +361,13 @@ function DayBacktest({ algoId, params, date, setDate }: { algoId: string; params
   );
 }
 
-function RangeBacktest({ algoId, params, onPickDay }: { algoId: string; params: Params; onPickDay: (date: string) => void }) {
+function RangeBacktest({ algoId, params, onPickDay, resolution }: { algoId: string; params: Params; onPickDay: (date: string) => void; resolution: Resolution }) {
   const [days, setDays] = useState(60);
   const c = useChartColors();
   const key = JSON.stringify(params);
   const q = useQuery({
-    queryKey: ['algo-bt-range', algoId, key, days],
-    queryFn: () => api<AlgoBacktestRange>(`/algos/${algoId}/backtest-range`, { body: { params, days } }),
+    queryKey: ['algo-bt-range', algoId, key, days, resolution],
+    queryFn: () => api<AlgoBacktestRange>(`/algos/${algoId}/backtest-range`, { body: { params, days, resolution } }),
     staleTime: 60_000,
     retry: false,
   });
@@ -452,6 +460,7 @@ export default function Algo() {
   const [applied, setApplied] = useState<Params>({});
   const [tab, setTab] = useState<Tab>('live');
   const [btDate, setBtDate] = useState('');
+  const [resolution, setResolution] = useState<Resolution>('1m');
   const [name, setName] = useState('');
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -603,11 +612,18 @@ export default function Algo() {
                   }
                 </Loadable>
               )}
-              {tab === 'day' && algo && <DayBacktest algoId={algo.id} params={applied} date={btDate} setDate={setBtDate} />}
+              {(tab === 'day' || tab === 'range') && (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-muted">Data</span>
+                  <Segmented size="xs" value={resolution} onChange={setResolution} options={[{ value: '1m', label: '1 minute' }, { value: '1s', label: '1 second (bid/ask fills)' }]} />
+                </div>
+              )}
+              {tab === 'day' && algo && <DayBacktest algoId={algo.id} params={applied} date={btDate} setDate={setBtDate} resolution={resolution} />}
               {tab === 'range' && algo && (
                 <RangeBacktest
                   algoId={algo.id}
                   params={applied}
+                  resolution={resolution}
                   onPickDay={(d) => {
                     setBtDate(d);
                     setTab('day');

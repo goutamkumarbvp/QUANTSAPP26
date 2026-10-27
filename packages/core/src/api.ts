@@ -1424,3 +1424,20 @@ export interface Top10Response extends DataGaps {
     declining: number;
   };
 }
+
+/** One-second snapshot store (GET /api/seconds/status). */
+export interface SecondsStatus {
+  /** False when one-second recording is off (SECONDS_RECORD=false). */
+  enabled: boolean;
+  bytes: number;
+  maxBytes: number;
+  retentionDays: number;
+  /** Recorded days, oldest and newest. */
+  days: number;
+  oldest: string | null;
+  newest: string | null;
+  /** Free space of the disk that holds the data (null when the platform does not tell). */
+  freeBytes: number | null;
+  /** Why recording is paused (disk almost full), else null. */
+  paused: string | null;
+}

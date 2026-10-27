@@ -27,6 +27,10 @@ import { createServices } from '../src/services';
 import { Pricer } from '../src/services/pricer';
 import { PaperBroker } from '../src/services/trading';
 import { Db } from '../src/store/db';
+import { SecondStore, type SecondRow } from '../src/live/store/seconds';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { FakeProvider, loadSampleBook, type SampleBook } from './support/fake-provider';
 
 const cleanup: (() => unknown)[] = [];
@@ -764,5 +768,89 @@ describe('algo routes', () => {
     const stopped = await call('POST', `/api/algo-runs/${run.id}/stop`, {}, token);
     expect((stopped.body as AlgoRunView).status).toBe('stopped');
     expect((await call('DELETE', `/api/algo-runs/${run.id}`, undefined, token)).status).toBeLessThan(300);
+  });
+});
+
+/* ------------------------------------------------------------------------------------------ */
+/* Backtests on one-second snapshots                                                            */
+/* ------------------------------------------------------------------------------------------ */
+
+/**
+ * TEST DATA: session A as one-second snapshots. Each minute's last second carries that minute's recorded
+ * close (the value a one-minute replay reads at the next minute), with a book 0.05 either side of it;
+ * coverage = the whole session except `hole` (seconds of the day).
+ */
+function recordSeconds(p: FakeProvider, s: RecordedSession, store: SecondStore, hole?: [number, number]) {
+  const strikes = strikesOf(24600, 25400, 50);
+  const spot: SecondRow[] = [];
+  const legs = new Map<string, SecondRow[]>();
+  for (let m = 0; m < 375; m++) {
+    const ts = p.calendar.ts(s.date, m) + 59_000;
+    spot.push({ ts, ltp: s.spot(m), traded: true });
+    for (const strike of strikes) {
+      for (const type of ['CE', 'PE'] as OptionSide[]) {
+        const c = tick5(testPremium(p, s.expiry, type, strike, s.spot(m), s.vol, p.calendar.ts(s.date, m + 1)));
+        if (c < 0.05) continue;
+        const id = `${type}|${strike}`;
+        if (!legs.has(id)) legs.set(id, []);
+        legs.get(id)!.push({ ts, ltp: c, bid: Math.max(0.05, Math.round((c - 0.05) * 100) / 100), ask: Math.round((c + 0.05) * 100) / 100, bidQty: 750, askQty: 750, volume: 750 * (m + 1), oi: 100_000, traded: true });
+      }
+    }
+  }
+  store.append(s.date, spotKey('NIFTY'), spot);
+  for (const [id, rows] of legs) {
+    const [type, strike] = id.split('|');
+    store.append(s.date, optKey('NIFTY', s.expiry, type as OptionSide, Number(strike)), rows);
+  }
+  const open = (9 * 60 + 15) * 60;
+  const close = (15 * 60 + 30) * 60;
+  store.setCoverage(s.date, hole ? [[open, hole[0] - 1], [hole[1] + 1, close]] : [[open, close]]);
+}
+
+function setupSeconds(hole?: [number, number]) {
+  const ctx = setupBacktest();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'q26-algo-seconds-'));
+  cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new SecondStore({ dataDir: dir });
+  recordSeconds(ctx.p, ctx.A, store, hole);
+  ctx.p.seconds = store;
+  return { ...ctx, store };
+}
+
+describe('backtests on one-second snapshots', () => {
+  it('replays every second: the same trades as the one-minute replay, filled at the recorded bid (sells) and ask (buys)', async () => {
+    const { algos, A } = setupSeconds();
+    const m = await algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, A.date);
+    const s = await algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, A.date, undefined, '1s');
+    expect(m.resolution).toBe('1m');
+    expect(s).toMatchObject({ resolution: '1s', date: A.date, expiry: '2026-10-13', entered: true, exitKind: 'EXIT', adjustments: 1, lotSize: 75 });
+    const trades = (d: typeof m) => d.events.filter((e) => e.fills.length).map((e) => [e.kind, istHhmm(e.ts), e.fills.map((f) => `${f.side} ${f.strike} ${f.type}`)]);
+    expect(trades(s)).toEqual(trades(m));
+    // Each fill is the minute replay's price ∓ the 0.05 half-spread: sells at the bid, buys at the ask.
+    const mf = m.events.flatMap((e) => e.fills);
+    const sf = s.events.flatMap((e) => e.fills);
+    sf.forEach((f, i) => expect(f.price).toBeCloseTo(f.side === 'SELL' ? Math.max(0.05, mf[i].price - 0.05) : mf[i].price + 0.05, 6));
+    expect(s.pnl as number).toBeLessThan(m.pnl as number); // the spread is paid
+    expect(s.events.some((e) => e.kind === 'INFO' && /fill\(s\) at the recorded bid\/ask, 0 at the last traded price/.test(e.message))).toBe(true);
+    // one chart point per minute, not 22,500
+    expect(s.series.length).toBeLessThanOrEqual(376);
+  });
+
+  it('reports a recording gap and pauses the algo through it', async () => {
+    const h0 = (11 * 60) * 60;
+    const { algos, A } = setupSeconds([h0, h0 + 600]);
+    const s = await algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, A.date, undefined, '1s');
+    expect(s.events.some((e) => e.kind === 'INFO' && /No recorded NIFTY data 11:00/.test(e.message))).toBe(true);
+  });
+
+  it('a day or a store without one-second data is skipped with the reason', async () => {
+    const { algos, B, p } = setupSeconds();
+    await expect(algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, B.date, undefined, '1s')).rejects.toThrow(`No one-second data was recorded on ${B.date}`);
+    const r = await algos.backtestRange('premium-ladder', { symbol: 'NIFTY' }, 3, undefined, '1s');
+    expect(r.resolution).toBe('1s');
+    expect(r.days.map((d) => d.date)).toEqual(['2026-10-12']);
+    expect(r.skipped.find((x) => x.date === B.date)?.reason).toBe(`No one-second data was recorded on ${B.date}`);
+    p.seconds = undefined;
+    await expect(algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, '2026-10-12', undefined, '1s')).rejects.toThrow('One-second data is not recorded (SECONDS_RECORD=false in .env)');
   });
 });

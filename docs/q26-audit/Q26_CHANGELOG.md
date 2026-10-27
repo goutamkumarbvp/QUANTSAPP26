@@ -172,3 +172,24 @@ Measured first (server CPU profile, API timings, Playwright page timings at 4× 
   session check. Wizard 6.3 s → 1.0 s, first page 2.1 s → 0.95 s, Optimizer 1.0 s → 0.2 s, average tab switch
   0.60 s → 0.37 s (4× CPU slowdown).
 - Live prices reach the browser every 250 ms instead of every second (one message per batch per socket).
+
+## C-51 — One-second data store and second-level backtests
+
+- `live/store/seconds.ts` (SecondStore): one 44-byte binary row per instrument and second it ticked (ltp, bid, ask
+  in paise; bid/ask quantities; cumulative volume; OI; traded flag) under `DATA_DIR/seconds/<date>/<SYMBOL>/<file>.bin`,
+  plus `coverage.json` (seconds the recorder ran with the feed connected). Torn rows after a crash are ignored on
+  read and trimmed before the next append. Finished days are gzipped (`.bin.gz`, size in `size.json`); the store
+  keeps `SECONDS_RETENTION_DAYS` (183) within `SECONDS_MAX_GB` (75), oldest first, never today, and pauses below
+  2 GB of free disk (resumes above 3 GB).
+- `live/second-recorder.ts` (SecondRecorder): from live ticks, the state at the end of each second; ticks outside the
+  exchange session or more than 60 s from the clock are ignored; a late tick of a written second goes into the open
+  one; buffered rows are appended every 5 s. The live provider runs it when `SECONDS_RECORD` is not `false`, and
+  compacts / prunes / checks the disk hourly; `healthReport().seconds` and `GET /api/seconds/status` report it.
+- Algo backtests take `resolution: '1m' | '1s'`. One second: a step every second of the session, legs read on first
+  use, buys filled at the recorded ask and sells at the bid (book ≤ 10 s old, else the last traded price, counted
+  in the trade log), uncovered seconds not replayed (gaps ≥ 2 min reported), one chart point per minute.
+- Web: Algo Strategies → Backtest → "Data: 1 minute / 1 second"; Settings → "1-second data" (space used against the
+  cap, days, free disk, pause reason).
+- Tests: row encoding, torn rows, compaction, retention / size pruning, coverage; the recorder's per-second rows,
+  session / staleness rules and late ticks; a provider run from feed ticks to stored seconds; a one-second replay
+  that makes the one-minute replay's trades at bid/ask prices, its gap report and its skip reasons; the web card.

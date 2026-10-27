@@ -37,6 +37,8 @@ import { Recorder, type RecorderStats } from './recorder';
 import { HistoryFiles } from './store/history';
 import { RecordedDailyHistory } from './store/recorded-daily';
 import { IntradayFiles } from './store/intraday';
+import { SecondStore, type SecondStoreUsage } from './store/seconds';
+import { SecondRecorder, type SecondRecorderStats } from './second-recorder';
 import { NoLiveData } from './types';
 import type { Candle, CandleInterval, FeedHealth, HistoryStore, InstrumentKey, IntradayStore, MarketDataProvider, TradingCalendar } from './types';
 import { EXTRA_INDEX_SPOTS, LiveUniverse, type UserContract } from './universe';
@@ -62,6 +64,8 @@ export interface LiveProviderConfig {
   sfeedTokenBudget: number;
   /** Recorded sessions kept on disk; unset = keep all. */
   intradayRetentionDays?: number;
+  /** Record one-second snapshots (SecondStore) with these limits; unset = not recorded. */
+  seconds?: { maxGb: number; retentionDays: number };
   /**
    * The app's stocks (NIFTY_TOP10: the NIFTY top 10 by market cap): the only stocks listed, and their nearest
    * option chains are streamed after the index chains; unset = DEFAULT_TOP10.
@@ -113,6 +117,8 @@ export interface LiveHealthReport {
   feed: FeedHealth & { details: LiveMarketDetails };
   refdata: ScripMasterStatus;
   recorder: RecorderStats & { firstRecordedSession: string | null; sessions: number };
+  /** One-second store and recorder; absent when one-second recording is off. */
+  seconds?: SecondStoreUsage & SecondRecorderStats;
   eod: EodStatus;
   sweep: SweepStatus;
   clock: MarketClockInfo;
@@ -319,6 +325,9 @@ export class LiveProvider implements MarketDataProvider {
   readonly history: RecordedDailyHistory;
   readonly pricing: LivePricing;
   readonly recorder: Recorder;
+  /** One-second snapshots (null when not recorded). */
+  readonly secondStore: SecondStore | null;
+  readonly secondRecorder: SecondRecorder | null;
   readonly eod: EodJobs;
   readonly universe: LiveUniverse;
   /** Null without credentials. */
@@ -448,6 +457,22 @@ export class LiveProvider implements MarketDataProvider {
       onError: (e) => this.log.warn(`live: recorder write failed: ${errMsg(e)}`),
     });
 
+    if (config.seconds) {
+      this.secondStore = new SecondStore({ dataDir: config.dataDir, maxBytes: config.seconds.maxGb * 1024 ** 3, retentionDays: config.seconds.retentionDays, logger: this.log });
+      this.secondRecorder = new SecondRecorder({
+        live: this.live,
+        store: this.secondStore,
+        clock: this.clock,
+        calendarOf: (symbol) => this.calendarOf(symbol),
+        calendars: [this.calendar, this.mcxCalendar],
+        timers: { setInterval: this.timers.setInterval, clearInterval: this.timers.clearInterval },
+        onError: (e) => this.log.warn(`live: 1-second recorder failed: ${errMsg(e)}`),
+      });
+    } else {
+      this.secondStore = null;
+      this.secondRecorder = null;
+    }
+
     const http = new NseHttp({ fetch: deps.nseFetch, now: this.now, sleep, logger: this.log });
     this.eod = new EodJobs({
       http,
@@ -496,6 +521,11 @@ export class LiveProvider implements MarketDataProvider {
     try {
       this.recorder.start();
       this.intraday.setLiveSource(this.recorder);
+      if (this.secondRecorder) {
+        this.secondRecorder.start();
+        this.secondsMaintenance();
+        this.intervals.push(this.timers.setInterval(() => this.secondsMaintenance(), 60 * MINUTE));
+      }
       this.sessionTick();
       this.intervals.push(this.timers.setInterval(() => this.sessionTick(), 30 * SECOND));
       this.intervals.push(this.timers.setInterval(() => this.minuteTick(), MINUTE));
@@ -504,6 +534,29 @@ export class LiveProvider implements MarketDataProvider {
       this.log.warn(`live: start failed: ${errMsg(e)}`);
     }
     this.boot = this.bootKotak().catch((e) => this.log.warn(`live: boot failed: ${errMsg(e)}`));
+  }
+
+  /** One-second store upkeep: disk check, gzip of finished days, then the size / age limits. */
+  private secondsMaintenance(): void {
+    const store = this.secondStore;
+    if (!store || this.stopped) return;
+    try {
+      store.checkDisk();
+      const today = this.calendar.session(this.now()).date;
+      store
+        .compact(today)
+        .then(() => {
+          if (!this.stopped) store.prune(today);
+        })
+        .catch((e) => this.log.warn(`live: 1-second store upkeep failed: ${errMsg(e)}`));
+    } catch (e) {
+      this.log.warn(`live: 1-second store upkeep failed: ${errMsg(e)}`);
+    }
+  }
+
+  /** One-second data reader for backtests (undefined when not recorded). */
+  get seconds(): SecondStore | undefined {
+    return this.secondStore ?? undefined;
   }
 
   /** Resolves once the first login → instrument master → universe attempt has finished (tests, logs). */
@@ -528,6 +581,11 @@ export class LiveProvider implements MarketDataProvider {
       this.recorder.stop(); // writes the minutes in progress
     } catch (e) {
       this.log.warn(`live: recorder stop failed: ${errMsg(e)}`);
+    }
+    try {
+      this.secondRecorder?.stop(); // writes the buffered seconds
+    } catch (e) {
+      this.log.warn(`live: 1-second recorder stop failed: ${errMsg(e)}`);
     }
     this.intraday.setLiveSource(null);
     await this.live.close();
@@ -977,6 +1035,7 @@ export class LiveProvider implements MarketDataProvider {
       feed: { ...feed, details: this.live.details() },
       refdata: this.ref.status(),
       recorder: { ...this.recorder.stats(), firstRecordedSession: sessions[0] ?? null, sessions: sessions.length },
+      ...(this.secondStore && this.secondRecorder ? { seconds: { ...this.secondStore.usage(), ...this.secondRecorder.stats() } } : {}),
       eod: this.eod.status(),
       sweep: this.live.sweepStatus(),
       clock: this.clock.info(),

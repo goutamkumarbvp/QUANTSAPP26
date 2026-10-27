@@ -53,6 +53,12 @@ export interface AppConfig {
    * the list is configuration; their option chains are streamed tick by tick after the index chains.
    */
   focusStocks: string[];
+  /** SECONDS_RECORD (default true): record a one-second snapshot of every streamed instrument (second-level backtests). */
+  secondsRecord: boolean;
+  /** SECONDS_MAX_GB (default 75): size cap of the one-second store; the oldest days go first. */
+  secondsMaxGb: number;
+  /** SECONDS_RETENTION_DAYS (default 183, about six months): days of one-second data kept. */
+  secondsRetentionDays: number;
 }
 
 /**
@@ -123,6 +129,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     eodBackfillDays: Math.max(0, Math.floor(num('EOD_BACKFILL_DAYS', 30))),
     sfeedTokenBudget: Math.min(2700, Math.max(1, Math.floor(num('SFEED_TOKEN_BUDGET', 2700)))),
     focusStocks: focusStocksFrom(process.env.NIFTY_TOP10),
+    secondsRecord: process.env.SECONDS_RECORD !== 'false',
+    secondsMaxGb: Math.max(1, num('SECONDS_MAX_GB', 75)),
+    secondsRetentionDays: Math.max(1, Math.floor(num('SECONDS_RETENTION_DAYS', 183))),
   };
   return { ...base, ...overrides };
 }

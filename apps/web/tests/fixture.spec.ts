@@ -261,5 +261,17 @@ test('algo: one-day backtest replays only a recorded session', async ({ page }) 
   // The previous session was recorded (fixture): it replays.
   await page.getByRole('textbox', { name: 'Session date' }).fill('2026-10-09');
   await expect(page.getByText('Trade log')).toBeVisible({ timeout: 20_000 });
+  // One-second data: this test server records none, so the reason is shown instead of a replay.
+  await page.getByRole('tab', { name: '1 second (bid/ask fills)' }).click();
+  await expect(page.locator('main [role="status"]').filter({ hasText: 'One-second data is not recorded' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(/second-by-second replay/)).toBeVisible();
+  await clean(page, watch);
+});
+
+test('settings: the 1-second data card says whether one-second data is recorded', async ({ page }) => {
+  const watch = watchErrors(page);
+  await open(page, '/settings', /Settings/);
+  await expect(page.getByText('1-second data (backtests)')).toBeVisible();
+  await expect(page.getByText(/One-second recording is off/)).toBeVisible({ timeout: 20_000 });
   await clean(page, watch);
 });

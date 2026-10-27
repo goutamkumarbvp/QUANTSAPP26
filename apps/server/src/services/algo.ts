@@ -43,7 +43,8 @@ import {
   type OptionSide,
 } from '@q26/core';
 import { NoLiveData } from '../live/types';
-import type { InstrumentKey, LiveQuote, MarketDataProvider, MinuteRecord, RawChain, UserContract } from '../live/types';
+import type { InstrumentKey, LiveQuote, MarketDataProvider, MinuteRecord, RawChain, SecondReader, UserContract } from '../live/types';
+import { SecondStore, type SecondRow } from '../live/store/seconds';
 import type { Db } from '../store/db';
 import type { Notifier } from './alerts';
 import { Gaps, httpError, liveDates, liveOptionExpiries, livePrice, mdFor, notRecordedReason, optKey, r2, requireDate, sessionsBack, spotKey } from './live';
@@ -117,7 +118,7 @@ const isFinal = (phase: string): boolean => phase === 'stopped' || phase === 'ex
  * (record.ts + 60 s ≤ ts) for every instrument: the same as-of rule as md.intraday.chainAt / at(),
  * without re-reading the store for every minute. No look-ahead.
  */
-class SessionTape {
+class SessionTape implements Tape {
   private readonly spot: MinuteRecord[];
   private spotIdx = -1;
   private readonly legs = new Map<string, { bars: MinuteRecord[]; idx: number }>();
@@ -173,6 +174,138 @@ class SessionTape {
     if (!leg || leg.idx < 0) return null;
     const c = leg.bars[leg.idx].close;
     return Number.isFinite(c) && c > 0 ? c : null;
+  }
+}
+
+/** What a replay reads: the underlying and the legs as of each step time. */
+interface Tape {
+  readonly strikes: number[];
+  readonly hasSpot: boolean;
+  readonly hasLegs: boolean;
+  firstStepTs(): number | null;
+  lastRecordedTs(): number | null;
+  seek(ts: number): void;
+  alive(ts: number): boolean;
+  spotClose(): number | null;
+  premium(type: OptionSide, strike: number): number | null;
+}
+
+/** Data resolution of a backtest: recorded one-minute bars, or one-second snapshots. */
+export type BacktestResolution = '1m' | '1s';
+
+/** A book older than this is not filled against in a one-second replay (the last traded price is used). */
+const BOOK_MAX_AGE_MS = 10_000;
+
+/**
+ * One recorded session of one-second snapshots (SecondStore): the value at step time `ts` is the last row
+ * of a second that ended by `ts`. Legs are read on first use (a replay asks for a few strikes, not all).
+ * `alive` = the recorder ran with the feed connected in the second that just ended (coverage); a day
+ * recorded without coverage falls back to "the underlying ticked in the last 5 seconds".
+ */
+class SecondTape implements Tape {
+  private readonly spot: SecondRow[];
+  private spotIdx = -1;
+  private readonly legs = new Map<string, { key: InstrumentKey; rows: SecondRow[] | null; lastLtp: number[] }>();
+  private readonly cover: [number, number][];
+  private coverIdx = 0;
+  private now = 0;
+  readonly strikes: number[];
+
+  constructor(
+    private readonly store: SecondReader,
+    symbol: string,
+    private readonly date: string,
+    legKeys: InstrumentKey[],
+  ) {
+    this.spot = store.read(spotKey(symbol), date).filter((r) => r.ltp !== undefined);
+    const strikes = new Set<number>();
+    for (const k of legKeys) {
+      if (k.strike === undefined) continue;
+      this.legs.set(`${k.kind}|${k.strike}`, { key: k, rows: null, lastLtp: [] });
+      strikes.add(k.strike);
+    }
+    this.strikes = [...strikes].sort((a, b) => a - b);
+    const d0 = SecondStore.dayStart(date);
+    this.cover = store.coverage(date).map(([a, b]) => [d0 + a * 1000, d0 + b * 1000] as [number, number]);
+  }
+
+  get hasSpot(): boolean {
+    return this.spot.length > 0;
+  }
+
+  get hasLegs(): boolean {
+    return this.legs.size > 0;
+  }
+
+  firstStepTs(): number | null {
+    return this.spot.length ? this.spot[0].ts + 1000 : null;
+  }
+
+  lastRecordedTs(): number | null {
+    return this.spot.length ? this.spot[this.spot.length - 1].ts + 1000 : null;
+  }
+
+  seek(ts: number): void {
+    this.now = ts;
+    while (this.spotIdx + 1 < this.spot.length && this.spot[this.spotIdx + 1].ts + 1000 <= ts) this.spotIdx++;
+  }
+
+  alive(ts: number): boolean {
+    if (!this.cover.length) return this.spotIdx >= 0 && ts - (this.spot[this.spotIdx].ts + 1000) <= 5000;
+    const sec = ts - 1000;
+    while (this.coverIdx < this.cover.length && this.cover[this.coverIdx][1] < sec) this.coverIdx++;
+    const c = this.cover[this.coverIdx];
+    return !!c && c[0] <= sec && sec <= c[1] && this.spotIdx >= 0;
+  }
+
+  spotClose(): number | null {
+    return this.spotIdx >= 0 ? (this.spot[this.spotIdx].ltp ?? null) : null;
+  }
+
+  /** The leg's rows (read once), and the index of the last row with a price at or before each row. */
+  private leg(type: OptionSide, strike: number) {
+    const l = this.legs.get(`${type}|${strike}`);
+    if (!l) return null;
+    if (!l.rows) {
+      l.rows = this.store.read(l.key, this.date);
+      let last = -1;
+      l.lastLtp = l.rows.map((r, i) => (r.ltp !== undefined ? (last = i) : last));
+    }
+    return l;
+  }
+
+  /** Index of the leg's last row whose second ended by the step time, -1 when none. */
+  private at(rows: SecondRow[]): number {
+    let lo = 0;
+    let hi = rows.length - 1;
+    let ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (rows[mid].ts + 1000 <= this.now) {
+        ans = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return ans;
+  }
+
+  premium(type: OptionSide, strike: number): number | null {
+    const l = this.leg(type, strike);
+    if (!l?.rows) return null;
+    const i = this.at(l.rows);
+    const j = i >= 0 ? l.lastLtp[i] : -1;
+    const v = j >= 0 ? l.rows[j].ltp : undefined;
+    return v !== undefined && v > 0 ? v : null;
+  }
+
+  /** The leg's book as of the step time and its age (null without a two-sided book). */
+  book(type: OptionSide, strike: number): { bid: number; ask: number; age: number } | null {
+    const l = this.leg(type, strike);
+    if (!l?.rows) return null;
+    const i = this.at(l.rows);
+    if (i < 0) return null;
+    const r = l.rows[i];
+    return r.bid !== undefined && r.ask !== undefined && r.ask >= r.bid ? { bid: r.bid, ask: r.ask, age: this.now - (r.ts + 1000) } : null;
   }
 }
 
@@ -365,14 +498,17 @@ export class AlgoService {
    * recording started after the algo's entry time. `until` (today, session in progress): replay up to
    * that time only.
    */
-  private replayDay(algo: AnyAlgo, p: Record<string, unknown>, date: string, opts: { until?: number; withSeries: boolean; recorded?: ReadonlySet<string> }): ReplayOutcome {
+  private replayDay(algo: AnyAlgo, p: Record<string, unknown>, date: string, opts: { until?: number; withSeries: boolean; recorded?: ReadonlySet<string>; resolution?: BacktestResolution }): ReplayOutcome {
     const symbol = String(p.symbol);
     const md = mdFor(this.md, symbol);
-    const recordedDates = opts.recorded ?? new Set(md.intraday.sessions());
-    if (!recordedDates.has(date)) return { ok: false, reason: notRecordedReason(md, date, 'market data') };
+    const perSecond = opts.resolution === '1s';
+    const seconds = md.seconds;
+    if (perSecond && !seconds) return { ok: false, reason: 'One-second data is not recorded (SECONDS_RECORD=false in .env)' };
+    const recordedDates = opts.recorded ?? new Set(perSecond ? seconds!.dates() : md.intraday.sessions());
+    if (!recordedDates.has(date)) return { ok: false, reason: perSecond ? `No one-second data was recorded on ${date}` : notRecordedReason(md, date, 'market data') };
 
     // Expiry: from the recorded chain's expiries of that session (nearest unexpired, or the one after it).
-    const recorded = md.intraday.recordedKeys(date).filter((k) => k.symbol === symbol && (k.kind === 'CE' || k.kind === 'PE') && k.expiry !== undefined && k.strike !== undefined && k.expiry >= date);
+    const recorded = (perSecond ? seconds!.keys(date) : md.intraday.recordedKeys(date)).filter((k) => k.symbol === symbol && (k.kind === 'CE' || k.kind === 'PE') && k.expiry !== undefined && k.strike !== undefined && k.expiry >= date);
     const expiries = [...new Set(recorded.map((k) => k.expiry as string))].sort();
     if (!expiries.length) return { ok: false, reason: `No recorded ${symbol} option chain for ${date}` };
     const idx = p.expiry === 'next' ? 1 : 0;
@@ -410,7 +546,8 @@ export class AlgoService {
       return { ok: false, reason: `Lot size of the ${symbol} ${expiry} contracts is unknown: they are no longer in the instrument master and the official F&O file for ${date} is not loaded` };
     }
 
-    const tape = new SessionTape(md, symbol, date, legKeys);
+    const secTape = perSecond ? new SecondTape(seconds!, symbol, date, legKeys) : null;
+    const tape: Tape = secTape ?? new SessionTape(md, symbol, date, legKeys);
     if (!tape.hasSpot) return { ok: false, reason: `No recorded ${symbol} price on ${date}` };
     if (!tape.hasLegs) return { ok: false, reason: `No recorded ${symbol} ${expiry} option prices on ${date}` };
     const firstStep = tape.firstStepTs() as number;
@@ -430,12 +567,18 @@ export class AlgoService {
     let lastAlive: number | null = null;
     const len = md.calendar.sessionMinutes(date);
     const lastM = opts.until !== undefined ? Math.min(len, Math.floor(md.calendar.session(opts.until).minute)) : len;
-    for (let m = 0; m <= lastM; m++) {
-      const ts = md.calendar.ts(date, m);
+    // Steps: every minute of the session, or every second of it (one-second data).
+    const stepMs = perSecond ? 1000 : MINUTE;
+    const firstTs = md.calendar.ts(date, 0) + (perSecond ? 1000 : 0);
+    const lastTs = perSecond ? Math.min(md.calendar.ts(date, len), opts.until ?? Infinity) : md.calendar.ts(date, lastM);
+    const fillBasis = { book: 0, ltp: 0 };
+    let lastSeriesMinute = -1;
+    for (let ts = firstTs; ts <= lastTs; ts += stepMs) {
       tape.seek(ts);
-      if (!tape.alive(ts)) continue; // the recorder was not running: nothing is replayed for this minute
-      if (lastAlive !== null && (ts - lastAlive) / MINUTE - 1 >= GAP_REPORT_MINUTES && !isFinal(algo.phase(state))) {
-        events.push({ ts, kind: 'INFO', message: `No recorded ${symbol} data ${hhmm(lastAlive)}–${hhmm(ts - MINUTE)}: the algo was paused`, fills: [] });
+      if (!tape.alive(ts)) continue; // the recorder was not running: nothing is replayed for this step
+      if (lastAlive !== null && ts - lastAlive - stepMs >= GAP_REPORT_MINUTES * MINUTE && !isFinal(algo.phase(state))) {
+        const fmt = perSecond ? (t: number) => formatTimeIST(t) : hhmm;
+        events.push({ ts, kind: 'INFO', message: `No recorded ${symbol} data ${fmt(lastAlive)}–${fmt(ts - stepMs)}: the algo was paused`, fills: [] });
       }
       lastAlive = ts;
       const snap: AlgoSnapshot = {
@@ -450,8 +593,18 @@ export class AlgoService {
         premium: (type, strike) => tape.premium(type, strike),
       };
       const fill: FillFn = (o) => {
+        // One-second data: a buy fills at the recorded ask, a sell at the bid (book at most 10 s old),
+        // else at the last traded price; one-minute data: at the minute's last traded price.
+        if (secTape) {
+          const b = secTape.book(o.type, o.strike);
+          if (b && b.age <= BOOK_MAX_AGE_MS) {
+            fillBasis.book++;
+            return o.side === 'BUY' ? b.ask : b.bid;
+          }
+        }
         const px = tape.premium(o.type, o.strike);
-        if (px == null) throw new Error(`No recorded price for ${o.strike} ${o.type} at ${hhmm(ts)}`);
+        if (px == null) throw new Error(`No recorded price for ${o.strike} ${o.type} at ${perSecond ? formatTimeIST(ts) : hhmm(ts)}`);
+        if (secTape) fillBasis.ltp++;
         return px;
       };
       events.push(...algo.step(p, state, snap, fill));
@@ -461,12 +614,20 @@ export class AlgoService {
         maxLoss = Math.min(maxLoss, pt.mtm);
       }
       maxLevel = Math.max(maxLevel, pt.level);
-      if (opts.withSeries) series.push(pt);
+      // One point per minute for the chart (a one-second replay would give 22,500 points a day).
+      const minuteOfDay = snap.minuteOfDay;
+      if (opts.withSeries && (!perSecond || minuteOfDay !== lastSeriesMinute)) {
+        series.push(pt);
+        lastSeriesMinute = minuteOfDay;
+      }
       // The snapshot reads the tape lazily: keep the open legs' premiums of this minute for valuation.
       last = { ...snap, premium: frozenPremiums(snap, algo.openLegs(state) as AlgoLeg[]) };
       if (!opts.withSeries && isFinal(algo.phase(state))) break;
     }
 
+    if (perSecond && fillBasis.book + fillBasis.ltp > 0) {
+      events.push({ ts: lastAlive ?? firstTs, kind: 'INFO', message: `One-second replay: ${fillBasis.book} fill(s) at the recorded bid/ask, ${fillBasis.ltp} at the last traded price (no two-sided book within 10 s)`, fills: [] });
+    }
     const partial = opts.until !== undefined && opts.until < md.calendar.ts(date, md.calendar.sessionMinutes(date));
     const dayRec = { date, expiry, state, events, maxProfit, maxLoss, maxLevel };
     let unrealized: number | null = 0;
@@ -507,15 +668,15 @@ export class AlgoService {
    * Replay one session the app recorded (default: the current session, replayed up to now while it
    * is in progress). 400 for a malformed/future/non-trading date; 503 when the day cannot be replayed.
    */
-  async backtestDay(algoId: string, input: Record<string, unknown>, date: string | undefined, nowTs: number = this.md.clock.now()): Promise<AlgoBacktestDay> {
+  async backtestDay(algoId: string, input: Record<string, unknown>, date: string | undefined, nowTs: number = this.md.clock.now(), resolution: BacktestResolution = '1m'): Promise<AlgoBacktestDay> {
     const algo = this.algo(algoId);
     const p = this.params(algo, input);
     const md = mdFor(this.md, String(p.symbol));
     const d = requireDate(md, date);
     const inProgress = d === md.calendar.session(nowTs).date && nowTs < md.calendar.ts(d, md.calendar.sessionMinutes(d));
-    const r = this.replayDay(algo, p, d, { withSeries: true, ...(inProgress ? { until: nowTs } : {}) });
+    const r = this.replayDay(algo, p, d, { withSeries: true, resolution, ...(inProgress ? { until: nowTs } : {}) });
     if (!r.ok) throw new NoLiveData(r.reason);
-    return { ...r.day.sum, algoId, symbol: String(p.symbol), lotSize: r.day.lotSize, partial: inProgress, series: r.day.series, events: r.day.events };
+    return { ...r.day.sum, algoId, symbol: String(p.symbol), lotSize: r.day.lotSize, partial: inProgress, resolution, series: r.day.series, events: r.day.events };
   }
 
   /**
@@ -523,12 +684,13 @@ export class AlgoService {
    * Sessions that were not recorded (or cannot be replayed) are listed in `skipped` with the reason;
    * stats and equity cover the complete days. 503 when no session has been recorded at all.
    */
-  async backtestRange(algoId: string, input: Record<string, unknown>, days: number, nowTs: number = this.md.clock.now()): Promise<AlgoBacktestRange> {
+  async backtestRange(algoId: string, input: Record<string, unknown>, days: number, nowTs: number = this.md.clock.now(), resolution: BacktestResolution = '1m'): Promise<AlgoBacktestRange> {
     const algo = this.algo(algoId);
     const p = this.params(algo, input);
     const md = mdFor(this.md, String(p.symbol));
-    const recordedDates = md.intraday.sessions();
-    if (!recordedDates.length) throw new NoLiveData('No session has been recorded yet: backtests replay only sessions the app recorded from the live feed');
+    if (resolution === '1s' && !md.seconds) throw new NoLiveData('One-second data is not recorded (SECONDS_RECORD=false in .env)');
+    const recordedDates = resolution === '1s' ? md.seconds!.dates() : md.intraday.sessions();
+    if (!recordedDates.length) throw new NoLiveData(resolution === '1s' ? 'No one-second data has been recorded yet: it is recorded from the live feed while the market is open' : 'No session has been recorded yet: backtests replay only sessions the app recorded from the live feed');
     const n = Math.max(1, Math.min(MAX_HISTORY, Math.floor(Number.isFinite(days) ? days : 1)));
     const today = md.calendar.session(nowTs).date;
     // Completed sessions only: today counts once the market has closed.
@@ -538,7 +700,7 @@ export class AlgoService {
     const out: AlgoDaySummary[] = [];
     const skipped: AlgoSkippedDay[] = [];
     for (const date of window) {
-      const r = this.replayDay(algo, p, date, { withSeries: false, recorded });
+      const r = this.replayDay(algo, p, date, { withSeries: false, recorded, resolution });
       if (r.ok) out.push(r.day.sum);
       else skipped.push({ date, reason: r.reason });
     }
@@ -561,6 +723,7 @@ export class AlgoService {
       from: window[0],
       to: window[window.length - 1],
       recordedFrom: recordedDates[0] ?? null,
+      resolution,
       days: out,
       skipped,
       equity,

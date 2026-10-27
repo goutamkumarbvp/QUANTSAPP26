@@ -7,6 +7,7 @@ import {
   ORDER_FLOW_METHOD,
   type BreadthResponse,
   type ExpectedRangeRow,
+  type SecondsStatus,
   type FiiDiiDay,
   type FuturesBuildUpRow,
   type MarketClockInfo,
@@ -33,6 +34,7 @@ import { hasChartData } from '../src/components/Chart';
 import { ApiError } from '../src/lib/api';
 import { useBuilder, useTicks, type BuilderLeg } from '../src/lib/store';
 import ExpectedRange, { IntradayCard, VixCard } from '../src/pages/ExpectedRange';
+import { SecondsCard } from '../src/pages/Settings';
 import Breadth from '../src/pages/oi/Breadth';
 import FuturesOI from '../src/pages/oi/FuturesOI';
 import MaxPain from '../src/pages/oi/MaxPain';
@@ -631,6 +633,28 @@ describe('Expected Range', () => {
     expect(decode(render(<IntradayCard r={row({ intraday: { ...row().intraday, horizons: [] }, gaps: { intraday: 'The intraday forecast is shown while the session is open' } })} />, []))).toContain('The intraday forecast is shown while the session is open');
   });
   it('503', () => expectBlank(render(<ExpectedRange />, [[['expected-range'], noLive('Instrument master not loaded yet')]]), 'Instrument master not loaded yet'));
+});
+
+describe('1-second data card', () => {
+  const GB = 1024 ** 3;
+  const base: SecondsStatus = { enabled: true, bytes: 12.5 * GB, maxBytes: 75 * GB, retentionDays: 183, days: 21, oldest: '2026-09-14', newest: '2026-10-12', freeBytes: 300 * GB, paused: null };
+  it('space used against the cap, the days held and free disk', () => {
+    const out = decode(render(<SecondsCard />, [[['seconds-status'], base]]));
+    expect(out).toContain('12.5 GB');
+    expect(out).toContain('of 75.0 GB · 21 days');
+    expect(out).toContain('kept 183 days or 75.0 GB, oldest removed first');
+    expect(out).toContain('Free disk: 300.0 GB');
+    expect(out).not.toContain('less free space');
+  });
+  it('a nearly full disk: paused with the reason, and the free space warning', () => {
+    const out = decode(render(<SecondsCard />, [[['seconds-status'], { ...base, freeBytes: 1.5 * GB, paused: 'Disk almost full (1.5 GB free, 2 GB needed): 1-second recording paused' }]]));
+    expect(out).toContain('1-second recording paused');
+    const low = decode(render(<SecondsCard />, [[['seconds-status'], { ...base, freeBytes: 20 * GB }]]));
+    expect(low).toContain('less free space (20.0 GB) than the rest of the 75.0 GB limit');
+  });
+  it('recording off', () => {
+    expect(decode(render(<SecondsCard />, [[['seconds-status'], { ...base, enabled: false }]]))).toContain('One-second recording is off (SECONDS_RECORD=false in .env)');
+  });
 });
 
 describe('every chart that is shown is a valid ECharts option', () => {

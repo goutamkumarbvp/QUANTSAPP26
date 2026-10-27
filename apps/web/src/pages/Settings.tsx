@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { AuthResponse, UserProfile, UserSettings } from '@q26/core';
+import type { AuthResponse, SecondsStatus, UserProfile, UserSettings } from '@q26/core';
 import { FeedDetails } from '../components/FeedStatus';
 import { SymbolSelect } from '../components/pickers';
-import { Card, ErrorBox, Field, PageHeader, Pill, Segmented, Toggle } from '../components/ui';
+import { Card, cx, ErrorBox, Field, Loadable, PageHeader, Pill, Segmented, Toggle } from '../components/ui';
 import { api, ensureSession, setToken } from '../lib/api';
+import { formatDate } from '../lib/format';
+import { useLive } from '../lib/hooks';
 import { useFeed } from '../lib/feed';
 import { useApp, useTicks } from '../lib/store';
 
@@ -115,6 +117,7 @@ export default function Settings() {
         <p className="text-sm text-muted">Q26 Options is a progressive web app — install it on Android, iOS (Share → Add to Home Screen) or desktop for a full-screen, app-like experience.</p>
         {installEvt && <button className="btn-primary mt-2" onClick={() => installEvt.prompt()}>Install</button>}
       </Card>
+      <SecondsCard />
       <Card title="Data sources">
         <div className="space-y-2 text-sm text-muted">
           <p>
@@ -141,5 +144,42 @@ export default function Settings() {
         <FeedDetails clock={clock} view={feed} appConnected={connected} />
       </Card>
     </div>
+  );
+}
+
+const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b < 10 * 1024 ** 3 ? 2 : 1)} GB`;
+
+/** One-second snapshot store: space used against its cap, days held, free disk, a pause for a full disk. */
+export function SecondsCard() {
+  const q = useLive<SecondsStatus>(['seconds-status'], '/seconds/status', 60_000);
+  return (
+    <Card title="1-second data (backtests)">
+      <Loadable q={q} compact>
+        {(s) =>
+          !s.enabled ? (
+            <p className="text-sm text-muted">One-second recording is off (SECONDS_RECORD=false in .env). Backtests use the one-minute recording.</p>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span>
+                  <b>{gb(s.bytes)}</b> <span className="text-muted">of {gb(s.maxBytes)} · {s.days} day{s.days === 1 ? '' : 's'}{s.oldest ? ` (${formatDate(s.oldest, true)} – ${formatDate(s.newest, true)})` : ''}</span>
+                </span>
+                <span className="text-xs text-muted">kept {s.retentionDays} days or {gb(s.maxBytes)}, oldest removed first</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded bg-line" role="progressbar" aria-valuenow={Math.round((s.bytes / s.maxBytes) * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="1-second data space used">
+                <div className={cx('h-full', s.bytes / s.maxBytes > 0.9 ? 'bg-warn' : 'bg-accent')} style={{ width: `${Math.min(100, (s.bytes / s.maxBytes) * 100)}%` }} />
+              </div>
+              <div className="text-xs text-muted">
+                Free disk: {s.freeBytes === null ? 'not reported by this system' : gb(s.freeBytes)}. Recorded from the live feed while the market is open (every streamed instrument, one row per second it ticked); finished days are compressed.
+              </div>
+              {s.paused && <div className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-xs text-warn" role="status">{s.paused}</div>}
+              {s.freeBytes !== null && s.freeBytes < s.maxBytes - s.bytes && !s.paused && (
+                <div className="text-xs text-warn">The disk has less free space ({gb(s.freeBytes)}) than the rest of the {gb(s.maxBytes)} limit: recording pauses when under 2 GB are free.</div>
+              )}
+            </div>
+          )
+        }
+      </Loadable>
+    </Card>
   );
 }

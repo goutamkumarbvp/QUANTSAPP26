@@ -6,7 +6,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { z, ZodError } from 'zod';
-import { type ClientMessage, type Leg, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type QuotesResponse, type ServerMessage, type SymbolInfo } from '@q26/core';
+import { type ClientMessage, type Leg, type SecondsStatus, type FeedStatus, type MarketClockInfo, type MetaResponse, type Quote, type QuotesResponse, type ServerMessage, type SymbolInfo } from '@q26/core';
 import { profile } from './auth';
 import { NoLiveData, type InstrumentKey } from './live/types';
 import type { StoredUser } from './store/db';
@@ -746,18 +746,25 @@ export async function buildApp(
   });
   app.get<{ Params: { id: string } }>('/api/watchlists/:id/quotes', async (req) => svc.watchlists.quotes(requireUser(req).id, req.params.id));
 
+  /* ============================== one-second data ============================== */
+
+  app.get('/api/seconds/status', async (): Promise<SecondsStatus> => {
+    const u = md.seconds?.usage();
+    return u ? { enabled: true, ...u } : { enabled: false, bytes: 0, maxBytes: 0, retentionDays: 0, days: 0, oldest: null, newest: null, freeBytes: null, paused: null };
+  });
+
   /* ============================== algo strategies ============================== */
 
   const algoParams = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({});
   app.get('/api/algos', async () => svc.algos.catalog());
   app.get<{ Params: { id: string } }>('/api/algos/:id/defaults', async (req) => svc.algos.defaults(req.params.id, qs(req).symbol ?? 'NIFTY'));
   app.post<{ Params: { id: string } }>('/api/algos/:id/backtest', async (req) => {
-    const b = z.object({ params: algoParams, date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.body ?? {});
-    return svc.algos.backtestDay(req.params.id, b.params, b.date, now());
+    const b = z.object({ params: algoParams, date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), resolution: z.enum(['1m', '1s']).default('1m') }).parse(req.body ?? {});
+    return svc.algos.backtestDay(req.params.id, b.params, b.date, now(), b.resolution);
   });
   app.post<{ Params: { id: string } }>('/api/algos/:id/backtest-range', async (req) => {
-    const b = z.object({ params: algoParams, days: z.coerce.number().int().min(1).max(250).default(20) }).parse(req.body ?? {});
-    return svc.algos.backtestRange(req.params.id, b.params, b.days, now());
+    const b = z.object({ params: algoParams, days: z.coerce.number().int().min(1).max(250).default(20), resolution: z.enum(['1m', '1s']).default('1m') }).parse(req.body ?? {});
+    return svc.algos.backtestRange(req.params.id, b.params, b.days, now(), b.resolution);
   });
   app.get('/api/algo-runs', async (req) => svc.algos.list(requireUser(req).id));
   app.post('/api/algo-runs', async (req) => {

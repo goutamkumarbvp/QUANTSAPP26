@@ -37,6 +37,7 @@ import type {
   OptKind,
   RawChain,
   ReferenceData,
+  SecondReader,
   Segment,
   TradingCalendar,
   Underlying,
@@ -557,6 +558,8 @@ export class FakeProvider implements MarketDataProvider {
   readonly clock: LiveClock;
   readonly live: FakeLiveMarket;
   readonly intraday = new MemoryIntraday();
+  /** One-second store (tests assign one when they need it). */
+  seconds?: SecondReader;
   readonly history: HistoryFiles;
   readonly pricing: LivePricing;
   private t: number;
