@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import * as echarts from 'echarts/core';
 import { BarChart, CandlestickChart, HeatmapChart, LineChart, ScatterChart, TreemapChart } from 'echarts/charts';
 import {
@@ -159,6 +159,47 @@ function noInvention(option: EChartsCoreOption): EChartsCoreOption {
   return { ...option, series: Array.isArray(series) ? series.map(fix) : fix(series) } as EChartsCoreOption;
 }
 
+/** Pending chart draws, one per animation frame. */
+const drawQueue: Array<() => void> = [];
+let drawFrame = 0;
+function runDraws(): void {
+  const start = performance.now();
+  // A frame draws charts for up to ~12 ms (at least one), so a page of charts paints first and
+  // stays responsive while its charts are drawn one after the other.
+  do drawQueue.shift()?.();
+  while (drawQueue.length && performance.now() - start < 12);
+  drawFrame = drawQueue.length ? requestAnimationFrame(runDraws) : 0;
+}
+/** Queues a chart draw for the next frame; the returned function cancels it if it has not run yet. */
+function scheduleDraw(draw: () => void): () => void {
+  if (typeof requestAnimationFrame === 'undefined') {
+    draw();
+    return () => undefined;
+  }
+  drawQueue.push(draw);
+  if (!drawFrame) drawFrame = requestAnimationFrame(runDraws);
+  return () => {
+    const i = drawQueue.indexOf(draw);
+    if (i >= 0) drawQueue.splice(i, 1);
+  };
+}
+
+/**
+ * Whether the element is on (or within a quarter screen of) the viewport. True where the browser cannot tell
+ * (no IntersectionObserver), so the chart is then drawn at once as before.
+ */
+function useOnScreen(ref: RefObject<HTMLElement>): boolean {
+  const [on, setOn] = useState(() => typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver((entries) => setOn(entries[entries.length - 1].isIntersecting), { rootMargin: '25% 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [ref]);
+  return on;
+}
+
 /**
  * ECharts canvas. A chart with no real point in any series shows the blank state (`blank` = the reason, or the
  * default text) instead of empty axes; `blank` can also be passed to force it (e.g. the server said 503).
@@ -169,9 +210,16 @@ export function Chart({ option, height = 320, className, onEvents, blank }: { op
   const theme = useApp((s) => s.theme);
   const forced = blank !== undefined && blank !== null && blank !== false;
   const empty = forced || !hasChartData(option);
+  const visible = useOnScreen(ref);
+  // Drawn once the chart is near the screen and has data: a chart further down the page is set up when it is
+  // scrolled to, a chart scrolled away is not redrawn on every live update (its latest data is drawn when it is
+  // back), and a blank chart (its canvas is hidden under the blank state) is not drawn at all.
+  const seen = useRef(false);
+  if (visible && !empty) seen.current = true;
+  const ready = seen.current;
 
   useEffect(() => {
-    if (!ref.current) return;
+    if (!ref.current || !ready) return;
     const chart = echarts.init(ref.current, CHART_THEME, { renderer: 'canvas' });
     inst.current = chart;
     // At most one resize per frame (a layout change reports many sizes in a row).
@@ -190,13 +238,21 @@ export function Chart({ option, height = 320, className, onEvents, blank }: { op
       chart.dispose();
       inst.current = null;
     };
-  }, [theme]);
+  }, [theme, ready]);
 
+  const drawn = useRef<{ option: EChartsCoreOption; chart: echarts.ECharts } | null>(null);
   useEffect(() => {
+    const chart = inst.current;
+    if (!chart || !visible || empty) return;
+    if (drawn.current?.option === option && drawn.current.chart === chart) return;
     // Live charts redraw every few seconds: no tweening (an animated update redraws every frame for a second),
     // so a new value is drawn at once and the page stays responsive. A chart may still ask for animation.
-    inst.current?.setOption({ animation: false, ...noInvention(option) }, { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
-  }, [option, theme]);
+    return scheduleDraw(() => {
+      if (chart.isDisposed()) return;
+      drawn.current = { option, chart };
+      chart.setOption({ animation: false, ...noInvention(option) }, { replaceMerge: ['series', 'xAxis', 'yAxis', 'visualMap', 'grid', 'legend'] });
+    });
+  }, [option, theme, ready, visible, empty]);
 
   useEffect(() => {
     const chart = inst.current;
@@ -205,7 +261,7 @@ export function Chart({ option, height = 320, className, onEvents, blank }: { op
     return () => {
       for (const [ev, fn] of Object.entries(onEvents)) chart.off(ev, fn);
     };
-  }, [onEvents, theme]);
+  }, [onEvents, theme, ready]);
 
   // The canvas stays mounted (hidden) so it can draw as soon as data arrives; the blank state is laid over it.
   return (

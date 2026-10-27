@@ -15,6 +15,7 @@ import {
   strategyGaps,
   strategyGreeks,
   strategyPnl,
+  strategyPnlAt,
   yearsBetween,
   type Leg,
   type ValuationContext,
@@ -265,5 +266,31 @@ describe('estimateMargin without an IV', () => {
     const e = estimateMargin([fut], 25000, now, { r: 0.065 }, INDEX_MARGIN);
     expect(e.margin!.total).toBeGreaterThan(0);
     expect(Number.isFinite(e.margin!.total)).toBe(true);
+  });
+});
+
+describe('strategyPnlAt', () => {
+  it('gives the sum of the legs\' P&L (legPnl) at every price, for every kind of leg', () => {
+    const later = '2026-11-24';
+    const legs: Leg[] = [
+      leg('BUY', 'CE', 25000, 120, 0.14),
+      leg('SELL', 'PE', 24800, 90, 0.16),
+      { ...leg('SELL', 'CE', 25500, 60, 0.15), expiry: later },
+      { ...leg('BUY', 'PE', 24500, 40), expiry: later }, // no IV: left out before expiry
+      { side: 'BUY', type: 'FUT', strike: 0, expiry: later, lots: 1, lotSize: 65, price: 25100 },
+      { ...leg('SELL', 'CE', 25200, 80, 0.15), exitPrice: 50 },
+      { ...leg('BUY', 'CE', 25300, 70, 0.15), active: false },
+    ];
+    const ctxs: ValuationContext[] = [ctx, { r: 0.065, carry: (e) => (e === later ? 0.012 : 0.01), ivShift: 0.02 }, { r: 0.065, carry: (e) => (e === later ? null : 0.01) }];
+    for (const c of ctxs) {
+      for (const ts of [now, expiryTs(expiry), expiryTs(later)]) {
+        const f = strategyPnlAt(legs, ts, c);
+        for (let S = 20000; S <= 30000; S += 137) {
+          const sum = legs.reduce((a, l) => a + (legPnl(l, S, ts, c) ?? 0), 0);
+          expect(f(S)).toBe(sum);
+          expect(strategyPnl(legs, S, ts, c)).toBe(sum);
+        }
+      }
+    }
   });
 });

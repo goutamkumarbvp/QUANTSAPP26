@@ -149,6 +149,21 @@ test('PCR: change-in-OI PCR for today (put OI added ÷ call OI added) from the o
   await clean(page, watch);
 });
 
+test('charts: one below the screen is drawn when scrolled to; a chart with no data draws no canvas', async ({ page }) => {
+  const watch = watchErrors(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '/oi/pcr', /PCR & OI Trend/);
+  const eod = page.getByText(/End-of-day PCR \(nearest expiry\)/);
+  await page.waitForTimeout(800);
+  // The weekly expiry has no recorded minutes today: its charts show the blank state over no canvas.
+  await expect(page.getByText('Nothing to chart').first()).toBeVisible();
+  expect(await page.locator('canvas').count()).toBe(0);
+  await eod.scrollIntoViewIfNeeded();
+  await expect(page.locator('canvas')).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.locator('canvas').first()).toBeInViewport();
+  await clean(page, watch);
+});
+
 test('NIFTY Top 10 desk: ten heavyweights with futures, options, flow and a bias with reasons (test stocks)', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/nifty-top10', /NIFTY Top 10 — F&O Desk/);

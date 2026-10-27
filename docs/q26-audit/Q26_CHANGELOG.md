@@ -208,3 +208,26 @@ changed. Tests: the menu (six entries, every page once, `locate()` with the entr
   drive smaller than `SECONDS_MAX_GB` keeps recording with fewer days instead of pausing; the provider runs the upkeep
   every 10 minutes (was hourly). The pause below 2 GB free remains the last guard.
 - `GET /api/seconds/status` and the Settings card show the store's folder and the free space of its drive.
+
+## C-54 — Speed: charts drawn only when seen; strategy maths worked out once per leg
+
+Measured first, in a browser at 4× CPU slowdown (a mid-range phone) on the test server: pages with charts spent
+their time in ECharts drawing, the Strategy Wizard in payoff maths. Nothing a page shows changed.
+
+- Charts (`components/Chart.tsx`):
+  - a chart is set up when it comes within a quarter screen of the viewport, so a chart further down the page costs
+    nothing until it is scrolled to;
+  - a chart scrolled away is not redrawn on each live update; its latest data is drawn when it is back;
+  - a chart with no data (its canvas is hidden under the blank state) is not drawn at all;
+  - draws are queued, about 12 ms of them per frame, so a page of charts paints first and input never waits for all
+    of them.
+  - Measured: Market Terminal opens in 270–420 ms instead of 930 ms, PCR in about 180 ms instead of 500 ms, and
+    Max Pain in about 140 ms instead of 430 ms. The remaining long tasks are one ECharts draw each.
+- Payoff maths (`packages/core/src/payoff.ts`): `strategyPnlAt(legs, ts, ctx)` works out each leg's time to expiry,
+  carry and IV once and returns P&L as a function of the underlying. Max profit/loss, breakevens, probability of
+  profit and payoff curves use it, about 4,400 prices per strategy.
+  - Same figures, bit for bit: 0 differences over 400 random strategies against the previous code.
+  - About 1.4–3× faster depending on the legs.
+- Tests:
+  - core: `strategyPnlAt` equals the sum of `legPnl` for every kind of leg and context;
+  - e2e: a chart below the screen gets its canvas when scrolled to, and a blank chart draws none.

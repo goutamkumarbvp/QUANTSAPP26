@@ -136,9 +136,49 @@ export function legPnl(leg: Leg, S: number, evalTs: number, ctx: ValuationContex
  * expiry) is left out — `strategyGaps` names those legs for the same arguments.
  */
 export function strategyPnl(legs: readonly Leg[], S: number, evalTs: number, ctx: ValuationContext): number {
-  let pnl = 0;
-  for (const leg of legs) pnl += legPnl(leg, S, evalTs, ctx) ?? 0;
-  return pnl;
+  return strategyPnlAt(legs, evalTs, ctx)(S);
+}
+
+/**
+ * `strategyPnl` at a fixed `evalTs` as a function of the underlying: each leg's expiry time, carry and IV
+ * are worked out once, not at every price (curves, breakevens and the probability sum value thousands of
+ * prices). Same figures as `strategyPnl` for every S.
+ */
+export function strategyPnlAt(legs: readonly Leg[], evalTs: number, ctx: ValuationContext): (S: number) => number {
+  const terms: Array<(S: number) => number> = [];
+  for (const leg of legs) {
+    if (!isActive(leg)) continue;
+    const qty = legQty(leg) * sideSign(leg.side);
+    if (leg.exitPrice != null) {
+      const v = qty * (leg.exitPrice - leg.price);
+      terms.push(() => v);
+      continue;
+    }
+    const T = yearsBetween(evalTs, expiryTs(leg.expiry, ctx.exchange));
+    if (T <= 0) {
+      const { type, strike, price } = leg;
+      terms.push(type === 'FUT' ? (S) => qty * (S - price) : (S) => qty * (intrinsic(type, S, strike) - price));
+      continue;
+    }
+    const q = carryOf(leg.expiry, ctx);
+    if (q === null) continue; // cannot be valued: left out (see strategyGaps)
+    if (leg.type === 'FUT') {
+      const grow = Math.exp((ctx.r - q) * T);
+      const price = leg.price;
+      terms.push((S) => qty * (S * grow - price));
+      continue;
+    }
+    const sigma = legIv(leg, ctx);
+    if (sigma === null) continue;
+    const { type, strike, price } = leg;
+    const r = ctx.r;
+    terms.push((S) => qty * (bsPrice(type, S, strike, T, r, sigma, q) - price));
+  }
+  return (S) => {
+    let pnl = 0;
+    for (const t of terms) pnl += t(S);
+    return pnl;
+  };
 }
 
 /** Timestamp of the first expiry among open legs (the payoff "at expiry" horizon). */
@@ -174,10 +214,12 @@ export function payoffCurve(
   const prices = [...set].sort((a, b) => a - b);
   const expTs = nearestExpiryTs(legs, ctx.exchange);
   const atExpiry = Number.isFinite(expTs) ? expTs : opts.targetTs;
+  const atExp = strategyPnlAt(legs, atExpiry, ctx);
+  const atTarget = strategyPnlAt(legs, opts.targetTs, ctx);
   return {
     prices,
-    expiry: prices.map((S) => strategyPnl(legs, S, atExpiry, ctx)),
-    target: prices.map((S) => strategyPnl(legs, S, opts.targetTs, ctx)),
+    expiry: prices.map(atExp),
+    target: prices.map(atTarget),
     targetMissing: strategyGaps(legs, opts.targetTs, ctx),
     expiryMissing: strategyGaps(legs, atExpiry, ctx),
   };
@@ -293,6 +335,7 @@ export function probabilityOfProfit(
   }
   const sd = sigma * Math.sqrt(T);
   const mu = Math.log(S) - 0.5 * sd * sd;
+  const pnlAtExpiry = strategyPnlAt(legs, expTs, ctx);
   const N = 800;
   const zLo = -6;
   const zHi = 6;
@@ -304,7 +347,7 @@ export function probabilityOfProfit(
     const z = zLo + (i + 0.5) * dz;
     const w = normPdf(z) * dz;
     const ST = Math.exp(mu + sd * z);
-    const v = strategyPnl(legs, ST, expTs, ctx);
+    const v = pnlAtExpiry(ST);
     mass += w;
     expected += w * v;
     if (v > 0) pop += w;
@@ -335,7 +378,7 @@ export function analyzeStrategy(
   }
   const missingAtExpiry = strategyGaps(legs, expTs, ctx);
 
-  const f = (x: number) => strategyPnl(active, x, expTs, ctx);
+  const f = strategyPnlAt(active, expTs, ctx);
   const strikes = active.filter((l) => l.type !== 'FUT').map((l) => l.strike);
   const hi = Math.max(S, ...strikes) * 3;
   const samples: number[] = [0.01, ...strikes];
