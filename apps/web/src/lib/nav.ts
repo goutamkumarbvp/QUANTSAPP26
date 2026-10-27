@@ -12,7 +12,7 @@ export interface NavGroup {
 
 /**
  * The menu, grouped by what the data is: live market overview → tick-by-tick flow → open interest →
- * volatility → institutional (official end-of-day) data → scanners → strategy → trading. Each tab shows
+ * institutional (official end-of-day) data → scanners → strategy → trading. Each tab shows
  * its own data; tabs that showed the same data were merged (old addresses redirect, see App.tsx).
  */
 export const NAV: NavGroup[] = [
@@ -22,6 +22,7 @@ export const NAV: NavGroup[] = [
       { to: '/', label: 'Home', icon: '⌂', desc: 'Indices, MCX commodities, movers, build-up and flows at a glance' },
       { to: '/watchlist', label: 'Watchlist', icon: '☆', desc: 'Track underlyings, futures and option contracts' },
       { to: '/terminal', label: 'Market Terminal', icon: '▣', desc: 'Price with EMA, total CE vs PE OI with build-up, PCR (OI & COI) and volume vs OI on one screen' },
+      { to: '/expected-range', label: 'Expected Range', icon: '↕', desc: 'Daily expected move (±1σ / ±2σ) of NIFTY, SENSEX, GOLD, SILVER, NATURAL GAS and CRUDE OIL from ATM IV, with its hit-rate' },
       { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up — indices, stocks and MCX commodities (GOLD, CRUDEOIL …)' },
       { to: '/nifty-top10', label: 'NIFTY Top 10 Desk', icon: '★', desc: 'The index heavyweights: futures, options and order flow side by side, with a transparent bias' },
       { to: '/fno-market', label: 'F&O Market', icon: '▦', desc: 'Every F&O future: heat-map, price vs OI build-up, sector breadth' },

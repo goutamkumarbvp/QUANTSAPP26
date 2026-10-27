@@ -1,5 +1,5 @@
 /**
- * TEST-ONLY MCX commodities for the e2e fixture server: CRUDEOIL and GOLD as ordinary underlyings of
+ * TEST-ONLY MCX commodities for the e2e fixture server: CRUDEOIL, GOLD, SILVER and NATURALGAS as ordinary underlyings of
  * the FakeProvider (kind 'commodity', exchange MCX: price = near-month future, options written on the
  * future they settle into), with quotes priced by Black-76 at a flat test volatility and the
  * previous MCX session's last minute recorded (OI change). Every contract and price here is test
@@ -22,6 +22,8 @@ interface Spec {
 const SPECS: Spec[] = [
   { name: 'CRUDEOIL', label: 'Crude Oil', sector: 'Energy', fut: 5480, prev: 5436, step: 50, lot: 100, vol: 0.38 },
   { name: 'GOLD', label: 'Gold', sector: 'Precious Metals', fut: 76_250, prev: 76_010, step: 500, lot: 100, vol: 0.16 },
+  { name: 'SILVER', label: 'Silver', sector: 'Precious Metals', fut: 92_400, prev: 91_800, step: 1000, lot: 30, vol: 0.24 },
+  { name: 'NATURALGAS', label: 'Natural Gas', sector: 'Energy', fut: 268.4, prev: 263.1, step: 5, lot: 1250, vol: 0.52 },
 ];
 
 export function addTestCommodities(p: FakeProvider, today: string, r = 0.065): void {

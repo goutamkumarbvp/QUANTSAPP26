@@ -25,6 +25,7 @@ const ROUTES: [string, RegExp][] = [
   ['/oi/max-pain', /Max Pain/],
   ['/oi/futures', /Futures OI/],
   ['/oi/breadth', /Build-up Breadth/],
+  ['/expected-range', /Expected Range/],
   ['/builder', /Strategy Builder/],
   ['/templates', /Strategy Wizard/],
   ['/optimizer', /Strategy Optimizer/],

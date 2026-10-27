@@ -589,6 +589,14 @@ export async function buildApp(
     return an.fiiDii(from, to);
   });
 
+  /* ---------------------------- expected range ---------------------------- */
+
+  app.get('/api/expected-range', async (req) => {
+    const q = qs(req);
+    const list = (q.symbols ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+    return an.expectedRange(list.length ? list.slice(0, 12) : undefined, now());
+  });
+
   /* ---------------------------- strategy tools ---------------------------- */
 
   // A malformed strike or width is a 400, never replaced by ATM / 0 (Analytics also rejects ones outside the strikes).

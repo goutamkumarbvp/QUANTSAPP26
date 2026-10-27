@@ -80,3 +80,17 @@ The Volatility tab (IV Chart, IV Rank & Percentile, Volatility Skew, Surface, Co
 web pages (`pages/vol/`), routes `/api/vol/*`, `Analytics.ivChart/ivHistory/skew/surface/cone`, the core cone/rolling-HV/Parkinson
 estimators, the response types, and their tests. Kept because other features need them: `Analytics.ivTable()` (IV scanners and
 the market synopsis), `historicalVol`, `ivRank`, `ivPercentile`, and the IV/Greeks of the option chain and payoff.
+
+## C-44 — Expected Range tab
+
+New tab `/expected-range` (Market group) and route `GET /api/expected-range?symbols=` (default NIFTY, SENSEX, GOLD,
+SILVER, NATURALGAS, CRUDEOIL; symbols not in the instrument master are left out). For each underlying, for its current
+session (after the close: the next one):
+- σ = previous close × ATM IV × √(calendar time from the previous session's close to this session's close / 365) — the
+  same /365 time the IV is solved with; the ATM IV is the live one of the nearest expiry with at least a day left, else
+  the previous session's official (NSE/BSE) or recorded (MCX) end-of-day ATM IV, labelled as not live;
+- ±1σ (≈ 68 %) and ±2σ (≈ 95 %) bands, the live price's position, the share of the band the day's high–low has used,
+  and ±1σ for the rest of the session from the live price;
+- a back-check over the last 60 sessions with an end-of-day ATM IV and daily bars: the share of closes inside ±1σ / ±2σ
+  and of days whose whole high–low stayed inside ±1σ, plus the 14-session average high − low.
+Missing inputs are blank with the reason. The e2e fixture gains SILVER and NATURALGAS test contracts.

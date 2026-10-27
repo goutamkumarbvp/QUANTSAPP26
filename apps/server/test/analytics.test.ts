@@ -14,6 +14,7 @@ import {
   ivPercentile,
   ivRank,
   MARKET_CLOSE_MIN,
+  YEAR_MS,
   maxPain,
   type FiiDiiDay,
   type Leg,
@@ -25,6 +26,7 @@ import { NoLiveData, keyId, type DailyOption, type InstrumentKey, type OptKind }
 import { Analytics, IV_WINDOW, RECORDED_CHAIN_COVERAGE, changePcrOf, inWindows, sumFiiDii } from '../src/services/analytics';
 import { buildOptionChain, futKey, optKey, sessionsBack, spotKey } from '../src/services/live';
 import { Pricer } from '../src/services/pricer';
+import { addTestCommodities } from './support/e2e-mcx';
 import { FakeProvider, loadSampleBook } from './support/fake-provider';
 
 const providers: FakeProvider[] = [];
@@ -685,5 +687,104 @@ describe('before any data exists', () => {
     await expect(an.orb('NIFTY')).rejects.toThrow(NoLiveData);
     p.ref.setLoaded(true);
     expect(await errOf(() => an.strategyChart('NOPE', [leg], undefined, 5))).toMatchObject({ statusCode: 404 });
+  });
+});
+
+describe('expected range', () => {
+  const closeTs = (p: FakeProvider, d: string) => p.calendar.ts(d, p.calendar.sessionMinutes(d));
+
+  it('±1σ / ±2σ from the previous close and the live ATM IV over the calendar time to this session close', () => {
+    const { p, an, w1 } = setup();
+    const rows = an.expectedRange(['NIFTY', 'SENSEX', 'BANKNIFTY']);
+    // SENSEX is not listed in the test book: it is left out, not shown with made-up values
+    expect(rows.map((r) => r.symbol)).toEqual(['NIFTY', 'BANKNIFTY']);
+    const n = rows[0];
+    const iv = p.pricing.atmIv('NIFTY', w1)!;
+    const yrs = (closeTs(p, DAY) - closeTs(p, PREV)) / YEAR_MS;
+    const sigma = 24900 * iv * Math.sqrt(yrs);
+    expect(n).toMatchObject({ date: DAY, anchorDate: PREV, anchor: 24900, ltp: 25000, high: 25050, low: 24920, ivSource: 'live', expiry: w1, exchange: 'NSE', position: 'inside' });
+    expect(n.iv).toBe(pct(iv));
+    expect(n.days).toBe(3);
+    expect(n.sigma).toBe(r2(sigma));
+    expect(n.band1).toEqual({ low: r2(24900 - sigma), high: r2(24900 + sigma) });
+    expect(n.band2).toEqual({ low: r2(24900 - 2 * sigma), high: r2(24900 + 2 * sigma) });
+    expect(n.rangeUsedPct).toBe(r2((130 / (2 * sigma)) * 100));
+    // 11:00, session open: the rest of the day from the live price
+    const rem = 25000 * iv * Math.sqrt((closeTs(p, DAY) - p.now()) / YEAR_MS);
+    expect(n.remaining).toEqual({ low: r2(25000 - rem), high: r2(25000 + rem), sigma: r2(rem) });
+  });
+
+  it('after the close the range is for the next session, centred on the live close', () => {
+    const { p, an } = setup();
+    p.setNow(at(DAY, '16:00'));
+    const n = an.expectedRange(['NIFTY'])[0];
+    expect(n.date).toBe(p.calendar.next(DAY));
+    expect(n.anchorDate).toBe(DAY);
+    expect(n.ltp).toBeNull();
+    expect(n.gaps?.ltp).toMatch(/has not traded in the .* session yet/);
+    expect(n.remaining).toBeNull();
+    if (n.anchor !== null) expect(n.anchor).toBe(25000);
+  });
+
+  it('back-check: how often the close and the whole day stayed inside the band on past official sessions', () => {
+    const { p, an } = setup();
+    const days = sessionsBack(p, PREV, 7);
+    const ks = [0.5, 1.5, -0.5, -3, 0.2, 2.5];
+    let close = 25000;
+    const bars: { high: number; low: number }[] = [];
+    days.forEach((d, i) => {
+      let high = close + 5;
+      let low = close - 5;
+      if (i > 0) {
+        const c0 = close;
+        const iv = p.history.dailyAtmIv('NIFTY', days[i - 1], days[i - 1])[0].iv;
+        const sg = c0 * iv * Math.sqrt((closeTs(p, d) - closeTs(p, days[i - 1])) / YEAR_MS);
+        close = r2(c0 + ks[i - 1] * sg);
+        high = r2(Math.max(c0, close) + 0.1 * sg);
+        low = r2(Math.min(c0, close) - 0.1 * sg);
+        if (ks[i - 1] === 0.2) high = r2(c0 + 1.2 * sg); // the high pierces +1σ although the close is inside
+      }
+      bars.push({ high, low });
+      p.history.writeDailyBars('index', d, [{ symbol: 'NIFTY', date: d, open: close, high, low, close }]);
+      const K = Math.round(close / 50) * 50;
+      p.history.writeFo(d, { options: officialOptions(p, 'NIFTY', d, addDays(d, 7), { vol: 0.12, strikes: [K - 50, K, K + 50] }) });
+    });
+    const h = an.expectedRange(['NIFTY'])[0].history;
+    expect(h).toEqual({
+      sessions: 6,
+      closeIn1: 50,
+      closeIn2: r2((4 / 6) * 100),
+      rangeIn1: r2((2 / 6) * 100),
+      avgRange: r2(bars.reduce((a, b) => a + (b.high - b.low), 0) / bars.length),
+      from: days[1],
+      to: PREV,
+    });
+  });
+
+  it('MCX commodities use their own session close and the near-month future', () => {
+    const { p, an } = setup();
+    addTestCommodities(p, DAY);
+    const c = an.expectedRange(['CRUDEOIL', 'GOLD']);
+    expect(c.map((r) => [r.symbol, r.exchange, r.anchor, r.ltp])).toEqual([
+      ['CRUDEOIL', 'MCX', 5436, 5480],
+      ['GOLD', 'MCX', 76_010, 76_250],
+    ]);
+    const cal = p.mcxCalendar;
+    const prev = cal.prev(DAY);
+    const yrs = (cal.ts(DAY, cal.sessionMinutes(DAY)) - cal.ts(prev, cal.sessionMinutes(prev))) / YEAR_MS;
+    expect(c[0].sigma!).toBeCloseTo(5436 * (c[0].iv! / 100) * Math.sqrt(yrs), 0); // iv is rounded to 0.01 %
+    expect(c[0].iv!).toBeCloseTo(38, 0);
+    expect(c[0].gaps?.history).toMatch(/No past MCX sessions of CRUDEOIL/);
+  });
+
+  it('blank with the reason without live data; NoLiveData when nothing asked is listed', () => {
+    const { p, an } = bare();
+    const n = an.expectedRange(['NIFTY'])[0];
+    expect([n.anchor, n.ltp, n.iv, n.sigma, n.band1, n.band2, n.position]).toEqual([null, null, null, null, null, null, null]);
+    expect(n.gaps?.anchor).toMatch(/No 2026-10-09 close of NIFTY/);
+    expect(n.gaps?.iv).toBeTruthy();
+    expect(() => an.expectedRange(['GOLD'])).toThrow(/None of GOLD is listed/);
+    p.ref.setLoaded(false);
+    expect(() => an.expectedRange()).toThrow(/Instrument master not loaded yet/);
   });
 });

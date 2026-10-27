@@ -438,6 +438,65 @@ export interface IvTableRow extends DataGaps {
   expiry: string | null;
 }
 
+/** A price band (low / high) around the anchor. */
+export interface PriceBand {
+  low: number;
+  high: number;
+}
+
+/**
+ * Expected move of one underlying for one session, from the option market's ATM IV:
+ * sigma = anchor × IV × √(calendar time from the anchor session's close to this session's close / 365)
+ * (the same /365 time the IV is solved with). ±1σ holds the close about 68 % of the time under the
+ * model, ±2σ about 95 %; `history` says how often that held on the recorded/official past sessions.
+ */
+export interface ExpectedRangeRow extends DataGaps {
+  symbol: string;
+  name: string;
+  kind: UnderlyingKind;
+  exchange: ExchangeCode;
+  /** Session the range is for (today until its close, then the next session). */
+  date: string;
+  /** Session whose close the range is centred on, and that close. */
+  anchorDate: string;
+  anchor: number | null;
+  /** Live price of the session the range is for (MCX: the near-month future), its high / low so far. */
+  ltp: number | null;
+  high: number | null;
+  low: number | null;
+  /** ATM IV (percent) the range uses, the expiry it is solved on and where it comes from. */
+  iv: number | null;
+  ivSource: 'live' | 'official' | 'recorded' | null;
+  expiry: string | null;
+  /** Calendar days from the anchor close to this session's close. */
+  days: number | null;
+  /** One standard deviation in points and percent. */
+  sigma: number | null;
+  sigmaPct: number | null;
+  /** ±1σ (≈ 68 %) and ±2σ (≈ 95 %) bands around the anchor. */
+  band1: PriceBand | null;
+  band2: PriceBand | null;
+  /** While the session is open: ±1σ from the live price to the close (the rest of the day). */
+  remaining: (PriceBand & { sigma: number }) | null;
+  /** Where the live price is against ±1σ / ±2σ. */
+  position: 'inside' | 'above-1' | 'below-1' | 'above-2' | 'below-2' | null;
+  /** Share of the ±1σ width (2σ) the day's high − low has used so far (percent). */
+  rangeUsedPct: number | null;
+  /** Back-check on past sessions: the band from the previous close and that day's ATM IV. */
+  history: {
+    sessions: number;
+    /** % of sessions whose close stayed within ±1σ / ±2σ. */
+    closeIn1: number | null;
+    closeIn2: number | null;
+    /** % of sessions whose whole high–low stayed within ±1σ. */
+    rangeIn1: number | null;
+    /** Average high − low of the last 14 sessions (points). */
+    avgRange: number | null;
+    from: string | null;
+    to: string | null;
+  };
+}
+
 export interface StraddlePoint extends TimePoint {
   spot: number | null;
   /** Centre strike (rolling: nearest the recorded forward of that time). */

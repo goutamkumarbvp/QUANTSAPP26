@@ -35,6 +35,7 @@ const Tools = page(() => import('./pages/Tools'));
 const OptionChainPage = page(() => import('./pages/OptionChain'));
 const Top10 = page(() => import('./pages/Top10'));
 const Terminal = page(() => import('./pages/Terminal'));
+const ExpectedRange = page(() => import('./pages/ExpectedRange'));
 const Watchlist = page(() => import('./pages/Watchlist'));
 const FnoMarket = page(() => import('./pages/FnoMarket'));
 const FiiDii = page(() => import('./pages/FiiDii'));
@@ -159,6 +160,7 @@ export function App() {
             {/* MCX commodities are ordinary symbols of every tab now (GOLD, CRUDEOIL … in the symbol picker). */}
             <Route path="/mcx-chain" element={<McxRedirect />} />
             <Route path="/terminal" element={<Terminal />} />
+            <Route path="/expected-range" element={<ExpectedRange />} />
             <Route path="/nifty-top10" element={<Top10 />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/fno-market" element={<FnoMarket />} />

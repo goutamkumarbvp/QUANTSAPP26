@@ -55,7 +55,7 @@ test('scanners: a build-up row with its coverage note', async ({ page }, info) =
   const row = page.getByRole('row', { name: /RELIANCE/ }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toContainText('1,403.20');
-  await expect(page.getByText(/14 of 14 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD
+  await expect(page.getByText(/16 of 16 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD, SILVER, NATURALGAS
   await shot(page, info, 'scanners');
   await clean(page, watch);
 });
@@ -158,6 +158,19 @@ test('NIFTY Top 10 desk: ten heavyweights with futures, options, flow and a bias
   await expect(page.getByText(/^Options: change PCR /).first()).toBeVisible();
   await page.waitForTimeout(500);
   await shot(page, info, 'nifty-top10');
+  await clean(page, watch);
+});
+
+test('expected range: ±1σ / ±2σ of NIFTY and the MCX commodities from live ATM IV (test data)', async ({ page }, info) => {
+  const watch = watchErrors(page);
+  await open(page, '/expected-range', /Expected Range/);
+  await expect(page.getByText('±1σ range (≈ 68 %)').first()).toBeVisible({ timeout: 20_000 });
+  for (const s of ['NIFTY', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL']) await expect(page.getByLabel(`${s} expected range`)).toBeVisible();
+  await expect(page.getByText('live premiums').first()).toBeVisible();
+  await shot(page, info, 'expected-range');
+  await page.getByRole('button', { name: 'Details' }).first().click();
+  await expect(page.getByText('Rest of today (±1 SD)')).toBeVisible();
+  await expect(page.getByText('Close inside ±1 SD')).toBeVisible();
   await clean(page, watch);
 });
 

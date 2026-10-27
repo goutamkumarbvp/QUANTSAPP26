@@ -168,6 +168,7 @@ const ROUTES: RouteCase[] = [
   G('/api/oi/futures', '/api/oi/futures', { full200: true, liveOnly: true }),
   G('/api/oi/breadth', '/api/oi/breadth', { full200: true }),
   G('/api/participants', '/api/participants'),
+  G('/api/expected-range', '/api/expected-range?symbols=NIFTY,BANKNIFTY', { full200: true, liveOnly: true }),
   G('/api/fii-dii', '/api/fii-dii'),
   G('/api/straddle/:symbol', (c) => `/api/straddle/NIFTY?date=${c.b.recordedDate}`, { full200: true }),
   { method: 'POST', route: '/api/strategy-chart', url: () => '/api/strategy-chart', body: (c) => ({ symbol: 'NIFTY', legs: [leg(c)], date: c.b.recordedDate }), full200: true },

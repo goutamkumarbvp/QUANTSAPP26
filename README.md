@@ -158,7 +158,7 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
 | Area | Tabs |
 |---|---|
 | **MCX commodities** | GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER … are ordinary symbols of **every** tab (symbol picker group *Commodities (MCX)*, ticker, Home card), exactly like NIFTY/SENSEX: option chain, OI, PCR, max pain, IV/skew/surface, order flow & book, opening range, strategy builder, paper trading. MCX runs on its own calendar (09:00–23:30, 23:55 in US winter), its "spot" is the near-month future, and its options are valued with Black-76 on the future they settle into. Previous-session values come from MCX sessions this app recorded from live ticks (no official MCX files are loaded). Units per lot are checked against MCX contract specifications. |
-| Market | Home dashboard, Watchlist, **Market Terminal** (price with EMA 20/50, total CE vs PE OI with build-up, PCR of OI and COI, volume vs OI — one screen), Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), F&O Market (heat-map · futures build-up · sector breadth) |
+| Market | Home dashboard, Watchlist, **Market Terminal** (price with EMA 20/50, total CE vs PE OI with build-up, PCR of OI and COI, volume vs OI — one screen), **Expected Range** (daily ±1σ / ±2σ move of NIFTY, SENSEX, GOLD, SILVER, NATURALGAS and CRUDEOIL from the live ATM IV around the previous close, with a back-check of how often it held on past sessions), Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), F&O Market (heat-map · futures build-up · sector breadth) |
 | Order flow & trend | Order Flow & Book (Order & Trade chart: the security's price, buyer vs seller initiated quantity per minute on one scale, cumulative delta; session split; 5-level depth; minute table; past sessions), Opening range breakout |
 | Open interest | OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
 | Institutions | FII/DII cash flows, Participant-wise OI (official end-of-day data) |
@@ -257,7 +257,7 @@ and add the generated Digital Asset Links file at `/.well-known/assetlinks.json`
 All endpoints are under `/api`. Status: `health`, `meta`, `clock`. Market data: `quotes`, `indices`,
 `expiries/:symbol`, `chain/:symbol` (`?at=` for a recorded minute), `futures/:symbol`, `candles/:symbol`,
 `dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`, `oi/futures`, `oi/breadth`, `participants`,
-`fii-dii`, `straddle/:symbol`, `orb`, `orb/:symbol`,
+`fii-dii`, `expected-range?symbols=`, `straddle/:symbol`, `orb`, `orb/:symbol`,
 `orb/:symbol/history`, `order-flow/:symbol`, `algos`, `algos/:id/defaults`, `algos/:id/backtest` (POST),
 `algos/:id/backtest-range` (POST), `strategy-chart` (POST), `optimizer` (POST), `recap` (POST),
 `scanners[/:id]`, `unusual`, `synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`,

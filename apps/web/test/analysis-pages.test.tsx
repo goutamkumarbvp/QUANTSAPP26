@@ -6,6 +6,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ORDER_FLOW_METHOD,
   type BreadthResponse,
+  type ExpectedRangeRow,
   type FiiDiiDay,
   type FuturesBuildUpRow,
   type MarketClockInfo,
@@ -31,6 +32,7 @@ import { SVGRenderer } from 'echarts/renderers';
 import { hasChartData } from '../src/components/Chart';
 import { ApiError } from '../src/lib/api';
 import { useBuilder, useTicks, type BuilderLeg } from '../src/lib/store';
+import ExpectedRange from '../src/pages/ExpectedRange';
 import Breadth from '../src/pages/oi/Breadth';
 import FuturesOI from '../src/pages/oi/FuturesOI';
 import MaxPain from '../src/pages/oi/MaxPain';
@@ -544,6 +546,47 @@ describe('Participant-wise OI', () => {
     expect(out).toContain('Net chg vs 15 Oct');
   });
   it('503', () => expectBlank(render(<Participants />, [[['participants', 30], noLive('NSE participant-wise OI is not loaded for 2026-09-01..2026-10-19 (none loaded yet)')]]), 'participant-wise OI is not loaded'));
+});
+
+describe('Expected Range', () => {
+  const row = (over: Partial<ExpectedRangeRow> = {}): ExpectedRangeRow => ({
+    symbol: 'NIFTY',
+    name: 'Nifty 50',
+    kind: 'index',
+    exchange: 'NSE',
+    date: '2026-10-12',
+    anchorDate: '2026-10-09',
+    anchor: 24900,
+    ltp: 25000,
+    high: 25050,
+    low: 24920,
+    iv: 14,
+    ivSource: 'live',
+    expiry: '2026-10-13',
+    days: 3,
+    sigma: 316.04,
+    sigmaPct: 1.27,
+    band1: { low: 24583.96, high: 25216.04 },
+    band2: { low: 24267.92, high: 25532.08 },
+    remaining: { low: 24850.1, high: 25149.9, sigma: 149.9 },
+    position: 'inside',
+    rangeUsedPct: 20.57,
+    history: { sessions: 60, closeIn1: 70, closeIn2: 96.67, rangeIn1: 45, avgRange: 260.5, from: '2026-07-14', to: '2026-10-09' },
+    ...over,
+  });
+  it('cards with ±1σ / ±2σ, the live position and the back-check', () => {
+    const gold = row({ symbol: 'GOLD', name: 'Gold', kind: 'commodity', exchange: 'MCX', anchor: null, sigma: null, sigmaPct: null, band1: null, band2: null, remaining: null, position: null, rangeUsedPct: null, iv: null, ivSource: null, history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, avgRange: null, from: null, to: null }, gaps: { anchor: 'No 2026-10-09 close of GOLD', iv: 'No listed GOLD option expiry', history: 'No past MCX sessions of GOLD with a recorded ATM IV' } });
+    const out = decode(render(<ExpectedRange />, [[['expected-range'], [row(), gold]]]));
+    expect(out).toContain('Expected Range');
+    expect(out).toContain('±316.04');
+    expect(out).toContain('24,583.96 – 25,216.04');
+    expect(out).toContain('24,267.92 – 25,532.08');
+    expect(out).toContain('Inside ±1σ');
+    expect(out).toContain('Close stayed within ±1σ on 70% and within ±2σ on 97% of the last 60 sessions');
+    expect(out).toContain('No past MCX sessions of GOLD with a recorded ATM IV');
+    expect(out).toContain('MCX');
+  });
+  it('503', () => expectBlank(render(<ExpectedRange />, [[['expected-range'], noLive('Instrument master not loaded yet')]]), 'Instrument master not loaded yet'));
 });
 
 describe('every chart that is shown is a valid ECharts option', () => {

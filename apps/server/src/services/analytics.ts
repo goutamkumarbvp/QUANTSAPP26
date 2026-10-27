@@ -29,11 +29,13 @@ import {
   optimizeStrategies,
   orbAtPrice,
   SESSION_MINUTES,
+  YEAR_MS,
   sideSign,
   type BreadthResponse,
   type BuildUp,
   type BuildUpCounts,
   type DailyPcrPoint,
+  type ExpectedRangeRow,
   type FiiDiiDay,
   type FuturesBuildUpRow,
   type IvTableRow,
@@ -111,7 +113,11 @@ export const ORB_CLOSE_SLACK_MIN = 5;
 export const MAX_KOTAK_CONTRACTS = 6;
 /** Market-wide snapshots (option snapshot, futures, IV table, ORB scan) are rebuilt at most every 5 s. */
 export const SNAPSHOT_MS = 5_000;
-/** Moneyness buckets (%) of the surface. */
+
+/** Underlyings of the Expected Range tab (the ones listed in the instrument master are shown). */
+export const EXPECTED_RANGE_SYMBOLS = ['NIFTY', 'SENSEX', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL'];
+/** Past sessions the expected-range rule is checked on. */
+export const EXPECTED_RANGE_LOOKBACK = 60;
 
 /** What the recorded chain totals (ChainMinute) cover (Phase B review item d/g). */
 export const RECORDED_CHAIN_COVERAGE = 'streamed strikes (±8 %): the strikes the recorder tracked, re-centred during the day — not the whole chain';
@@ -1305,6 +1311,140 @@ export class Analytics {
     if (!q || ltp === null) throw new NoLiveData(`No live price for ${symbol}`);
     const prev = isPos(q.prevClose) ? q.prevClose : eodClose(md, symbol, md.calendar.prev(sessionDateOf(md, q.ts)));
     return { ltp, changePct: changeOf(ltp, prev).changePct };
+  }
+
+  /* ------------------------------------------------------------------------------------------ */
+  /* Expected range                                                                               */
+  /* ------------------------------------------------------------------------------------------ */
+
+  /**
+   * Expected move of each symbol for its current (or, after the close, next) session, from the
+   * live ATM IV of the nearest expiry with at least a day left (else the anchor session's official /
+   * recorded ATM IV, labelled so), plus a back-check of the same rule on past sessions.
+   */
+  expectedRange(symbols: readonly string[] = EXPECTED_RANGE_SYMBOLS, _ts?: number): ExpectedRangeRow[] {
+    const listed = new Set(this.orElse(() => this.md.ref.underlyings().map((u) => u.symbol), []));
+    const rows = symbols.filter((s) => listed.has(s)).map((s) => this.expectedRangeOf(s));
+    if (!rows.length) throw new NoLiveData(listed.size ? `None of ${symbols.join(', ')} is listed in the instrument master` : 'Instrument master not loaded yet');
+    return rows;
+  }
+
+  private expectedRangeOf(symbol: string): ExpectedRangeRow {
+    const md = mdFor(this.md, symbol);
+    const cal = md.calendar;
+    const u = md.ref.underlying(symbol);
+    const now = this.now();
+    const gaps = new Gaps();
+    const closeTs = (d: string) => cal.ts(d, cal.sessionMinutes(d));
+    // The session the range is for: today until its close, else the next trading session.
+    const today = cal.session(now).date;
+    const date = cal.isTradingDay(today) && now < closeTs(today) ? today : cal.next(today);
+    const anchorDate = cal.prev(date);
+    const q = md.live.quote(spotKey(symbol));
+    const live = livePrice(md, q);
+    const qDate = q ? sessionDateOf(md, q.ts) : null;
+    // The anchor close: the live session's previous close, its own last price once it has closed, else the official/recorded close.
+    let anchor: number | null = null;
+    if (q && qDate === date && isPos(q.prevClose)) anchor = q.prevClose;
+    else if (q && qDate === anchorDate && live !== null && now >= closeTs(anchorDate)) anchor = live;
+    anchor ??= eodClose(md, symbol, anchorDate);
+    if (anchor === null) gaps.add('anchor', `No ${anchorDate} close of ${symbol}: no live previous close and no ${u.kind === 'commodity' ? 'recorded MCX session' : 'official close'} loaded`);
+    const ltp = live !== null && qDate === date ? live : null;
+    if (ltp === null) gaps.add('ltp', `${symbol} has not traded in the ${date} session yet`);
+    const high = ltp !== null && isPos(q?.high) ? q.high : null;
+    const low = ltp !== null && isPos(q?.low) ? q.low : null;
+    // ATM IV: live, else the anchor session's official (NSE/BSE) or recorded (MCX) end-of-day ATM IV.
+    const expiry = this.ivExpiry(symbol);
+    let iv = expiry ? md.pricing.atmIv(symbol, expiry) : null;
+    let ivSource: ExpectedRangeRow['ivSource'] = iv !== null ? 'live' : null;
+    let ivExpiry = iv !== null ? expiry : null;
+    if (iv === null) {
+      const eod = md.history.dailyAtmIv(symbol, anchorDate, anchorDate)[0];
+      if (eod && isPos(eod.iv)) {
+        iv = eod.iv;
+        ivSource = u.kind === 'commodity' ? 'recorded' : 'official';
+        ivExpiry = eod.expiry;
+        gaps.add('iv', `No live ATM IV of ${symbol}${expiry ? ` ${expiry}` : ''}: the ${anchorDate} ${ivSource} close-based ATM IV is used`);
+      } else gaps.add('iv', expiry ? `ATM IV of ${symbol} ${expiry} could not be solved from live premiums, and no ${anchorDate} end-of-day ATM IV is loaded` : `No listed ${symbol} option expiry`);
+    }
+    const yrs = (closeTs(date) - closeTs(anchorDate)) / YEAR_MS;
+    const sigma = anchor !== null && iv !== null ? anchor * iv * Math.sqrt(yrs) : null;
+    const band = (k: number) => (sigma !== null && anchor !== null ? { low: r2(anchor - k * sigma) as number, high: r2(anchor + k * sigma) as number } : null);
+    const band1 = band(1);
+    const band2 = band(2);
+    const open = ltp !== null && cal.session(now).status === 'open' && cal.session(now).date === date;
+    const remSigma = open && iv !== null ? ltp * iv * Math.sqrt(Math.max(0, closeTs(date) - now) / YEAR_MS) : null;
+    let position: ExpectedRangeRow['position'] = null;
+    if (ltp !== null && band1 && band2) {
+      position = ltp > band2.high ? 'above-2' : ltp < band2.low ? 'below-2' : ltp > band1.high ? 'above-1' : ltp < band1.low ? 'below-1' : 'inside';
+    }
+    const history = this.expectedRangeHistory(symbol, anchorDate);
+    if (!history.sessions) gaps.add('history', u.kind === 'commodity' ? `No past MCX sessions of ${symbol} with a recorded ATM IV and a recorded open-to-close day yet` : `No past sessions of ${symbol} with an official ATM IV and official closes loaded`);
+    return {
+      symbol: u.symbol,
+      name: u.name,
+      kind: u.kind,
+      exchange: cal.exchange,
+      date,
+      anchorDate,
+      anchor,
+      ltp,
+      high,
+      low,
+      iv: pct(iv),
+      ivSource,
+      expiry: ivExpiry,
+      days: r2(yrs * 365),
+      sigma: r2(sigma),
+      sigmaPct: sigma !== null && anchor ? r2((sigma / anchor) * 100) : null,
+      band1,
+      band2,
+      remaining: remSigma !== null && ltp !== null ? { low: r2(ltp - remSigma) as number, high: r2(ltp + remSigma) as number, sigma: r2(remSigma) as number } : null,
+      position,
+      rangeUsedPct: high !== null && low !== null && sigma ? r2(((high - low) / (2 * sigma)) * 100) : null,
+      history,
+      ...gaps.out(),
+    };
+  }
+
+  /** The ±1σ / ±2σ rule applied to past sessions: band from the previous close and its end-of-day ATM IV. */
+  private expectedRangeHistory(symbol: string, before: string): ExpectedRangeRow['history'] {
+    const md = mdFor(this.md, symbol);
+    const cal = md.calendar;
+    const days = sessionsBack(md, before, EXPECTED_RANGE_LOOKBACK + 1);
+    const from = days[0];
+    const ivs = new Map(this.orElse(() => md.history.dailyAtmIv(symbol, from, before), []).map((x) => [x.date, x.iv]));
+    const bars = new Map(this.orElse(() => md.history.dailyBars(symbol, from, before), []).map((b) => [b.date, b]));
+    const closeTs = (d: string) => cal.ts(d, cal.sessionMinutes(d));
+    let n = 0;
+    let c1 = 0;
+    let c2 = 0;
+    let h1 = 0;
+    const tested: string[] = [];
+    for (let i = 1; i < days.length; i++) {
+      const p = bars.get(days[i - 1]);
+      const b = bars.get(days[i]);
+      const iv = ivs.get(days[i - 1]);
+      if (!p || !b || !isPos(iv) || !isPos(p.close) || !isPos(b.close)) continue;
+      const sg = p.close * iv * Math.sqrt((closeTs(days[i]) - closeTs(days[i - 1])) / YEAR_MS);
+      const mv = Math.abs(b.close - p.close);
+      n++;
+      tested.push(days[i]);
+      if (mv <= sg) c1++;
+      if (mv <= 2 * sg) c2++;
+      if (isPos(b.high) && isPos(b.low) && b.high <= p.close + sg && b.low >= p.close - sg) h1++;
+    }
+    const recent = [...bars.values()].filter((b) => isPos(b.high) && isPos(b.low)).slice(-14);
+    const share = (k: number) => (n ? r2((k / n) * 100) : null);
+    return {
+      sessions: n,
+      closeIn1: share(c1),
+      closeIn2: share(c2),
+      rangeIn1: share(h1),
+      avgRange: recent.length ? r2(recent.reduce((a, b) => a + (b.high - b.low), 0) / recent.length) : null,
+      from: tested[0] ?? null,
+      to: tested[tested.length - 1] ?? null,
+    };
   }
 
   /* ------------------------------------------------------------------------------------------ */
