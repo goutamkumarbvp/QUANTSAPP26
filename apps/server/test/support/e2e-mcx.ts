@@ -57,3 +57,31 @@ export function addTestCommodities(p: FakeProvider, today: string, r = 0.065): v
     }
   }
 }
+
+/**
+ * TEST-ONLY SENSEX (BSE index) for the e2e fixture server: spot, near future and a weekly chain priced
+ * by Black-76 at a flat test volatility. Test data, never market data.
+ */
+export function addTestSensex(p: FakeProvider, today: string, r = 0.065): void {
+  const S = 82_000;
+  const prev = 81_740;
+  const vol = 0.13;
+  const optExp = addDays(today, 3);
+  const futExp = addDays(today, 17);
+  const now = p.now();
+  p.ref.setUnderlying({ symbol: 'SENSEX', name: 'BSE Sensex', kind: 'index', exchange: 'BSE', lotSize: 20, strikeStep: 100 });
+  p.ref.setFutures('SENSEX', [futExp]);
+  const T = Math.max(1e-4, (p.calendar.expiryTs(optExp) - now) / YEAR_MS);
+  const F = S * Math.exp(r * T);
+  const strikes = Array.from({ length: 21 }, (_, i) => 82_000 + (i - 10) * 100);
+  p.ref.setStrikes('SENSEX', optExp, strikes);
+  p.setQuote({ symbol: 'SENSEX', kind: 'SPOT' }, { ltp: S, prevClose: prev, open: 81_800, high: 82_090, low: 81_760, ts: now - 2000 });
+  p.setQuote({ symbol: 'SENSEX', kind: 'FUT', expiry: futExp }, { ltp: S + 190, prevClose: prev + 180, volume: 9_000, oi: 31_000, prevOi: 29_500, bid: S + 189, ask: S + 191, bidQty: 20, askQty: 20, ts: now - 2000 });
+  for (const k of strikes) {
+    for (const kind of ['CE', 'PE'] as const) {
+      const ltp = Math.max(0.05, Math.round(bsPrice(kind, F, k, T, r, vol, r) * 20) / 20);
+      const oi = Math.round((kind === 'CE' ? (k > S ? 9000 : 3000) : k < S ? 8000 : 2500) * (1 + Math.abs(k - S) / 400));
+      p.setQuote({ symbol: 'SENSEX', kind, expiry: optExp, strike: k }, { ltp, prevClose: ltp, volume: oi, oi, bid: Math.max(0.05, ltp - 0.5), ask: ltp + 0.5, bidQty: 20, askQty: 20, ts: now - 2000 });
+    }
+  }
+}

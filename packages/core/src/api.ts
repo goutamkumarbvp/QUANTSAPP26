@@ -476,8 +476,32 @@ export interface ExpectedRangeRow extends DataGaps {
   /** ±1σ (≈ 68 %) and ±2σ (≈ 95 %) bands around the anchor. */
   band1: PriceBand | null;
   band2: PriceBand | null;
-  /** While the session is open: ±1σ from the live price to the close (the rest of the day). */
-  remaining: (PriceBand & { sigma: number }) | null;
+  /**
+   * Intraday forecast from the live price: the one-day move (price × ATM IV × √(1/365), the convention of
+   * India-VIX "expected move today" pages) spread over the session's trading minutes, so a horizon of
+   * h minutes moves ±dayMove × √(h / session minutes). Null horizons before the session's first trade.
+   */
+  intraday: {
+    price: number | null;
+    dayMove: number | null;
+    minutesLeft: number | null;
+    horizons: { minutes: number; label: string; sigma: number; low: number; high: number }[];
+    /** Back-check on recorded sessions: % of 60-minute windows (every 30 min) whose move stayed within ±1σ. */
+    check: { horizon: number; windows: number; sessions: number; inside: number | null };
+  };
+  /**
+   * India VIX rule (NIFTY only), as Quantsapp's India VIX page shows it: near-month NIFTY future (else
+   * spot) × VIX × √(days / 365) for today (1), this week (7) and this month (30 days), and how often a
+   * close stayed within the one-day move of the previous close and VIX close.
+   */
+  vix: {
+    vix: number;
+    price: number;
+    priceOf: 'future' | 'spot';
+    future: string | null;
+    bands: { label: string; days: number; move: number; pct: number; low: number; high: number }[];
+    check: { sessions: number; closeIn: number | null };
+  } | null;
   /** Where the live price is against ±1σ / ±2σ. */
   position: 'inside' | 'above-1' | 'below-1' | 'above-2' | 'below-2' | null;
   /** Share of the ±1σ width (2σ) the day's high − low has used so far (percent). */

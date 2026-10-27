@@ -694,10 +694,12 @@ describe('expected range', () => {
   const closeTs = (p: FakeProvider, d: string) => p.calendar.ts(d, p.calendar.sessionMinutes(d));
 
   it('±1σ / ±2σ from the previous close and the live ATM IV over the calendar time to this session close', () => {
-    const { p, an, w1 } = setup();
+    const { p, an, w1, m1 } = setup();
     const rows = an.expectedRange(['NIFTY', 'SENSEX', 'BANKNIFTY']);
-    // SENSEX is not listed in the test book: it is left out, not shown with made-up values
-    expect(rows.map((r) => r.symbol)).toEqual(['NIFTY', 'BANKNIFTY']);
+    // SENSEX is not listed in the test book: its tab stays, blank with the reason (no made-up values)
+    expect(rows.map((r) => r.symbol)).toEqual(['NIFTY', 'SENSEX', 'BANKNIFTY']);
+    expect(rows[1]).toMatchObject({ exchange: 'BSE', anchor: null, ltp: null, sigma: null, band1: null, straddle: null, vix: null });
+    expect(rows[1].gaps?.listed).toMatch(/SENSEX is not in the instrument master: the Kotak BSE F&O file \(bse_fo\) did not load/);
     const n = rows[0];
     const iv = p.pricing.atmIv('NIFTY', w1)!;
     const yrs = (closeTs(p, DAY) - closeTs(p, PREV)) / YEAR_MS;
@@ -709,9 +711,20 @@ describe('expected range', () => {
     expect(n.band1).toEqual({ low: r2(24900 - sigma), high: r2(24900 + sigma) });
     expect(n.band2).toEqual({ low: r2(24900 - 2 * sigma), high: r2(24900 + 2 * sigma) });
     expect(n.rangeUsedPct).toBe(r2((130 / (2 * sigma)) * 100));
-    // 11:00, session open: the rest of the day from the live price
-    const rem = 25000 * iv * Math.sqrt((closeTs(p, DAY) - p.now()) / YEAR_MS);
-    expect(n.remaining).toEqual({ low: r2(25000 - rem), high: r2(25000 + rem), sigma: r2(rem) });
+    // 11:00, session open: the one-day move (× √(1/365)) spread over the 375 session minutes, from the live price
+    const dayMove = 25000 * iv * Math.sqrt(1 / 365);
+    const h = (m: number, label: string) => ({ minutes: m, label, sigma: r2(dayMove * Math.sqrt(m / 375)), low: r2(25000 - dayMove * Math.sqrt(m / 375)), high: r2(25000 + dayMove * Math.sqrt(m / 375)) });
+    expect(n.intraday).toMatchObject({ price: 25000, dayMove: r2(dayMove), minutesLeft: 270 });
+    expect(n.intraday.horizons).toEqual([h(15, '15 min'), h(30, '30 min'), h(60, '1 hour'), h(270, 'Rest of day')]);
+    // India VIX rule (Quantsapp's India VIX page): near-month future × VIX × √(days / 365)
+    const fut = p.live.quote(futKey('NIFTY', m1))!.ltp;
+    const vb = (label: string, days: number) => {
+      const move = fut * 0.125 * Math.sqrt(days / 365);
+      return { label, days, move: r2(move), pct: r2(12.5 * Math.sqrt(days / 365)), low: r2(fut - move), high: r2(fut + move) };
+    };
+    expect(n.vix).toMatchObject({ vix: 12.5, price: fut, priceOf: 'future', future: m1 });
+    expect(n.vix!.bands).toEqual([vb('Today', 1), vb('This week', 7), vb('This month', 30)]);
+    expect(rows[2].vix).toBeNull(); // VIX is NIFTY's
     // the option-chain convention: price ± the live ATM straddle to expiry, and that move scaled to one session
     const ce = p.live.quote(optKey('NIFTY', w1, 'CE', 25000))!.ltp;
     const pe = p.live.quote(optKey('NIFTY', w1, 'PE', 25000))!.ltp;
@@ -740,7 +753,8 @@ describe('expected range', () => {
     expect(n.anchorDate).toBe(DAY);
     expect(n.ltp).toBeNull();
     expect(n.gaps?.ltp).toMatch(/has not traded in the .* session yet/);
-    expect(n.remaining).toBeNull();
+    expect(n.intraday.horizons).toEqual([]);
+    expect(n.gaps?.intraday).toMatch(/starts with the first NIFTY trade/);
     if (n.anchor !== null) expect(n.anchor).toBe(25000);
   });
 
@@ -763,7 +777,7 @@ describe('expected range', () => {
         if (ks[i - 1] === 0.2) high = r2(c0 + 1.2 * sg); // the high pierces +1σ although the close is inside
       }
       bars.push({ high, low });
-      p.history.writeDailyBars('index', d, [{ symbol: 'NIFTY', date: d, open: close, high, low, close }]);
+      p.history.writeDailyBars('index', d, [{ symbol: 'NIFTY', date: d, open: close, high, low, close }, { symbol: 'INDIAVIX', date: d, open: 13, high: 13, low: 13, close: 13 }]);
       const K = Math.round(close / 50) * 50;
       p.history.writeFo(d, { options: officialOptions(p, 'NIFTY', d, addDays(d, 7), { vol: 0.12, strikes: [K - 50, K, K + 50] }) });
     });
@@ -778,7 +792,31 @@ describe('expected range', () => {
       const T = (p.calendar.expiryTs(addDays(days[i - 1], 7)) - closeTs(p, days[i - 1])) / YEAR_MS;
       if (Math.abs(c1 - c0) <= st * Math.sqrt((closeTs(p, days[i]) - closeTs(p, days[i - 1])) / YEAR_MS / T)) sIn++;
     }
-    const h = an.expectedRange(['NIFTY'])[0].history;
+    const row = an.expectedRange(['NIFTY'])[0];
+    // VIX rule: the close vs the previous close ± that day's VIX close × √(1/365)
+    let vIn = 0;
+    for (let i = 1; i < days.length; i++) {
+      const c0 = p.history.dailyBars('NIFTY', days[i - 1], days[i - 1])[0].close;
+      const c1 = p.history.dailyBars('NIFTY', days[i], days[i])[0].close;
+      if (Math.abs(c1 - c0) <= c0 * 0.13 * Math.sqrt(1 / 365)) vIn++;
+    }
+    expect(row.vix!.check).toEqual({ sessions: 6, closeIn: r2((vIn / 6) * 100) });
+    // intraday rule on the recorded PREV session: 60-minute windows every 30 minutes from 09:30
+    const ivPrev = p.history.dailyAtmIv('NIFTY', days[5], days[5])[0].iv;
+    const spot = p.intraday.bars({ symbol: 'NIFTY', kind: 'SPOT' }, PREV).filter((b) => b.traded);
+    const closeBy = (t: number) => spot.filter((b) => b.ts + MIN <= t && b.ts + MIN > t - 5 * MIN).at(-1)?.close ?? null;
+    let w = 0;
+    let wIn = 0;
+    for (let k = 15; k + 60 <= 375; k += 30) {
+      const a = closeBy(p.calendar.ts(PREV, k));
+      const b = closeBy(p.calendar.ts(PREV, k + 60));
+      if (a === null || b === null) continue;
+      w++;
+      if (Math.abs(b - a) <= a * ivPrev * Math.sqrt(1 / 365) * Math.sqrt(60 / 375)) wIn++;
+    }
+    expect(w).toBe(11);
+    expect(row.intraday.check).toEqual({ horizon: 60, windows: 11, sessions: 1, inside: r2((wIn / 11) * 100) });
+    const h = row.history;
     expect(h).toEqual({
       straddleSessions: 6,
       straddleCloseIn: r2((sIn / 6) * 100),
@@ -806,6 +844,9 @@ describe('expected range', () => {
     expect(c[0].sigma!).toBeCloseTo(5436 * (c[0].iv! / 100) * Math.sqrt(yrs), 0); // iv is rounded to 0.01 %
     expect(c[0].iv!).toBeCloseTo(38, 0);
     expect(c[0].gaps?.history).toMatch(/No past MCX sessions of CRUDEOIL/);
+    // a BSE index is labelled BSE (it shares the NSE session calendar)
+    p.ref.setUnderlying({ symbol: 'SENSEX', name: 'BSE Sensex', kind: 'index', exchange: 'BSE', lotSize: 20, strikeStep: 100 });
+    expect(an.expectedRange(['SENSEX'])[0].exchange).toBe('BSE');
   });
 
   it('blank with the reason without live data; NoLiveData when nothing asked is listed', () => {

@@ -79,7 +79,7 @@ function RangeCard({ r, onOpen }: { r: ExpectedRangeRow; onOpen?: () => void }) 
           <div>
             <div className="text-2xs text-muted">Expected move · {formatDate(r.date)} session</div>
             <div className="text-xl font-semibold tabular-nums">
-              {isNum(r.sigma) ? <>±{formatIndian(r.sigma)} <span className="text-sm text-muted">(±{formatFixed(r.sigmaPct, 2)}%)</span></> : <Dash reason={r.gaps?.iv ?? r.gaps?.anchor ?? 'No ATM IV or previous close'} />}
+              {isNum(r.sigma) ? <>±{formatIndian(r.sigma)} <span className="text-sm text-muted">(±{formatFixed(r.sigmaPct, 2)}%)</span></> : <Dash reason={r.gaps?.listed ?? r.gaps?.iv ?? r.gaps?.anchor ?? 'No ATM IV or previous close'} />}
             </div>
           </div>
           <div className="text-right">
@@ -113,13 +113,93 @@ function RangeCard({ r, onOpen }: { r: ExpectedRangeRow; onOpen?: () => void }) 
             <div className="text-muted"><Dash reason={r.gaps?.straddle} /> {r.gaps?.straddle}</div>
           )}
         </div>
+        {r.intraday.horizons.length > 0 && (
+          <div className="text-xs">
+            <span className="text-muted">Intraday ±1 SD · </span>
+            <span className="tabular-nums">{r.intraday.horizons.map((x) => `${x.label === 'Rest of day' ? 'rest of day' : x.label} ±${px(x.sigma)}`).join(' · ')}</span>
+          </div>
+        )}
+        {r.vix && (
+          <div className="text-xs">
+            <span className="text-muted">India VIX {formatFixed(r.vix.vix, 2)} · today </span>
+            <span className="font-semibold tabular-nums">{px(r.vix.bands[0].low)} – {px(r.vix.bands[0].high)}</span>
+            <span className="text-muted"> (±{px(r.vix.bands[0].move)})</span>
+          </div>
+        )}
         <div className="text-2xs text-muted">
           ATM IV {isNum(r.iv) ? `${formatFixed(r.iv, 2)}%` : '—'}
           {r.expiry ? ` · ${formatExpiry(r.expiry)} expiry` : ''}
           {r.ivSource ? ` · ${SOURCE[r.ivSource]}` : ''} · previous close {px(r.anchor)} ({formatDate(r.anchorDate)})
         </div>
+        {r.gaps?.listed && <div className="rounded bg-warn/10 px-2 py-1.5 text-xs text-warn">{r.gaps.listed}</div>}
         <div className={cx('text-2xs', check ? 'text-ink' : 'text-muted')}>{check ?? r.gaps?.history ?? 'No past sessions to check the range on'}</div>
       </div>
+    </Card>
+  );
+}
+
+const restOf = (r: ExpectedRangeRow) => r.intraday.horizons.find((x) => x.label === 'Rest of day') ?? null;
+
+/** Intraday forecast: ±1 SD for the next 15 / 30 / 60 minutes and the rest of the session, from the live price. */
+export function IntradayCard({ r }: { r: ExpectedRangeRow }) {
+  const c = r.intraday.check;
+  return (
+    <Card title={`Intraday forecast · ${r.symbol}`}>
+      {r.intraday.horizons.length ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {r.intraday.horizons.map((x) => (
+              <div key={x.label} className="rounded border border-line px-2 py-1.5">
+                <div className="text-2xs text-muted">{x.label === 'Rest of day' ? `Rest of day (${x.minutes} min)` : `Next ${x.label}`}</div>
+                <div className="text-sm font-semibold tabular-nums">±{px(x.sigma)}</div>
+                <div className="text-2xs tabular-nums text-muted">{px(x.low)} – {px(x.high)}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-2xs text-muted">
+            From the LTP {px(r.intraday.price)}: one-day move ±{px(r.intraday.dayMove)} (LTP × ATM IV × √(1/365)) spread over the session's trading minutes — ±1 SD, about 68 % of the time.
+          </div>
+        </div>
+      ) : (
+        <div className="text-sm text-muted">{r.gaps?.intraday ?? 'Shown while the session is open'}</div>
+      )}
+      <div className="mt-2 text-2xs">
+        {isNum(c.inside)
+          ? `Back-check: a ${c.horizon}-minute move stayed within ±1 SD in ${formatFixed(c.inside, 0)}% of ${c.windows} windows over ${c.sessions} recorded session${c.sessions === 1 ? '' : 's'} (model 68 %).`
+          : <span className="text-muted">Back-check: no recorded session with a previous end-of-day ATM IV yet — the app checks the {c.horizon}-minute rule on the sessions it records.</span>}
+      </div>
+    </Card>
+  );
+}
+
+/** India VIX rule (NIFTY): future × VIX × √(days / 365) for today, this week and this month. */
+export function VixCard({ r }: { r: ExpectedRangeRow }) {
+  const v = r.vix;
+  return (
+    <Card title="India VIX method · NIFTY">
+      {v ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {v.bands.map((b) => (
+              <div key={b.label} className="rounded border border-line px-2 py-1.5">
+                <div className="text-2xs text-muted">{b.label} ({b.days}d)</div>
+                <div className="text-sm font-semibold tabular-nums">±{px(b.move)} <span className="text-2xs text-muted">(±{formatFixed(b.pct, 2)}%)</span></div>
+                <div className="text-2xs tabular-nums text-muted">{px(b.low)} – {px(b.high)}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-2xs text-muted">
+            India VIX {formatFixed(v.vix, 2)} · NIFTY {v.priceOf === 'future' ? `future ${formatExpiry(v.future)}` : 'spot'} {px(v.price)} · move = price × VIX × √(days ÷ 365)
+          </div>
+          <div className="text-2xs">
+            {isNum(v.check.closeIn)
+              ? `Back-check: NIFTY closed within the one-day VIX move of the previous close on ${formatFixed(v.check.closeIn, 0)}% of ${v.check.sessions} sessions (model 68 %).`
+              : <span className="text-muted">Back-check needs official NIFTY and India VIX closes.</span>}
+          </div>
+        </div>
+      ) : (
+        <div className="text-sm text-muted">{r.gaps?.vix ?? 'No live India VIX'}</div>
+      )}
     </Card>
   );
 }
@@ -129,14 +209,20 @@ function Detail({ r }: { r: ExpectedRangeRow }) {
   return (
     <div className="space-y-3">
       <RangeCard r={r} />
+      {r.gaps?.listed ? null : (
+        <div className="grid gap-3 lg:grid-cols-2">
+          <IntradayCard r={r} />
+          {r.symbol === 'NIFTY' && <VixCard r={r} />}
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Previous close" value={isNum(r.anchor) ? px(r.anchor) : null} reason={r.gaps?.anchor} sub={formatDate(r.anchorDate, true)} />
         <Stat label="Expected move (1 SD)" value={isNum(r.sigma) ? `±${px(r.sigma)}` : null} reason={r.gaps?.iv ?? r.gaps?.anchor} sub={isNum(r.days) ? `${formatFixed(r.days, 2)} calendar days to the ${formatDate(r.date)} close` : undefined} tone="accent" />
         <Stat
           label="Rest of today (±1 SD)"
-          value={r.remaining ? `${px(r.remaining.low)} – ${px(r.remaining.high)}` : null}
-          reason={r.ltp === null ? r.gaps?.ltp : 'Shown while the session is open'}
-          sub={r.remaining ? `±${px(r.remaining.sigma)} from the LTP to the close` : undefined}
+          value={restOf(r) ? `${px(restOf(r)!.low)} – ${px(restOf(r)!.high)}` : null}
+          reason={r.gaps?.intraday ?? r.gaps?.ltp ?? 'Shown while the session is open'}
+          sub={restOf(r) ? `±${px(restOf(r)!.sigma)} from the LTP · ${r.intraday.minutesLeft} min left` : undefined}
         />
         <Stat
           label="Day's range used"
@@ -188,7 +274,7 @@ export default function ExpectedRange() {
                   <RangeCard key={r.symbol} r={r} onOpen={() => setTab(r.symbol)} />
                 ))}
               </div>
-              <Coverage text="σ = previous close × ATM IV × √(calendar days to this session's close ÷ 365), the same time basis the IV is solved with (nearest expiry with at least a day left). Under the model the close lands within ±1σ about 68 % of the time and within ±2σ about 95 %; the back-check line shows how often it actually did. Straddle-implied: the live ATM call + put premium is the move the option chain prices in to expiry (price ± straddle); it is about 0.8 σ, so the close lands inside it roughly 58 % of the time. Not a forecast of direction; paper trading only." />
+              <Coverage text="σ = previous close × ATM IV × √(calendar days to this session's close ÷ 365), the same time basis the IV is solved with (nearest expiry with at least a day left). Under the model the close lands within ±1σ about 68 % of the time and within ±2σ about 95 %; the back-check line shows how often it actually did. Straddle-implied: the live ATM call + put premium is the move the option chain prices in to expiry (price ± straddle); it is about 0.8 σ, so the close lands inside it roughly 58 % of the time. Intraday: the one-day move (LTP × ATM IV × √(1/365)) spread over the session's trading minutes. NIFTY also shows the India VIX method (future × VIX × √(days/365): today, this week, this month). Not a forecast of direction; paper trading only." />
             </>
           )
         }

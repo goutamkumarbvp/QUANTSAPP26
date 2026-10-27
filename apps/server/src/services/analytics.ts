@@ -116,6 +116,11 @@ export const SNAPSHOT_MS = 5_000;
 
 /** Underlyings of the Expected Range tab (the ones listed in the instrument master are shown). */
 export const EXPECTED_RANGE_SYMBOLS = ['NIFTY', 'SENSEX', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL'];
+/** Exchange of each Expected Range symbol (labels a symbol the instrument master does not list). */
+export const EXPECTED_RANGE_EXCHANGE: Record<string, 'NSE' | 'BSE' | 'MCX'> = { NIFTY: 'NSE', SENSEX: 'BSE', GOLD: 'MCX', SILVER: 'MCX', NATURALGAS: 'MCX', CRUDEOIL: 'MCX' };
+/** Intraday back-check: window length (minutes) and recorded sessions looked at. */
+export const INTRADAY_CHECK_MIN = 60;
+export const INTRADAY_CHECK_SESSIONS = 20;
 /** Past sessions the expected-range rule is checked on. */
 export const EXPECTED_RANGE_LOOKBACK = 60;
 
@@ -1324,9 +1329,42 @@ export class Analytics {
    */
   expectedRange(symbols: readonly string[] = EXPECTED_RANGE_SYMBOLS, _ts?: number): ExpectedRangeRow[] {
     const listed = new Set(this.orElse(() => this.md.ref.underlyings().map((u) => u.symbol), []));
-    const rows = symbols.filter((s) => listed.has(s)).map((s) => this.expectedRangeOf(s));
-    if (!rows.length) throw new NoLiveData(listed.size ? `None of ${symbols.join(', ')} is listed in the instrument master` : 'Instrument master not loaded yet');
-    return rows;
+    if (!symbols.some((s) => listed.has(s))) throw new NoLiveData(listed.size ? `None of ${symbols.join(', ')} is listed in the instrument master` : 'Instrument master not loaded yet');
+    // A requested symbol the master does not list keeps its tab, blank with the reason.
+    return symbols.map((s) => (listed.has(s) ? this.expectedRangeOf(s) : this.unlistedRange(s)));
+  }
+
+  private unlistedRange(symbol: string): ExpectedRangeRow {
+    const exchange = EXPECTED_RANGE_EXCHANGE[symbol] ?? 'NSE';
+    const date = currentSession(this.md);
+    const why = exchange === 'BSE' ? `${symbol} is not in the instrument master: the Kotak BSE F&O file (bse_fo) did not load` : exchange === 'MCX' ? `${symbol} is not in the instrument master: the Kotak MCX F&O file (mcx_fo) did not load or does not list it` : `${symbol} is not in the instrument master`;
+    return {
+      symbol,
+      name: symbol,
+      kind: exchange === 'MCX' ? 'commodity' : 'index',
+      exchange,
+      date,
+      anchorDate: this.md.calendar.prev(date),
+      anchor: null,
+      ltp: null,
+      high: null,
+      low: null,
+      iv: null,
+      ivSource: null,
+      expiry: null,
+      days: null,
+      sigma: null,
+      sigmaPct: null,
+      band1: null,
+      band2: null,
+      intraday: { price: null, dayMove: null, minutesLeft: null, horizons: [], check: { horizon: INTRADAY_CHECK_MIN, windows: 0, sessions: 0, inside: null } },
+      vix: null,
+      position: null,
+      rangeUsedPct: null,
+      straddle: null,
+      history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, straddleSessions: 0, straddleCloseIn: null, avgRange: null, from: null, to: null },
+      gaps: { listed: why },
+    };
   }
 
   private expectedRangeOf(symbol: string): ExpectedRangeRow {
@@ -1373,7 +1411,21 @@ export class Analytics {
     const band1 = band(1);
     const band2 = band(2);
     const open = ltp !== null && cal.session(now).status === 'open' && cal.session(now).date === date;
-    const remSigma = open && iv !== null ? ltp * iv * Math.sqrt(Math.max(0, closeTs(date) - now) / YEAR_MS) : null;
+    // Intraday: the one-day move (× √(1/365)) spread over the session's trading minutes, from the live price.
+    const sessionMin = cal.sessionMinutes(date);
+    const minutesLeft = open ? Math.max(0, Math.round((closeTs(date) - now) / MINUTE)) : null;
+    const dayMove = ltp !== null && iv !== null ? ltp * iv * Math.sqrt(1 / 365) : null;
+    const horizons: ExpectedRangeRow['intraday']['horizons'] = [];
+    if (dayMove !== null && ltp !== null && minutesLeft !== null) {
+      const steps: [number, string][] = [[15, '15 min'], [30, '30 min'], [60, '1 hour'], [minutesLeft, 'Rest of day']];
+      for (const [m, label] of steps) {
+        if (!(m > 0) || m > minutesLeft || (label !== 'Rest of day' && m === minutesLeft)) continue;
+        const sg = dayMove * Math.sqrt(m / sessionMin);
+        horizons.push({ minutes: m, label, sigma: r2(sg) as number, low: r2(ltp - sg) as number, high: r2(ltp + sg) as number });
+      }
+    } else gaps.add('intraday', ltp === null ? `The intraday forecast starts with the first ${symbol} trade of the ${date} session` : iv === null ? 'The intraday forecast needs an ATM IV' : 'The intraday forecast is shown while the session is open');
+    const intradayCheck = this.intradayCheck(symbol, anchorDate);
+    const vix = symbol === 'NIFTY' ? gaps.try('vix', () => this.vixRange(ltp ?? live, anchorDate)) : null;
     let position: ExpectedRangeRow['position'] = null;
     if (ltp !== null && band1 && band2) {
       position = ltp > band2.high ? 'above-2' : ltp < band2.low ? 'below-2' : ltp > band1.high ? 'above-1' : ltp < band1.low ? 'below-1' : 'inside';
@@ -1385,7 +1437,7 @@ export class Analytics {
       symbol: u.symbol,
       name: u.name,
       kind: u.kind,
-      exchange: cal.exchange,
+      exchange: u.exchange,
       date,
       anchorDate,
       anchor,
@@ -1400,13 +1452,85 @@ export class Analytics {
       sigmaPct: sigma !== null && anchor ? r2((sigma / anchor) * 100) : null,
       band1,
       band2,
-      remaining: remSigma !== null && ltp !== null ? { low: r2(ltp - remSigma) as number, high: r2(ltp + remSigma) as number, sigma: r2(remSigma) as number } : null,
+      intraday: { price: ltp, dayMove: r2(dayMove), minutesLeft, horizons, check: intradayCheck },
+      vix,
       position,
       rangeUsedPct: high !== null && low !== null && sigma ? r2(((high - low) / (2 * sigma)) * 100) : null,
       straddle,
       history,
       ...gaps.out(),
     };
+  }
+
+  /**
+   * Back-check of the intraday rule on recorded sessions before `before`: 60-minute windows every 30 minutes
+   * (from 15 minutes after the open), price from the recorded traded minutes, IV = the previous session's
+   * end-of-day ATM IV.
+   */
+  private intradayCheck(symbol: string, before: string): ExpectedRangeRow['intraday']['check'] {
+    const md = mdFor(this.md, symbol);
+    const cal = md.calendar;
+    const H = INTRADAY_CHECK_MIN;
+    let windows = 0;
+    let inside = 0;
+    let sessions = 0;
+    for (const d of this.orElse(() => sessionsBack(md, before, INTRADAY_CHECK_SESSIONS), [])) {
+      const iv = this.orElse(() => md.history.dailyAtmIv(symbol, cal.prev(d), cal.prev(d))[0]?.iv, undefined);
+      if (!isPos(iv)) continue;
+      const bars = this.orElse(() => md.intraday.bars(spotKey(symbol), d), []).filter((b) => b.traded && isPos(b.close)).sort((a, b) => a.ts - b.ts);
+      if (bars.length < H) continue;
+      // Close of the last traded minute ending by t (at most 5 minutes stale).
+      const at = (t: number): number | null => {
+        let v: number | null = null;
+        for (const b of bars) {
+          if (b.ts + MINUTE > t) break;
+          if (b.ts + MINUTE > t - 5 * MINUTE) v = b.close;
+        }
+        return v;
+      };
+      const len = cal.sessionMinutes(d);
+      let any = false;
+      for (let k = 15; k + H <= len; k += 30) {
+        const p0 = at(cal.ts(d, k));
+        const p1 = at(cal.ts(d, k + H));
+        if (p0 === null || p1 === null) continue;
+        windows++;
+        any = true;
+        if (Math.abs(p1 - p0) <= p0 * iv * Math.sqrt(1 / 365) * Math.sqrt(H / len)) inside++;
+      }
+      if (any) sessions++;
+    }
+    return { horizon: H, windows, sessions, inside: windows ? (r2((inside / windows) * 100) as number) : null };
+  }
+
+  /** India VIX rule for NIFTY: near-month future (else spot) × VIX × √(days / 365), and its one-day back-check. */
+  private vixRange(spot: number | null, to: string): NonNullable<ExpectedRangeRow['vix']> {
+    const md = this.md;
+    const vix = livePrice(md, md.live.quote(spotKey('INDIAVIX')));
+    if (vix === null) throw new NoLiveData('No live India VIX');
+    const fut = nearFuture(md, 'NIFTY');
+    const fp = fut ? livePrice(md, md.live.quote(futKey('NIFTY', fut))) : null;
+    const price = fp ?? spot;
+    if (price === null) throw new NoLiveData('No live NIFTY future or spot price');
+    const bands = ([['Today', 1], ['This week', 7], ['This month', 30]] as const).map(([label, days]) => {
+      const move = price * (vix / 100) * Math.sqrt(days / 365);
+      return { label, days, move: r2(move) as number, pct: r2((vix / 100) * Math.sqrt(days / 365) * 100) as number, low: r2(price - move) as number, high: r2(price + move) as number };
+    });
+    // Back-check up to `to` (the anchor session): NIFTY's close vs the previous close ± that day's VIX close × √(1/365).
+    const days = sessionsBack(md, to, EXPECTED_RANGE_LOOKBACK + 1);
+    const nifty = new Map(this.orElse(() => md.history.dailyBars('NIFTY', days[0], to), []).map((b) => [b.date, b.close]));
+    const vixes = new Map(this.orElse(() => md.history.dailyBars('INDIAVIX', days[0], to), []).map((b) => [b.date, b.close]));
+    let n = 0;
+    let inside = 0;
+    for (let i = 1; i < days.length; i++) {
+      const c0 = nifty.get(days[i - 1]);
+      const c1 = nifty.get(days[i]);
+      const v0 = vixes.get(days[i - 1]);
+      if (!isPos(c0) || !isPos(c1) || !isPos(v0)) continue;
+      n++;
+      if (Math.abs(c1 - c0) <= c0 * (v0 / 100) * Math.sqrt(1 / 365)) inside++;
+    }
+    return { vix, price, priceOf: fp !== null ? 'future' : 'spot', future: fp !== null ? fut : null, bands, check: { sessions: n, closeIn: n ? (r2((inside / n) * 100) as number) : null } };
   }
 
   /** One-session move from the traded ATM straddle at the close of `date` (nearest expiry with a day left); null without one. */

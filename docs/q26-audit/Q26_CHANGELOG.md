@@ -103,3 +103,15 @@ such as Quantsapp's show), and that move scaled to one session (× √(session t
 close. The back-check also scores the straddle rule on past sessions (the previous day's traded ATM straddle closes). The
 straddle is about 0.8 σ, so roughly 58 % of closes are expected inside it. Quantsapp's separate "Quantsapp Forecast"
 (volatility, drift and trend) is proprietary and not published, so it is not reproduced.
+
+## C-46 — Expected Range: SENSEX always shown, intraday forecast, India VIX method
+
+- Every requested symbol keeps its tab: one the instrument master does not list (e.g. SENSEX when the Kotak BSE F&O file did
+  not load) is returned blank with the reason (`gaps.listed`). The row's exchange is the underlying's (SENSEX: BSE).
+- `intraday` replaces `remaining`: from the live price, the one-day move (price × ATM IV × √(1/365)) spread over the
+  session's trading minutes, ±dayMove × √(h / session minutes), for the next 15 / 30 / 60 minutes and the rest of the day;
+  back-checked on the last 20 recorded sessions (60-minute windows every 30 minutes, previous end-of-day ATM IV).
+- `vix` (NIFTY): the India VIX rule as Quantsapp's India VIX page shows it — near-month NIFTY future × VIX × √(days / 365)
+  for today (1), this week (7) and this month (30). Checked against that page's published figures (VIX 14.63, future
+  22,648.50 → ±0.77 % / ±173, ±2.03 %, ±4.2 %). Back-checked on official NIFTY and India VIX closes.
+- The e2e fixture gains a TEST-ONLY SENSEX (BSE) index with a weekly chain.

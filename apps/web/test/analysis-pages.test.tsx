@@ -32,7 +32,7 @@ import { SVGRenderer } from 'echarts/renderers';
 import { hasChartData } from '../src/components/Chart';
 import { ApiError } from '../src/lib/api';
 import { useBuilder, useTicks, type BuilderLeg } from '../src/lib/store';
-import ExpectedRange from '../src/pages/ExpectedRange';
+import ExpectedRange, { IntradayCard, VixCard } from '../src/pages/ExpectedRange';
 import Breadth from '../src/pages/oi/Breadth';
 import FuturesOI from '../src/pages/oi/FuturesOI';
 import MaxPain from '../src/pages/oi/MaxPain';
@@ -568,7 +568,29 @@ describe('Expected Range', () => {
     sigmaPct: 1.27,
     band1: { low: 24583.96, high: 25216.04 },
     band2: { low: 24267.92, high: 25532.08 },
-    remaining: { low: 24850.1, high: 25149.9, sigma: 149.9 },
+    intraday: {
+      price: 25000,
+      dayMove: 183.2,
+      minutesLeft: 270,
+      horizons: [
+        { minutes: 15, label: '15 min', sigma: 36.64, low: 24963.36, high: 25036.64 },
+        { minutes: 60, label: '1 hour', sigma: 73.28, low: 24926.72, high: 25073.28 },
+        { minutes: 270, label: 'Rest of day', sigma: 155.45, low: 24844.55, high: 25155.45 },
+      ],
+      check: { horizon: 60, windows: 210, sessions: 19, inside: 71.43 },
+    },
+    vix: {
+      vix: 12.5,
+      price: 25057.3,
+      priceOf: 'future',
+      future: '2026-10-27',
+      bands: [
+        { label: 'Today', days: 1, move: 163.95, pct: 0.65, low: 24893.35, high: 25221.25 },
+        { label: 'This week', days: 7, move: 433.77, pct: 1.73, low: 24623.53, high: 25491.07 },
+        { label: 'This month', days: 30, move: 898.0, pct: 3.58, low: 24159.3, high: 25955.3 },
+      ],
+      check: { sessions: 60, closeIn: 61.67 },
+    },
     position: 'inside',
     rangeUsedPct: 20.57,
     straddle: { expiry: '2026-10-13', strike: 25000, ce: 141.2, pe: 133.9, premium: 275.1, movePct: 1.1, low: 24724.9, high: 25275.1, days: 1.2, move: 275.1, band: { low: 24624.9, high: 25175.1 } },
@@ -576,7 +598,7 @@ describe('Expected Range', () => {
     ...over,
   });
   it('cards with ±1σ / ±2σ, the live position and the back-check', () => {
-    const gold = row({ symbol: 'GOLD', name: 'Gold', kind: 'commodity', exchange: 'MCX', anchor: null, sigma: null, sigmaPct: null, band1: null, band2: null, remaining: null, position: null, rangeUsedPct: null, iv: null, ivSource: null, straddle: null, history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, straddleSessions: 0, straddleCloseIn: null, avgRange: null, from: null, to: null }, gaps: { anchor: 'No 2026-10-09 close of GOLD', iv: 'No listed GOLD option expiry', straddle: 'No listed GOLD option expiry', history: 'No past MCX sessions of GOLD with a recorded ATM IV' } });
+    const gold = row({ symbol: 'GOLD', name: 'Gold', kind: 'commodity', exchange: 'MCX', anchor: null, sigma: null, sigmaPct: null, band1: null, band2: null, intraday: { price: null, dayMove: null, minutesLeft: null, horizons: [], check: { horizon: 60, windows: 0, sessions: 0, inside: null } }, vix: null, position: null, rangeUsedPct: null, iv: null, ivSource: null, straddle: null, history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, straddleSessions: 0, straddleCloseIn: null, avgRange: null, from: null, to: null }, gaps: { anchor: 'No 2026-10-09 close of GOLD', iv: 'No listed GOLD option expiry', straddle: 'No listed GOLD option expiry', history: 'No past MCX sessions of GOLD with a recorded ATM IV' } });
     const out = decode(render(<ExpectedRange />, [[['expected-range'], [row(), gold]]]));
     expect(out).toContain('Expected Range');
     expect(out).toContain('±316.04');
@@ -588,7 +610,25 @@ describe('Expected Range', () => {
     expect(out).toContain('±275.10');
     expect(out).toContain('24,724.90 – 25,275.10');
     expect(out).toContain('inside the straddle move on 62% of 58');
-    expect(out).toContain('MCX');
+    expect(out).toContain('15 min ±36.64 · 1 hour ±73.28 · rest of day ±155.45');
+    expect(out).toContain('24,893.35 – 25,221.25');
+  });
+  it('detail: intraday forecast, the India VIX method and an unlisted symbol kept with its reason', () => {
+    const sensex = row({ symbol: 'SENSEX', exchange: 'BSE', anchor: null, sigma: null, band1: null, band2: null, straddle: null, vix: null, intraday: { price: null, dayMove: null, minutesLeft: null, horizons: [], check: { horizon: 60, windows: 0, sessions: 0, inside: null } }, gaps: { listed: 'SENSEX is not in the instrument master: the Kotak BSE F&O file (bse_fo) did not load' } });
+    const all = decode(render(<ExpectedRange />, [[['expected-range'], [row(), sensex]]]));
+    expect(all).toContain('SENSEX is not in the instrument master: the Kotak BSE F&O file (bse_fo) did not load');
+    expect(all).toContain('BSE');
+    const intra = decode(render(<IntradayCard r={row()} />, []));
+    expect(intra).toContain('Next 15 min');
+    expect(intra).toContain('Rest of day (270 min)');
+    expect(intra).toContain('24,844.55 – 25,155.45');
+    expect(intra).toContain('a 60-minute move stayed within ±1 SD in 71% of 210 windows over 19 recorded sessions');
+    const vix = decode(render(<VixCard r={row()} />, []));
+    expect(vix).toContain('India VIX 12.50');
+    expect(vix).toContain('±433.77');
+    expect(vix).toContain('24,159.30 – 25,955.30');
+    expect(vix).toContain('on 62% of 60 sessions');
+    expect(decode(render(<IntradayCard r={row({ intraday: { ...row().intraday, horizons: [] }, gaps: { intraday: 'The intraday forecast is shown while the session is open' } })} />, []))).toContain('The intraday forecast is shown while the session is open');
   });
   it('503', () => expectBlank(render(<ExpectedRange />, [[['expected-range'], noLive('Instrument master not loaded yet')]]), 'Instrument master not loaded yet'));
 });

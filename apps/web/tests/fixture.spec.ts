@@ -55,7 +55,7 @@ test('scanners: a build-up row with its coverage note', async ({ page }, info) =
   const row = page.getByRole('row', { name: /RELIANCE/ }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toContainText('1,403.20');
-  await expect(page.getByText(/16 of 16 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD, SILVER, NATURALGAS
+  await expect(page.getByText(/17 of 17 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, SENSEX, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD, SILVER, NATURALGAS
   await shot(page, info, 'scanners');
   await clean(page, watch);
 });
@@ -165,13 +165,17 @@ test('expected range: ±1σ / ±2σ of NIFTY and the MCX commodities from live A
   const watch = watchErrors(page);
   await open(page, '/expected-range', /Expected Range/);
   await expect(page.getByText('±1σ range (≈ 68 %)').first()).toBeVisible({ timeout: 20_000 });
-  for (const s of ['NIFTY', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL']) await expect(page.getByLabel(`${s} expected range`)).toBeVisible();
+  for (const s of ['NIFTY', 'SENSEX', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL']) await expect(page.getByLabel(`${s} expected range`)).toBeVisible();
+  await expect(page.getByText(/^India VIX 12\.50 · today/).first()).toBeVisible();
   await expect(page.getByText('live premiums').first()).toBeVisible();
   await expect(page.getByText('Straddle-implied (option-chain method)').first()).toBeVisible();
   await shot(page, info, 'expected-range');
   await page.getByRole('button', { name: 'Details' }).first().click();
   await expect(page.getByText('Rest of today (±1 SD)')).toBeVisible();
   await expect(page.getByText('Close inside ±1 SD')).toBeVisible();
+  await expect(page.getByText('Intraday forecast · NIFTY')).toBeVisible();
+  await expect(page.getByText('Next 1 hour')).toBeVisible();
+  await expect(page.getByText('India VIX method · NIFTY')).toBeVisible();
   await clean(page, watch);
 });
 
