@@ -94,3 +94,12 @@ session (after the close: the next one):
 - a back-check over the last 60 sessions with an end-of-day ATM IV and daily bars: the share of closes inside ±1σ / ±2σ
   and of days whose whole high–low stayed inside ±1σ, plus the 14-session average high − low.
 Missing inputs are blank with the reason. The e2e fixture gains SILVER and NATURALGAS test contracts.
+
+## C-45 — Expected Range: straddle-implied move (option-chain method)
+
+Each Expected Range row gains `straddle`: the live ATM straddle (CE + PE premium at the listed strike nearest the price) of
+the nearest expiry with a day left as the move priced in to expiry (price ± straddle — the convention option-chain pages
+such as Quantsapp's show), and that move scaled to one session (× √(session time / time to expiry)) around the previous
+close. The back-check also scores the straddle rule on past sessions (the previous day's traded ATM straddle closes). The
+straddle is about 0.8 σ, so roughly 58 % of closes are expected inside it. Quantsapp's separate "Quantsapp Forecast"
+(volatility, drift and trend) is proprietary and not published, so it is not reproduced.

@@ -712,6 +712,24 @@ describe('expected range', () => {
     // 11:00, session open: the rest of the day from the live price
     const rem = 25000 * iv * Math.sqrt((closeTs(p, DAY) - p.now()) / YEAR_MS);
     expect(n.remaining).toEqual({ low: r2(25000 - rem), high: r2(25000 + rem), sigma: r2(rem) });
+    // the option-chain convention: price ± the live ATM straddle to expiry, and that move scaled to one session
+    const ce = p.live.quote(optKey('NIFTY', w1, 'CE', 25000))!.ltp;
+    const pe = p.live.quote(optKey('NIFTY', w1, 'PE', 25000))!.ltp;
+    const T = timeToExpiry(w1, p.pricing.valuationTs(undefined, undefined, 'NIFTY'));
+    const move = (ce + pe) * Math.sqrt(Math.min(1, yrs / T));
+    expect(n.straddle).toEqual({
+      expiry: w1,
+      strike: 25000,
+      ce,
+      pe,
+      premium: r2(ce + pe),
+      movePct: r2(((ce + pe) / 25000) * 100),
+      low: r2(25000 - ce - pe),
+      high: r2(25000 + ce + pe),
+      days: r2(T * 365),
+      move: r2(move),
+      band: { low: r2(24900 - move), high: r2(24900 + move) },
+    });
   });
 
   it('after the close the range is for the next session, centred on the live close', () => {
@@ -749,8 +767,21 @@ describe('expected range', () => {
       const K = Math.round(close / 50) * 50;
       p.history.writeFo(d, { options: officialOptions(p, 'NIFTY', d, addDays(d, 7), { vol: 0.12, strikes: [K - 50, K, K + 50] }) });
     });
+    // the straddle rule on the same sessions: each previous day's traded ATM straddle scaled to one session
+    let sIn = 0;
+    for (let i = 1; i < days.length; i++) {
+      const c0 = p.history.dailyBars('NIFTY', days[i - 1], days[i - 1])[0].close;
+      const c1 = p.history.dailyBars('NIFTY', days[i], days[i])[0].close;
+      const opts = p.history.dailyOptions('NIFTY', days[i - 1]);
+      const K = opts.map((o) => o.strike).reduce((a, k) => (Math.abs(k - c0) < Math.abs(a - c0) ? k : a));
+      const st = opts.filter((o) => o.strike === K).reduce((a, o) => a + o.close, 0);
+      const T = (p.calendar.expiryTs(addDays(days[i - 1], 7)) - closeTs(p, days[i - 1])) / YEAR_MS;
+      if (Math.abs(c1 - c0) <= st * Math.sqrt((closeTs(p, days[i]) - closeTs(p, days[i - 1])) / YEAR_MS / T)) sIn++;
+    }
     const h = an.expectedRange(['NIFTY'])[0].history;
     expect(h).toEqual({
+      straddleSessions: 6,
+      straddleCloseIn: r2((sIn / 6) * 100),
       sessions: 6,
       closeIn1: 50,
       closeIn2: r2((4 / 6) * 100),
@@ -780,7 +811,8 @@ describe('expected range', () => {
   it('blank with the reason without live data; NoLiveData when nothing asked is listed', () => {
     const { p, an } = bare();
     const n = an.expectedRange(['NIFTY'])[0];
-    expect([n.anchor, n.ltp, n.iv, n.sigma, n.band1, n.band2, n.position]).toEqual([null, null, null, null, null, null, null]);
+    expect([n.anchor, n.ltp, n.iv, n.sigma, n.band1, n.band2, n.position, n.straddle]).toEqual([null, null, null, null, null, null, null, null]);
+    expect(n.gaps?.straddle).toMatch(/No listed NIFTY option expiry|needs a live NIFTY price/);
     expect(n.gaps?.anchor).toMatch(/No 2026-10-09 close of NIFTY/);
     expect(n.gaps?.iv).toBeTruthy();
     expect(() => an.expectedRange(['GOLD'])).toThrow(/None of GOLD is listed/);

@@ -571,11 +571,12 @@ describe('Expected Range', () => {
     remaining: { low: 24850.1, high: 25149.9, sigma: 149.9 },
     position: 'inside',
     rangeUsedPct: 20.57,
-    history: { sessions: 60, closeIn1: 70, closeIn2: 96.67, rangeIn1: 45, avgRange: 260.5, from: '2026-07-14', to: '2026-10-09' },
+    straddle: { expiry: '2026-10-13', strike: 25000, ce: 141.2, pe: 133.9, premium: 275.1, movePct: 1.1, low: 24724.9, high: 25275.1, days: 1.2, move: 275.1, band: { low: 24624.9, high: 25175.1 } },
+    history: { sessions: 60, closeIn1: 70, closeIn2: 96.67, rangeIn1: 45, straddleSessions: 58, straddleCloseIn: 62.07, avgRange: 260.5, from: '2026-07-14', to: '2026-10-09' },
     ...over,
   });
   it('cards with ±1σ / ±2σ, the live position and the back-check', () => {
-    const gold = row({ symbol: 'GOLD', name: 'Gold', kind: 'commodity', exchange: 'MCX', anchor: null, sigma: null, sigmaPct: null, band1: null, band2: null, remaining: null, position: null, rangeUsedPct: null, iv: null, ivSource: null, history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, avgRange: null, from: null, to: null }, gaps: { anchor: 'No 2026-10-09 close of GOLD', iv: 'No listed GOLD option expiry', history: 'No past MCX sessions of GOLD with a recorded ATM IV' } });
+    const gold = row({ symbol: 'GOLD', name: 'Gold', kind: 'commodity', exchange: 'MCX', anchor: null, sigma: null, sigmaPct: null, band1: null, band2: null, remaining: null, position: null, rangeUsedPct: null, iv: null, ivSource: null, straddle: null, history: { sessions: 0, closeIn1: null, closeIn2: null, rangeIn1: null, straddleSessions: 0, straddleCloseIn: null, avgRange: null, from: null, to: null }, gaps: { anchor: 'No 2026-10-09 close of GOLD', iv: 'No listed GOLD option expiry', straddle: 'No listed GOLD option expiry', history: 'No past MCX sessions of GOLD with a recorded ATM IV' } });
     const out = decode(render(<ExpectedRange />, [[['expected-range'], [row(), gold]]]));
     expect(out).toContain('Expected Range');
     expect(out).toContain('±316.04');
@@ -584,6 +585,9 @@ describe('Expected Range', () => {
     expect(out).toContain('Inside ±1σ');
     expect(out).toContain('Close stayed within ±1σ on 70% and within ±2σ on 97% of the last 60 sessions');
     expect(out).toContain('No past MCX sessions of GOLD with a recorded ATM IV');
+    expect(out).toContain('±275.10');
+    expect(out).toContain('24,724.90 – 25,275.10');
+    expect(out).toContain('inside the straddle move on 62% of 58');
     expect(out).toContain('MCX');
   });
   it('503', () => expectBlank(render(<ExpectedRange />, [[['expected-range'], noLive('Instrument master not loaded yet')]]), 'Instrument master not loaded yet'));

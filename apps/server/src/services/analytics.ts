@@ -1378,6 +1378,7 @@ export class Analytics {
     if (ltp !== null && band1 && band2) {
       position = ltp > band2.high ? 'above-2' : ltp < band2.low ? 'below-2' : ltp > band1.high ? 'above-1' : ltp < band1.low ? 'below-1' : 'inside';
     }
+    const straddle = gaps.try('straddle', () => this.liveStraddle(symbol, expiry, ltp ?? live, yrs, anchor));
     const history = this.expectedRangeHistory(symbol, anchorDate);
     if (!history.sessions) gaps.add('history', u.kind === 'commodity' ? `No past MCX sessions of ${symbol} with a recorded ATM IV and a recorded open-to-close day yet` : `No past sessions of ${symbol} with an official ATM IV and official closes loaded`);
     return {
@@ -1402,8 +1403,60 @@ export class Analytics {
       remaining: remSigma !== null && ltp !== null ? { low: r2(ltp - remSigma) as number, high: r2(ltp + remSigma) as number, sigma: r2(remSigma) as number } : null,
       position,
       rangeUsedPct: high !== null && low !== null && sigma ? r2(((high - low) / (2 * sigma)) * 100) : null,
+      straddle,
       history,
       ...gaps.out(),
+    };
+  }
+
+  /** One-session move from the traded ATM straddle at the close of `date` (nearest expiry with a day left); null without one. */
+  private eodStraddleMove(symbol: string, date: string, close: number, sessionMs: number): number | null {
+    const md = mdFor(this.md, symbol);
+    const rows = this.orElse(() => md.history.dailyOptions(symbol, date), []);
+    const minExp = addDays(date, 1);
+    const expiries = [...new Set(rows.map((o) => o.expiry))].filter((e) => e >= minExp).sort();
+    const traded = (o: DailyOption) => o.volume > 0 && isPos(o.close);
+    const e = expiries[0];
+    if (!e) return null;
+    const of = rows.filter((o) => o.expiry === e && traded(o));
+    if (!of.length) return null;
+    const K = of.map((o) => o.strike).reduce((a, k) => (Math.abs(k - close) < Math.abs(a - close) ? k : a));
+    const ce = of.find((o) => o.strike === K && o.type === 'CE');
+    const pe = of.find((o) => o.strike === K && o.type === 'PE');
+    if (!ce || !pe) return null;
+    const T = (md.calendar.expiryTs(e) - md.calendar.ts(date, md.calendar.sessionMinutes(date))) / YEAR_MS;
+    if (!(T > 0)) return null;
+    return (ce.close + pe.close) * Math.sqrt(Math.min(1, sessionMs / YEAR_MS / T));
+  }
+
+  /** The live ATM straddle of `expiry` as the move priced in to expiry, and scaled to one session of `dayYrs`. */
+  private liveStraddle(symbol: string, expiry: string | null, price: number | null, dayYrs: number, anchor: number | null): ExpectedRangeRow['straddle'] {
+    const md = mdFor(this.md, symbol);
+    if (!expiry) throw new NoLiveData(`No listed ${symbol} option expiry`);
+    if (price === null) throw new NoLiveData(`The straddle move needs a live ${symbol} price`);
+    const strikes = md.ref.strikes(symbol, expiry);
+    if (!strikes.length) throw new NoLiveData(`No listed strikes of ${symbol} ${expiry}`);
+    const K = strikes.reduce((a, k) => (Math.abs(k - price) < Math.abs(a - price) ? k : a));
+    const ce = livePrice(md, md.live.quote(optKey(symbol, expiry, 'CE', K)));
+    const pe = livePrice(md, md.live.quote(optKey(symbol, expiry, 'PE', K)));
+    if (ce === null || pe === null) throw new NoLiveData(`No live ${ce === null ? 'CE' : 'PE'} premium of ${symbol} ${expiry} ${K}`);
+    const T = timeToExpiry(expiry, md.pricing.valuationTs(undefined, undefined, symbol), md.calendar.exchange);
+    if (!(T > 0)) throw new NoLiveData(`${symbol} ${expiry} has expired`);
+    const premium = ce + pe;
+    const move = premium * Math.sqrt(Math.min(1, dayYrs / T));
+    const c = anchor ?? price;
+    return {
+      expiry,
+      strike: K,
+      ce,
+      pe,
+      premium: r2(premium) as number,
+      movePct: r2((premium / price) * 100) as number,
+      low: r2(price - premium) as number,
+      high: r2(price + premium) as number,
+      days: r2(T * 365) as number,
+      move: r2(move) as number,
+      band: { low: r2(c - move) as number, high: r2(c + move) as number },
     };
   }
 
@@ -1434,6 +1487,19 @@ export class Analytics {
       if (mv <= 2 * sg) c2++;
       if (isPos(b.high) && isPos(b.low) && b.high <= p.close + sg && b.low >= p.close - sg) h1++;
     }
+    // The straddle rule: the previous session's traded ATM straddle (official / recorded closes) scaled to one session.
+    let sn = 0;
+    let sIn = 0;
+    for (let i = 1; i < days.length; i++) {
+      const d0 = days[i - 1];
+      const p = bars.get(d0);
+      const b = bars.get(days[i]);
+      if (!p || !b || !isPos(p.close) || !isPos(b.close)) continue;
+      const mv = this.eodStraddleMove(symbol, d0, p.close, closeTs(days[i]) - closeTs(d0));
+      if (mv === null) continue;
+      sn++;
+      if (Math.abs(b.close - p.close) <= mv) sIn++;
+    }
     const recent = [...bars.values()].filter((b) => isPos(b.high) && isPos(b.low)).slice(-14);
     const share = (k: number) => (n ? r2((k / n) * 100) : null);
     return {
@@ -1441,6 +1507,8 @@ export class Analytics {
       closeIn1: share(c1),
       closeIn2: share(c2),
       rangeIn1: share(h1),
+      straddleSessions: sn,
+      straddleCloseIn: sn ? r2((sIn / sn) * 100) : null,
       avgRange: recent.length ? r2(recent.reduce((a, b) => a + (b.high - b.low), 0) / recent.length) : null,
       from: tested[0] ?? null,
       to: tested[tested.length - 1] ?? null,

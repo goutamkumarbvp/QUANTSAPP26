@@ -167,6 +167,7 @@ test('expected range: ±1σ / ±2σ of NIFTY and the MCX commodities from live A
   await expect(page.getByText('±1σ range (≈ 68 %)').first()).toBeVisible({ timeout: 20_000 });
   for (const s of ['NIFTY', 'GOLD', 'SILVER', 'NATURALGAS', 'CRUDEOIL']) await expect(page.getByLabel(`${s} expected range`)).toBeVisible();
   await expect(page.getByText('live premiums').first()).toBeVisible();
+  await expect(page.getByText('Straddle-implied (option-chain method)').first()).toBeVisible();
   await shot(page, info, 'expected-range');
   await page.getByRole('button', { name: 'Details' }).first().click();
   await expect(page.getByText('Rest of today (±1 SD)')).toBeVisible();

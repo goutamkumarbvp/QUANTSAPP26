@@ -482,6 +482,26 @@ export interface ExpectedRangeRow extends DataGaps {
   position: 'inside' | 'above-1' | 'below-1' | 'above-2' | 'below-2' | null;
   /** Share of the ±1σ width (2σ) the day's high − low has used so far (percent). */
   rangeUsedPct: number | null;
+  /**
+   * Straddle-implied move (the option-chain convention): the live ATM straddle (CE + PE premium at the
+   * listed strike nearest the price) of `expiry` is the move priced in to expiry — price ± straddle.
+   * `move` scales it to this session (× √(session time / time to expiry)) and `band` centres that on the anchor.
+   */
+  straddle: {
+    expiry: string;
+    strike: number;
+    ce: number;
+    pe: number;
+    premium: number;
+    /** Premium ÷ price (percent) and the band to expiry around the price. */
+    movePct: number;
+    low: number;
+    high: number;
+    /** Calendar days to expiry. */
+    days: number;
+    move: number;
+    band: PriceBand;
+  } | null;
   /** Back-check on past sessions: the band from the previous close and that day's ATM IV. */
   history: {
     sessions: number;
@@ -490,6 +510,9 @@ export interface ExpectedRangeRow extends DataGaps {
     closeIn2: number | null;
     /** % of sessions whose whole high–low stayed within ±1σ. */
     rangeIn1: number | null;
+    /** The straddle rule on the same sessions: sessions with a traded ATM straddle, % of closes inside it. */
+    straddleSessions: number;
+    straddleCloseIn: number | null;
     /** Average high − low of the last 14 sessions (points). */
     avgRange: number | null;
     from: string | null;

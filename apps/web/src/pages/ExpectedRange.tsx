@@ -57,7 +57,8 @@ export function RangeBar({ r }: { r: ExpectedRangeRow }) {
 function backCheck(r: ExpectedRangeRow): string | null {
   const h = r.history;
   if (!h.sessions || !isNum(h.closeIn1)) return null;
-  return `Close stayed within ±1σ on ${formatFixed(h.closeIn1, 0)}% and within ±2σ on ${formatFixed(h.closeIn2, 0)}% of the last ${h.sessions} sessions (model: 68 % / 95 %)`;
+  const st = isNum(h.straddleCloseIn) ? `; inside the straddle move on ${formatFixed(h.straddleCloseIn, 0)}% of ${h.straddleSessions}` : '';
+  return `Close stayed within ±1σ on ${formatFixed(h.closeIn1, 0)}% and within ±2σ on ${formatFixed(h.closeIn2, 0)}% of the last ${h.sessions} sessions (model: 68 % / 95 %)${st}`;
 }
 
 function RangeCard({ r, onOpen }: { r: ExpectedRangeRow; onOpen?: () => void }) {
@@ -98,6 +99,20 @@ function RangeCard({ r, onOpen }: { r: ExpectedRangeRow; onOpen?: () => void }) 
             <div className="font-semibold tabular-nums">{r.band2 ? `${px(r.band2.low)} – ${px(r.band2.high)}` : <Dash reason={r.gaps?.iv ?? r.gaps?.anchor} />}</div>
           </div>
         </div>
+        <div className="rounded border border-line px-2 py-1.5 text-xs">
+          <div className="text-muted">Straddle-implied (option-chain method)</div>
+          {r.straddle ? (
+            <div className="tabular-nums">
+              <span className="font-semibold">±{px(r.straddle.premium)}</span> (±{formatFixed(r.straddle.movePct, 2)}%) to {formatExpiry(r.straddle.expiry)} expiry ·{' '}
+              <span className="font-semibold">{px(r.straddle.low)} – {px(r.straddle.high)}</span>
+              <div className="text-2xs text-muted">
+                {r.straddle.strike} CE {px(r.straddle.ce)} + PE {px(r.straddle.pe)} · one session ±{px(r.straddle.move)} ({px(r.straddle.band.low)} – {px(r.straddle.band.high)})
+              </div>
+            </div>
+          ) : (
+            <div className="text-muted"><Dash reason={r.gaps?.straddle} /> {r.gaps?.straddle}</div>
+          )}
+        </div>
         <div className="text-2xs text-muted">
           ATM IV {isNum(r.iv) ? `${formatFixed(r.iv, 2)}%` : '—'}
           {r.expiry ? ` · ${formatExpiry(r.expiry)} expiry` : ''}
@@ -133,6 +148,12 @@ function Detail({ r }: { r: ExpectedRangeRow }) {
         <Stat label="Close inside ±1 SD" value={isNum(h.closeIn1) ? `${formatFixed(h.closeIn1, 0)}%` : null} reason={r.gaps?.history} sub={h.sessions ? `${h.sessions} past sessions (model 68 %)` : undefined} />
         <Stat label="Close inside ±2 SD" value={isNum(h.closeIn2) ? `${formatFixed(h.closeIn2, 0)}%` : null} reason={r.gaps?.history} sub={h.sessions ? 'model 95 %' : undefined} />
         <Stat label="Whole day inside ±1 SD" value={isNum(h.rangeIn1) ? `${formatFixed(h.rangeIn1, 0)}%` : null} reason={r.gaps?.history} sub="high and low both inside" />
+        <Stat
+          label="Close inside straddle move"
+          value={isNum(h.straddleCloseIn) ? `${formatFixed(h.straddleCloseIn, 0)}%` : null}
+          reason={r.gaps?.history ?? 'Needs traded ATM straddle closes of past sessions'}
+          sub={h.straddleSessions ? `${h.straddleSessions} past sessions (≈ 0.8 SD: about 58 % expected)` : undefined}
+        />
         <Stat label="Avg high − low (14D)" value={isNum(h.avgRange) ? px(h.avgRange) : null} reason="Needs daily highs and lows" sub={isNum(h.avgRange) && isNum(r.sigma) ? `${formatFixed(h.avgRange / r.sigma, 2)} × the 1 SD move` : undefined} />
       </div>
       <Coverage
@@ -167,7 +188,7 @@ export default function ExpectedRange() {
                   <RangeCard key={r.symbol} r={r} onOpen={() => setTab(r.symbol)} />
                 ))}
               </div>
-              <Coverage text="σ = previous close × ATM IV × √(calendar days to this session's close ÷ 365), the same time basis the IV is solved with (nearest expiry with at least a day left). Under the model the close lands within ±1σ about 68 % of the time and within ±2σ about 95 %; the back-check line shows how often it actually did. Not a forecast of direction; paper trading only." />
+              <Coverage text="σ = previous close × ATM IV × √(calendar days to this session's close ÷ 365), the same time basis the IV is solved with (nearest expiry with at least a day left). Under the model the close lands within ±1σ about 68 % of the time and within ±2σ about 95 %; the back-check line shows how often it actually did. Straddle-implied: the live ATM call + put premium is the move the option chain prices in to expiry (price ± straddle); it is about 0.8 σ, so the close lands inside it roughly 58 % of the time. Not a forecast of direction; paper trading only." />
             </>
           )
         }
