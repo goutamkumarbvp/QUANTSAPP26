@@ -193,3 +193,10 @@ Measured first (server CPU profile, API timings, Playwright page timings at 4× 
 - Tests: row encoding, torn rows, compaction, retention / size pruning, coverage; the recorder's per-second rows,
   session / staleness rules and late ticks; a provider run from feed ticks to stored seconds; a one-second replay
   that makes the one-minute replay's trades at bid/ask prices, its gap report and its skip reasons; the web card.
+
+## C-52 — Six sidebar entries
+
+The sidebar lists only the six kinds of work — Market Overview (10 pages), Option Chain & OI (5), Charts & Range (5),
+Strategy (5), Paper Trading (4), More (3) — instead of 13 entries under six headings. All pages of an entry are tabs
+across the top of each of its pages, in labelled sections (e.g. Home · F&O Market · Institutions). No page or address
+changed. Tests: the menu (six entries, every page once, `locate()` with the entry) and an e2e walk.

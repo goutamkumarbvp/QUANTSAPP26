@@ -14,18 +14,21 @@ export interface NavItem {
   tabs: SubTab[];
 }
 
+/** A sidebar entry: one kind of work; all its pages show as tabs across the top of each of them. */
 export interface NavGroup {
   title: string;
+  icon: string;
+  desc: string;
   items: NavItem[];
 }
 
 /**
- * The menu: six groups, each with only a few entries; an entry's related pages are sub-tabs shown at the
- * top of its pages (every page keeps its own address, so links and bookmarks still work).
+ * The menu: six sidebar entries (one per kind of work); every page of an entry is a tab across the top of
+ * its pages, in sections (every page keeps its own address, so links and bookmarks still work).
  *   Market Overview         — Home (overview · watchlist) · F&O Market (heat-map, build-up, breadth,
- *                             scanners, unusual options, NIFTY Top 10) · Institutional Activity
+ *                             scanners, unusual options, NIFTY Top 10) · Institutions
  *   Option Chain & OI       — Option Chain · Open Interest (strike-wise, multi-strike, PCR, max pain)
- *   Intraday Charts & Range — Market Terminal (terminal, order flow & book, range breakout) · Expected
+ *   Charts & Range          — Market Terminal (terminal, order flow & book, range breakout) · Expected
  *                             Range (expected range, straddle chart)
  *   Strategy                — Strategy Builder (builder, wizard, optimizer) · Strategy Analysis (chart, recap)
  *   Paper Trading           — Portfolio (positions & orders, strategy manager, alerts) · Algo Strategies
@@ -34,6 +37,8 @@ export interface NavGroup {
 export const NAV: NavGroup[] = [
   {
     title: 'Market Overview',
+    icon: '⌂',
+    desc: 'Home, watchlist, the F&O market (heat-map, build-up, breadth, scanners, unusual options, NIFTY Top 10) and institutional activity',
     items: [
       {
         label: 'Home',
@@ -58,7 +63,7 @@ export const NAV: NavGroup[] = [
         ],
       },
       {
-        label: 'Institutional Activity',
+        label: 'Institutions',
         icon: '₹',
         desc: 'FII / DII cash flows and participant-wise F&O positions (official, daily)',
         tabs: [
@@ -70,6 +75,8 @@ export const NAV: NavGroup[] = [
   },
   {
     title: 'Option Chain & OI',
+    icon: '⛓',
+    desc: 'The option chain and its open-interest readings (strike-wise, multi-strike, PCR, max pain)',
     items: [
       {
         label: 'Option Chain',
@@ -91,7 +98,9 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
-    title: 'Intraday Charts & Range',
+    title: 'Charts & Range',
+    icon: '▣',
+    desc: 'Market terminal, order flow & book, range breakout, expected range and straddle chart',
     items: [
       {
         label: 'Market Terminal',
@@ -116,6 +125,8 @@ export const NAV: NavGroup[] = [
   },
   {
     title: 'Strategy',
+    icon: '✚',
+    desc: 'Build, find, chart and replay option strategies',
     items: [
       {
         label: 'Strategy Builder',
@@ -140,6 +151,8 @@ export const NAV: NavGroup[] = [
   },
   {
     title: 'Paper Trading',
+    icon: '💼',
+    desc: 'Positions & orders, strategy manager, alerts and algo strategies',
     items: [
       {
         label: 'Portfolio',
@@ -161,6 +174,8 @@ export const NAV: NavGroup[] = [
   },
   {
     title: 'More',
+    icon: '∑',
+    desc: 'Calculators, learn and settings',
     items: [
       {
         label: 'Tools',
@@ -187,19 +202,22 @@ const viewOf = (to: string) => new URLSearchParams(to.split('?')[1] ?? '').get('
  * current one; else the entry's sub-tab of that path without a view; else its first one of that path.
  * `/learn/<lesson>` belongs to Learn.
  */
-export function locate(pathname: string, search: string): { item: NavItem; tab: SubTab } | null {
+export function locate(pathname: string, search: string): { group: NavGroup; item: NavItem; tab: SubTab } | null {
   const path = pathname.startsWith('/learn/') ? '/learn' : pathname;
   const view = new URLSearchParams(search).get('view');
-  for (const g of NAV) {
-    for (const item of g.items) {
+  for (const group of NAV) {
+    for (const item of group.items) {
       const same = item.tabs.filter((t) => pathOf(t.to) === path);
       if (!same.length) continue;
       const tab = same.find((t) => view !== null && viewOf(t.to) === view) ?? same.find((t) => viewOf(t.to) === null) ?? same[0];
-      return { item, tab };
+      return { group, item, tab };
     }
   }
   return null;
 }
+
+/** Every page of a sidebar entry (its sub-tabs), in order. */
+export const pagesOf = (g: NavGroup): SubTab[] => g.items.flatMap((i) => i.tabs);
 
 /** Bottom bar on phones (the full menu is in the drawer and on /tools). */
 export const MOBILE_TABS: { to: string; label: string; icon: string }[] = [

@@ -186,23 +186,26 @@ test('expected range: ±1σ / ±2σ of NIFTY and the MCX commodities from live A
   await clean(page, watch);
 });
 
-test('menu: few sidebar entries; an entry opens its first page and its sub-tabs switch between the related pages', async ({ page }) => {
+test('menu: six sidebar entries; an entry opens its first page and its tabs switch between all its pages', async ({ page }) => {
   const watch = watchErrors(page);
   await open(page, '/', /Market Overview/);
   const side = page.getByRole('navigation', { name: 'Main' });
-  await expect(side.getByRole('link')).toHaveCount(13);
-  await side.getByRole('link', { name: /F&O Market/ }).click();
-  await expect(page).toHaveURL(/\/fno-market\?view=heatmap/);
-  const tabs = page.getByRole('navigation', { name: 'F&O Market pages' });
-  await expect(tabs.getByRole('link')).toHaveCount(6);
+  await expect(side.getByRole('link')).toHaveCount(6);
+  await side.getByRole('link', { name: /Option Chain & OI/ }).click();
+  await expect(page).toHaveURL(/\/option-chain$/);
+  await side.getByRole('link', { name: /Market Overview/ }).click();
+  await expect(page).toHaveURL(/\/$/);
+  const tabs = page.getByRole('navigation', { name: 'Market Overview pages' });
+  await expect(tabs.getByRole('link')).toHaveCount(10);
   await tabs.getByRole('link', { name: 'Unusual options' }).click();
   await expect(page).toHaveURL(/\/scanners\?view=unusual/);
   await expect(page.getByRole('heading', { name: 'Unusual Option Activity' })).toBeVisible({ timeout: 20_000 });
   await expect(tabs.getByRole('link', { name: 'Unusual options' })).toHaveAttribute('aria-current', 'page');
-  await side.getByRole('link', { name: /Market Terminal/ }).click();
-  await page.getByRole('navigation', { name: 'Market Terminal pages' }).getByRole('link', { name: 'Order Flow & Book' }).click();
+  await expect(side.getByRole('link', { name: /Market Overview/ })).toHaveAttribute('aria-current', 'page');
+  await side.getByRole('link', { name: /Charts & Range/ }).click();
+  await page.getByRole('navigation', { name: 'Charts & Range pages' }).getByRole('link', { name: 'Order Flow & Book' }).click();
   await expect(page).toHaveURL(/\/order-book$/);
-  await expect(side.getByRole('link', { name: /Market Terminal/ })).toHaveAttribute('aria-current', 'page');
+  await expect(side.getByRole('link', { name: /Charts & Range/ })).toHaveAttribute('aria-current', 'page');
   await clean(page, watch);
 });
 
