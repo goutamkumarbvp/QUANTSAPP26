@@ -14,8 +14,9 @@ import { formatCompact, formatIndian, formatSessionTime, isNum } from '../lib/fo
  * buyer-initiated (green) and seller-initiated (red) quantity of every minute since the open, superimposed on
  * one scale, on one time axis.
  * Spikes (≥ 3× the median of the previous 30 minutes) mark large aggressive orders; the direction read
- * compares who initiated more quantity with what the price did. Recorded minutes only: a minute without
- * a record is a gap, never filled.
+ * compares who initiated more quantity with what the price did. The split exists for recorded minutes only:
+ * a minute the recorder did not see is drawn from Kotak's 1-minute candle (price and volume) when Kotak has
+ * one, its buyer / seller lines left as a gap; otherwise the minute is a gap, never filled.
  */
 
 const MIN = 60_000;
@@ -82,8 +83,11 @@ export function OrderTradeChart({ d, price, unit = 'qty', initialStyle }: { d: O
   const u = unit === 'lots' && lot ? lot : 1;
   const unitLabel = unit === 'lots' && lot ? 'lots' : 'qty';
 
-  const spikes = useMemo(() => flowSpikes(d.minutes), [d.minutes]);
-  const dir = useMemo(() => flowDirection(d.minutes, { lookback, spikes }), [d.minutes, lookback, spikes]);
+  // Spikes and the read need the buyer / seller split: recorded minutes only (Kotak-filled minutes have none).
+  const recordedMinutes = useMemo(() => d.minutes.filter((x) => x.source !== 'kotak'), [d.minutes]);
+  const kotakMinutes = d.minutes.length - recordedMinutes.length;
+  const spikes = useMemo(() => flowSpikes(recordedMinutes), [recordedMinutes]);
+  const dir = useMemo(() => flowDirection(recordedMinutes, { lookback, spikes }), [recordedMinutes, lookback, spikes]);
   const sessionBuySpikes = spikes.filter((s) => s.side === 'buy').length;
   const sessionSellSpikes = spikes.length - sessionBuySpikes;
 
@@ -157,10 +161,10 @@ export function OrderTradeChart({ d, price, unit = 'qty', initialStyle }: { d: O
           xAxisIndex: 1,
           yAxisIndex: 1,
           barMaxWidth: 6,
-          data: m.map((x) => ({ value: [x.ts, x.volume / u], itemStyle: { color: lineStyle ? c.muted : x.delta >= 0 ? c.up : c.down, opacity: x.partial ? 0.25 : lineStyle ? 0.5 : 0.7 } })),
+          data: m.map((x) => ({ value: [x.ts, x.volume / u], itemStyle: { color: lineStyle || x.source === 'kotak' ? c.muted : x.delta >= 0 ? c.up : c.down, opacity: x.partial || x.source === 'kotak' ? 0.25 : lineStyle ? 0.5 : 0.7 } })),
         },
-        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapLine(m, MIN, (x) => x.buyVolume / u) },
-        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapLine(m, MIN, (x) => x.sellVolume / u) },
+        { name: 'Buyer initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: GREEN }, itemStyle: { color: GREEN }, data: gapLine(m, MIN, (x) => (x.source === 'kotak' ? null : x.buyVolume / u)) },
+        { name: 'Seller initiated', type: 'line', xAxisIndex: 2, yAxisIndex: 2, symbol: 'none', lineStyle: { width: 1, color: RED }, itemStyle: { color: RED }, data: gapLine(m, MIN, (x) => (x.source === 'kotak' ? null : x.sellVolume / u)) },
         ...(lineStyle ? [] : [{
           name: 'Cumulative delta',
           type: 'line',
@@ -171,7 +175,7 @@ export function OrderTradeChart({ d, price, unit = 'qty', initialStyle }: { d: O
           itemStyle: { color: c.accent },
           areaStyle: { color: c.accent, opacity: 0.08 },
           markLine: { symbol: 'none', silent: true, label: { show: false }, lineStyle: { color: c.muted, type: 'dashed' }, data: [{ yAxis: 0 }] },
-          data: gapLine(m, MIN, (x) => x.cumDelta / u),
+          data: gapLine(m, MIN, (x) => (x.source === 'kotak' ? null : x.cumDelta / u)),
         }]),
       ],
     };
@@ -213,6 +217,7 @@ export function OrderTradeChart({ d, price, unit = 'qty', initialStyle }: { d: O
         </div>
       )}
       <div className="mt-2 space-y-1">
+        {kotakMinutes > 0 && <Coverage text={`${kotakMinutes} minute${kotakMinutes > 1 ? 's' : ''} the recorder did not see (before it started, or during a restart) are drawn from Kotak 1-minute candles: real price and volume (faint bars), but no buyer / seller split — the green and red lines start where the live recording starts.`} />}
         <Coverage text={`Each minute counts the quantity actually traded in that minute (the rise in cumulative volume, trade by trade): a trade at or above the ask is buyer initiated, at or below the bid seller initiated, inside the spread unclassified (estimated from live ticks). Spike = at least 3× the median of the previous 30 minutes and larger than the other side. ${d.coverage}`} />
         <Coverage text="Read: aggressive side ≥ 55% with the price moving its way = in control; moving the other way = absorbed (the passive side is soaking it up). An estimate to support a view, not a trading signal." />
       </div>

@@ -40,7 +40,7 @@ import { IntradayFiles } from './store/intraday';
 import { SecondStore, type SecondStoreUsage } from './store/seconds';
 import { SecondRecorder, type SecondRecorderStats } from './second-recorder';
 import { NoLiveData } from './types';
-import type { Candle, CandleInterval, FeedHealth, HistoryStore, InstrumentKey, IntradayStore, MarketDataProvider, TradingCalendar } from './types';
+import type { Candle, CandleInterval, FeedHealth, HistoryStore, InstrumentKey, IntradayStore, Listing, MarketDataProvider, TradingCalendar } from './types';
 import { EXTRA_INDEX_SPOTS, LiveUniverse, type UserContract } from './universe';
 import type { MarketClockInfo } from '@q26/core';
 import { istWhen } from '../log';
@@ -207,6 +207,49 @@ export function recordedMinutes(intraday: IntradayStore, key: InstrumentKey, dat
   return { minutes, missing };
 }
 
+/** Shortest run of minutes without a recorded trade that counts as "the recorder was not running" (illiquid contracts have shorter ones). */
+export const RECORDING_GAP_MIN = 5;
+
+/**
+ * Whether the recorded traded minutes of one session leave a hole the recorder may have missed: recording
+ * started 3+ minutes after the open, a minute is partial (recording restarted inside it), a run of
+ * RECORDING_GAP_MIN+ minutes without a recorded trade, or no record over the last RECORDING_GAP_MIN+ minutes
+ * up to `end` (now, or the close). Such a session is completed from Kotak 1-minute candles where it can be.
+ */
+export function recordingHasGap(recs: readonly MinuteCandle[], open: number, end: number): boolean {
+  if (!recs.length) return true;
+  const ts = recs.map((r) => r.ts).sort((a, b) => a - b);
+  if (recs.some((r) => r.partial)) return true;
+  if (ts[0] - open >= 3 * MINUTE) return true;
+  for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > RECORDING_GAP_MIN * MINUTE) return true;
+  return end - (ts[ts.length - 1] + MINUTE) >= RECORDING_GAP_MIN * MINUTE;
+}
+
+/**
+ * Recorded minutes completed with Kotak 1-minute candles of the same instrument: a Kotak minute is added
+ * where nothing was recorded, and replaces a recorded minute that is `partial` (its volume a lower bound;
+ * Kotak's covers the whole minute). A fully recorded minute always wins. Oldest first.
+ */
+export function mergeKotakMinutes(recorded: readonly MinuteCandle[], kotak: readonly MinuteCandle[]): { minutes: MinuteCandle[]; added: number; replaced: number } {
+  const out = [...recorded];
+  const at = new Map(out.map((m, i) => [m.ts, i]));
+  let added = 0;
+  let replaced = 0;
+  for (const k of kotak) {
+    const i = at.get(k.ts);
+    if (i === undefined) {
+      at.set(k.ts, out.length);
+      out.push({ ...k });
+      added++;
+    } else if (out[i].partial) {
+      out[i] = { ...k };
+      replaced++;
+    }
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return { minutes: out, added, replaced };
+}
+
 /**
  * Daily candles from the official end-of-day store: spot/index OHLC (bars at 09:15 IST of the date);
  * contracts get their official close only (the store keeps no contract OHLC), and untraded rows
@@ -242,6 +285,8 @@ export function officialDailyCandles(history: HistoryStore, calendar: TradingCal
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
+/** How long today's Kotak candles that only fill recording holes are reused before they are asked again. */
+const FILL_TTL = 15 * MINUTE;
 // The session's own login hold (60 s doubling to 30 min after a rejection, 5 s doubling to 1 min
 // when Kotak did not answer) is the real back-off (notBefore); the job adds little on top of it.
 const LOGIN_BACKOFF = { baseMs: 5 * SECOND, maxMs: MINUTE };
@@ -341,6 +386,9 @@ export class LiveProvider implements MarketDataProvider {
   private readonly invalidHolidays: string[];
   private readonly jobs = new Map<string, Job>();
   private readonly histCache = new Map<string, { at: number; candles: MinuteCandle[] }>();
+  /** Background fills in progress, and the last failure of each (see kotakFill). */
+  private readonly fillRunning = new Set<string>();
+  private readonly fillFailed = new Map<string, { at: number; why: string }>();
   private readonly trackedChains = new Set<string>();
   private intervals: unknown[] = [];
   private started = false;
@@ -458,7 +506,7 @@ export class LiveProvider implements MarketDataProvider {
     });
 
     if (config.seconds) {
-      this.secondStore = new SecondStore({ dataDir: config.dataDir, ...(config.seconds.dir ? { dir: config.seconds.dir } : {}), maxBytes: config.seconds.maxGb * 1024 ** 3, retentionDays: config.seconds.retentionDays, logger: this.log });
+      this.secondStore = new SecondStore({ dataDir: config.dataDir, ...(config.seconds.dir ? { dir: config.seconds.dir } : {}), maxBytes: config.seconds.maxGb * 1024 ** 3, retentionDays: config.seconds.retentionDays, writeBehind: true, logger: this.log });
       this.secondRecorder = new SecondRecorder({
         live: this.live,
         store: this.secondStore,
@@ -585,6 +633,7 @@ export class LiveProvider implements MarketDataProvider {
     }
     try {
       this.secondRecorder?.stop(); // writes the buffered seconds
+      await this.secondStore?.drain();
     } catch (e) {
       this.log.warn(`live: 1-second recorder stop failed: ${errMsg(e)}`);
     }
@@ -957,7 +1006,10 @@ export class LiveProvider implements MarketDataProvider {
     const dates = cal.sessions(from, to);
     if (!dates.length) throw new NoLiveData(`No trading sessions between ${from} and ${to}`);
 
-    const { minutes, missing } = recordedMinutes(this.intraday, k, dates, this.istDate());
+    const today = this.istDate();
+    const rec = recordedMinutes(this.intraday, k, dates, today);
+    const missing = rec.missing;
+    let minutes = rec.minutes;
     let kotakNote: string | undefined;
     if (missing.length) {
       try {
@@ -966,32 +1018,54 @@ export class LiveProvider implements MarketDataProvider {
         kotakNote = errMsg(e);
       }
     }
+    // Sessions recorded only in part (the app started after the open, a restart, a feed outage): the
+    // minutes the recorder missed come from Kotak 1-minute candles (NSE/BSE; Kotak serves no MCX history).
+    const fill = this.rest && cal.exchange !== 'MCX' ? dates.filter((d) => !missing.includes(d) && this.sessionHasGap(minutes, d, cal, today)) : [];
+    if (fill.length) {
+      try {
+        minutes = mergeKotakMinutes(minutes, this.kotakFill(k, fill)).minutes;
+      } catch {
+        // Not served (expired contract, rate limit, no session): the recorded minutes stand.
+      }
+    }
     if (!minutes.length) {
       throw new NoLiveData(`No ${interval} candles of ${describe(k)} for ${from}..${to}: not recorded${kotakNote ? `, and Kotak historical: ${kotakNote}` : ''}`);
     }
     return resampleMinutes(minutes, step, cal);
   }
 
-  /** Kotak 1-minute candles of an ACTIVE contract for the given dates (cached). */
-  private async kotakMinutes(k: InstrumentKey, dates: string[]): Promise<MinuteCandle[]> {
-    if (!this.rest) throw new NoLiveData(this.kotakError ?? 'Kotak REST is not available');
-    if (this.calendarOf(k.symbol).exchange === 'MCX') throw new NoLiveData('Kotak historical candles are not available for MCX; only minutes this app recorded are shown');
-    let listing;
-    try {
-      listing = this.ref.listing(k);
-    } catch (e) {
-      throw e instanceof NoLiveData ? e : new NoLiveData(errMsg(e));
-    }
-    if (!listing) throw new NoLiveData(`${describe(k)} is not listed today (expired contracts are not served by Kotak historical)`);
-    const neosymbol = ScripMaster.neosymbol(listing);
-    const from = dates[0];
+  /** Whether the recorded minutes of session `d` (among `minutes`) leave a hole (see recordingHasGap). */
+  private sessionHasGap(minutes: readonly MinuteCandle[], d: string, cal: TradingCalendar, today: string): boolean {
+    const open = cal.ts(d, 0);
+    const close = cal.ts(d, cal.sessionMinutes(d));
+    const end = d === today ? Math.min(this.now(), close) : close;
+    if (end <= open) return false;
+    return recordingHasGap(minutes.filter((m) => m.ts >= open && m.ts < close), open, end);
+  }
+
+  /**
+   * Kotak 1-minute candles of a listed NSE/BSE contract (or index / stock) on `date`, completed minutes
+   * only: the minutes the recorder did not see (the Order Flow page shows them with their price and
+   * volume; the buyer / seller split needs live ticks). Never waits on Kotak: the cached candles, fetched
+   * in the background (see kotakFill). Throws NoLiveData when Kotak cannot serve them.
+   */
+  async historicalMinutes(key: InstrumentKey, date: string): Promise<MinuteCandle[]> {
+    if (!isIsoDate(date)) throw badRequest(`Invalid date ${date}`);
+    const k = this.ref.ready() ? canonicalKey(this.ref.quoteKey(canonicalKey(key))) : canonicalKey(key);
+    return this.kotakFill(k, [date]);
+  }
+
+  /**
+   * Kotak 1-minute candles of an ACTIVE contract for the given dates (cached; today's for `ttl`, 1 minute by
+   * default). Today's minute in progress is left out (Kotak's candle of it is not complete yet).
+   */
+  private async kotakMinutes(k: InstrumentKey, dates: string[], ttlToday = MINUTE): Promise<MinuteCandle[]> {
+    const { listing, neosymbol, id } = this.histTarget(k, dates);
     const to = dates[dates.length - 1];
-    const id = `${neosymbol}|${from}|${to}`;
-    const today = this.istDate();
-    const ttl = to >= today ? MINUTE : 6 * HOUR;
+    const ttl = to >= this.istDate() ? ttlToday : 6 * HOUR;
     let hit = this.histCache.get(id);
     if (!hit || this.now() - hit.at > ttl) {
-      const raw = await this.rest.historical({ neosymbol, interval: '1min', from, to });
+      const raw = await (this.rest as KotakRest).historical({ neosymbol, interval: '1min', from: dates[0], to });
       const index = k.kind === 'SPOT' && (isIndexSpot(listing) || INDEX_SYMBOLS.has(k.symbol));
       // Index candles carry a 0 volume placeholder: left out, never reported as "no trades". A
       // contract's candle with volume 0 had no trade: its OHLC is a carried-forward price, so it is
@@ -1003,13 +1077,63 @@ export class LiveProvider implements MarketDataProvider {
       this.histCache.set(id, hit);
       while (this.histCache.size > 200) this.histCache.delete(this.histCache.keys().next().value as string);
     }
+    return this.histSelect(hit.candles, k, dates);
+  }
+
+  /** The Kotak instrument and cache id of a historical request; NoLiveData when Kotak cannot serve it. */
+  private histTarget(k: InstrumentKey, dates: readonly string[]): { listing: Listing; neosymbol: string; id: string } {
+    if (!this.rest) throw new NoLiveData(this.kotakError ?? 'Kotak REST is not available');
+    if (this.calendarOf(k.symbol).exchange === 'MCX') throw new NoLiveData('Kotak historical candles are not available for MCX; only minutes this app recorded are shown');
+    let listing;
+    try {
+      listing = this.ref.listing(k);
+    } catch (e) {
+      throw e instanceof NoLiveData ? e : new NoLiveData(errMsg(e));
+    }
+    if (!listing) throw new NoLiveData(`${describe(k)} is not listed today (expired contracts are not served by Kotak historical)`);
+    const neosymbol = ScripMaster.neosymbol(listing);
+    return { listing, neosymbol, id: `${neosymbol}|${dates[0]}|${dates[dates.length - 1]}` };
+  }
+
+  /** Completed, in-session minutes of `dates` among cached candles (copies). */
+  private histSelect(candles: readonly MinuteCandle[], k: InstrumentKey, dates: readonly string[]): MinuteCandle[] {
     const want = new Set(dates);
-    return hit.candles
+    const now = this.now();
+    const cal = this.calendarOf(k.symbol);
+    return candles
       .filter((c) => {
-        const s = this.calendarOf(k.symbol).session(c.ts);
+        if (c.ts + MINUTE > now) return false;
+        const s = cal.session(c.ts);
         return want.has(s.date) && s.status === 'open';
       })
       .map((c) => ({ ...c }));
+  }
+
+  /**
+   * Kotak minutes that fill recording holes, without waiting: what the cache holds now (possibly none), while
+   * a fetch runs in the background when the cache is older than FILL_TTL (the next request has them). Kotak
+   * history is paced at one call per 1.5 s, so a page of charts never waits on a queue of them. Throws
+   * NoLiveData when Kotak cannot serve the instrument, or its last fetch failed (retried after FILL_TTL).
+   */
+  private kotakFill(k: InstrumentKey, dates: string[]): MinuteCandle[] {
+    const { id } = this.histTarget(k, dates);
+    const hit = this.histCache.get(id);
+    const now = this.now();
+    if (!hit || now - hit.at > FILL_TTL) {
+      const failed = this.fillFailed.get(id);
+      if (failed && now - failed.at < FILL_TTL) throw new NoLiveData(failed.why);
+      if (!this.fillRunning.has(id)) {
+        this.fillRunning.add(id);
+        this.kotakMinutes(k, dates, FILL_TTL)
+          .then(() => this.fillFailed.delete(id))
+          .catch((e) => {
+            this.fillFailed.set(id, { at: this.now(), why: errMsg(e) });
+            while (this.fillFailed.size > 200) this.fillFailed.delete(this.fillFailed.keys().next().value as string);
+          })
+          .finally(() => this.fillRunning.delete(id));
+      }
+    }
+    return hit ? this.histSelect(hit.candles, k, dates) : [];
   }
 
   /* ---------------------------------- health ---------------------------------- */

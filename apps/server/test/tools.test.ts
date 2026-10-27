@@ -215,6 +215,61 @@ describe('order flow (recorded quote-rule estimate)', () => {
     expect(of.gaps?.minutes).toMatch(/starts at 11:00/);
   });
 
+  it('minutes the recorder did not see come from Kotak 1-minute candles: price and volume, unclassified, labelled; the split figures stay the recorded ones', async () => {
+    const { p, book, tools } = setup();
+    const key = nearFut(book);
+    const t0 = hm(book.date, '10:00');
+    p.intraday.addMinutes(key, [
+      { ts: t0, open: 25_100, high: 25_110, low: 25_095, close: 25_105, traded: true, volume: 600, buyVolume: 400, sellVolume: 100, unclassified: 100 },
+      { ts: t0 + MIN, open: 25_105, high: 25_108, low: 25_100, close: 25_102, traded: true, volume: 300, buyVolume: 100, sellVolume: 200, unclassified: 0 },
+    ]);
+    const kotak = [
+      { ts: hm(book.date, '09:15'), open: 25_000, high: 25_020, low: 24_990, close: 25_010, volume: 5_000 },
+      { ts: hm(book.date, '09:16'), open: 25_010, high: 25_030, low: 25_005, close: 25_025, volume: 0 }, // no trade: not a minute
+      { ts: t0, open: 1, high: 1, low: 1, close: 1, volume: 1 }, // recorded: the recorder's minute wins
+      { ts: hm(book.date, '10:30'), open: 25_200, high: 25_200, low: 25_200, close: 25_200, volume: 50 }, // after now: left out
+    ];
+    let asked = 0;
+    (p as unknown as { historicalMinutes: (k: InstrumentKey, d: string) => Promise<typeof kotak> }).historicalMinutes = async (k, d) => {
+      asked++;
+      expect([k, d]).toEqual([key, book.date]);
+      return kotak;
+    };
+    p.setNow(hm(book.date, '10:05'));
+    const of = await tools.orderFlowWithHistory('NIFTY', { type: 'FUT' }, p.now());
+    expect(asked).toBe(1);
+    expect(of.minutes.map((m) => [m.ts, m.source ?? 'recorded', m.volume, m.buyVolume, m.sellVolume, m.unclassified, m.buyPct, m.close, m.cumDelta])).toEqual([
+      [hm(book.date, '09:15'), 'kotak', 5_000, 0, 0, 5_000, null, 25_010, 0],
+      [t0, 'recorded', 600, 400, 100, 100, 80, 25_105, 300],
+      [t0 + MIN, 'recorded', 300, 100, 200, 0, 33.3, 25_102, 200],
+    ]);
+    // Session / last-minute figures are the recorded estimate only.
+    expect(of.session).toMatchObject({ volume: 900, buyVolume: 500, sellVolume: 300 });
+    expect(of.gaps?.kotakMinutes).toMatch(/1 minute \(09:15–09:16\) the recorder did not see are Kotak 1-minute candles/);
+    expect(of.coverage).toMatch(/1 minutes the recorder did not see from Kotak 1-minute candles/);
+
+    // Nothing recorded yet: the Kotak minutes alone, nothing classified.
+    const { p: p2, book: b2, tools: t2 } = setup();
+    (p2 as unknown as { historicalMinutes: () => Promise<typeof kotak> }).historicalMinutes = async () => kotak.slice(0, 1).map((k) => ({ ...k, ts: hm(b2.date, '09:15') }));
+    p2.setNow(hm(b2.date, '10:05'));
+    const only = await t2.orderFlowWithHistory('NIFTY', { type: 'FUT' }, p2.now());
+    expect(only.minutes).toHaveLength(1);
+    expect(only).toMatchObject({ lastMinute: null, last5: null, session: { volume: 0, sentiment: 'No trades' } });
+    expect(only.minutes[0]).toMatchObject({ source: 'kotak', volume: 5_000, unclassified: 5_000 });
+    expect(only.signal).toMatch(/No recorded minute .* Kotak 1-minute candles/);
+
+    // Kotak cannot serve it (e.g. MCX): the recorded minutes alone, the reason in the gap note.
+    const { p: p3, book: b3, tools: t3 } = setup();
+    p3.intraday.addMinutes(nearFut(b3), [{ ts: hm(b3.date, '10:00'), open: 1, high: 1, low: 1, close: 1, traded: true, volume: 10, buyVolume: 10, sellVolume: 0, unclassified: 0 }]);
+    (p3 as unknown as { historicalMinutes: () => Promise<never> }).historicalMinutes = async () => {
+      throw new NoLiveData('Kotak historical candles are not available for MCX');
+    };
+    p3.setNow(hm(b3.date, '10:05'));
+    const rec = await t3.orderFlowWithHistory('NIFTY', { type: 'FUT' }, p3.now());
+    expect(rec.minutes.every((m) => m.source === undefined)).toBe(true);
+    expect(rec.gaps?.minutes).toMatch(/earlier minutes not available from Kotak: Kotak historical candles are not available for MCX/);
+  });
+
   it('never splits 50/50: unclassified volume stays unclassified and the buy share is null', () => {
     const { p, book, tools } = setup();
     const key = nearFut(book);

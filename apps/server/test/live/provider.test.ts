@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ExchangeCalendar } from '../../src/live/calendar';
 import { KOTAK_LOGIN_URL } from '../../src/live/kotak/session';
-import { LiveProvider, resampleMinutes, type LiveProviderConfig, type MinuteCandle } from '../../src/live/provider';
+import { LiveProvider, mergeKotakMinutes, recordingHasGap, resampleMinutes, type LiveProviderConfig, type MinuteCandle } from '../../src/live/provider';
+import type { IntradayFiles } from '../../src/live/store/intraday';
 import { NoLiveData, keyId, type InstrumentKey } from '../../src/live/types';
 import { fakeSockets } from '../support/fake-sfeed';
 import { ManualTimers, flush } from '../support/manual-timers';
@@ -338,5 +339,65 @@ describe('LiveProvider candles from Kotak historical (review)', () => {
       [ist('2026-10-09', '09:15'), 1500],
       [ist('2026-10-09', '09:17'), 300],
     ]);
+  });
+});
+
+describe('a session recorded in part is completed from Kotak 1-minute candles', () => {
+  const D = '2026-10-09';
+  const m = (hhmm: string, close: number, volume: number, partial = false): MinuteCandle => ({ ts: ist(D, hhmm), open: close, high: close, low: close, close, volume, ...(partial ? { partial: true as const } : {}) });
+
+  it('recordingHasGap: late start, a partial minute, a long hole or an early stop; not short illiquid gaps', () => {
+    const open = ist(D, '09:15');
+    const close = ist(D, '15:30');
+    const full = Array.from({ length: 375 }, (_, i) => ({ ...m('09:15', 100, 1), ts: open + i * 60_000 }));
+    expect(recordingHasGap(full, open, close)).toBe(false);
+    expect(recordingHasGap(full.filter((_, i) => i % 4 === 0), open, close)).toBe(false); // a trade every 4 minutes
+    expect(recordingHasGap(full.slice(10), open, close)).toBe(true); // started 10 minutes late
+    expect(recordingHasGap(full.filter((_, i) => i < 100 || i > 120), open, close)).toBe(true); // 20-minute hole
+    expect(recordingHasGap(full.slice(0, 300), open, close)).toBe(true); // stopped early
+    expect(recordingHasGap(full.map((x, i) => (i === 50 ? { ...x, partial: true as const } : x)), open, close)).toBe(true);
+    expect(recordingHasGap([], open, close)).toBe(true);
+  });
+
+  it('mergeKotakMinutes: Kotak fills unrecorded minutes and replaces partial ones; a full recorded minute wins', () => {
+    const r = mergeKotakMinutes([m('09:20', 101, 40, true), m('09:21', 102, 70)], [m('09:15', 99, 500), m('09:20', 100.5, 300), m('09:21', 999, 999)]);
+    expect(r.minutes.map((x) => [x.ts, x.close, x.volume, x.partial ?? false])).toEqual([
+      [ist(D, '09:15'), 99, 500, false],
+      [ist(D, '09:20'), 100.5, 300, false],
+      [ist(D, '09:21'), 102, 70, false],
+    ]);
+    expect([r.added, r.replaced]).toEqual([1, 1]);
+  });
+
+  it('candles: recorded minutes at once; the missed ones from Kotak in the background, on the next request', async () => {
+    const hist = { ...HISTORICAL, data: { candles: [['2026-10-09T09:15:00+0530', 25100, 25120, 25090, 25110, 1500], ['2026-10-09T09:16:00+0530', 25110, 25130, 25100, 25125, 900], ['2026-10-09T09:20:00+0530', 25150, 25160, 25140, 25155, 800]] } };
+    let calls = 0;
+    const h = harness({}, (c) => {
+      if (!c.url.includes('historical/details')) return undefined;
+      calls++;
+      return { body: hist };
+    });
+    await h.p.start();
+    await h.p.whenStarted();
+    const fut: InstrumentKey = { symbol: 'NIFTY', kind: 'FUT', expiry: MONTHLY };
+    // Recording started at 09:20 (inside the minute: partial) and ran to the close.
+    const recs = Array.from({ length: 370 }, (_, i) => ({ ts: ist(D, '09:20') + i * 60_000, open: 25150, high: 25150, low: 25150, close: 25150, traded: true, volume: 10, ...(i === 0 ? { partial: true as const } : {}) }));
+    (h.p.intraday as IntradayFiles).writeMinutes(recs.map((rec) => ({ key: fut, rec })));
+    const first = await h.p.candles(fut, '1min', D, D);
+    expect(first[0]).toMatchObject({ ts: ist(D, '09:20'), volume: 10, partial: true });
+    await h.timers.advance(3_000); // the background fetch (slow lane)
+    for (let i = 0; i < 20 && !calls; i++) await flush();
+    await flush(5);
+    const second = await h.p.candles(fut, '1min', D, D);
+    expect(second.slice(0, 4).map((c) => [c.ts, c.close, c.volume, c.partial ?? false])).toEqual([
+      [ist(D, '09:15'), 25110, 1500, false],
+      [ist(D, '09:16'), 25125, 900, false],
+      [ist(D, '09:20'), 25155, 800, false],
+      [ist(D, '09:21'), 25150, 10, false],
+    ]);
+    expect(calls).toBe(1);
+    // The order-flow source: the same Kotak minutes, from the cache (no second call).
+    expect((await h.p.historicalMinutes(fut, D)).map((c) => c.ts)).toEqual([ist(D, '09:15'), ist(D, '09:16'), ist(D, '09:20')]);
+    expect(calls).toBe(1);
   });
 });

@@ -66,6 +66,12 @@ export interface SecondStoreOptions {
   keepFreeBytes?: number;
   /** Free bytes of the store's disk (tests); default fs.statfsSync. */
   freeBytes?: () => number | null;
+  /**
+   * Write appended rows in the background (fs.promises, a few files at a time, each file in order) instead of
+   * synchronously: thousands of instruments are appended every few seconds, and a synchronous write each
+   * holds up the server meanwhile. Reads include rows not written yet; `drain()` waits for the writes.
+   */
+  writeBehind?: boolean;
   logger?: { warn(msg: string): void; info?(msg: string): void };
 }
 
@@ -180,6 +186,7 @@ export class SecondStore {
   private readonly sizes = new Map<string, number>();
   private pausedWhy: string | null = null;
   private compacting = false;
+  private readonly writeBehind: boolean;
 
   constructor(opts: SecondStoreOptions) {
     this.root = opts.dir ? path.resolve(opts.dir) : path.join(opts.dataDir, 'seconds');
@@ -189,6 +196,7 @@ export class SecondStore {
     this.keepFree = opts.keepFreeBytes ?? 5 * GB;
     this.free = opts.freeBytes;
     this.log = opts.logger ?? { warn: () => {} };
+    this.writeBehind = opts.writeBehind === true;
   }
 
   private dayDir(date: string): string {
@@ -211,7 +219,7 @@ export class SecondStore {
     if (!rows.length) return true;
     if (this.pausedWhy) return false;
     const p = this.file(key, date);
-    if (!this.checked.has(p)) {
+    if (!this.writeBehind && !this.checked.has(p)) {
       this.checked.add(p);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       // A row torn by a crash would shift every later row: cut the file back to whole rows first.
@@ -224,9 +232,73 @@ export class SecondStore {
     }
     const buf = encodeRows(rows, SecondStore.dayStart(date));
     const before = this.sizeOf(date) ?? 0;
-    fs.appendFileSync(p, buf);
+    if (this.writeBehind) this.queueWrite(p, buf);
+    else fs.appendFileSync(p, buf);
     this.sizes.set(date, before + buf.length);
     return true;
+  }
+
+  /* ------------------------------------- write-behind ------------------------------------- */
+
+  /** Rows not written yet, per file (oldest first). */
+  private readonly pending = new Map<string, Buffer[]>();
+  /** The buffer being written, per file (at most one write per file at a time, so a file stays in order). */
+  private readonly writing = new Map<string, Buffer>();
+  private readonly writeQueue: string[] = [];
+  private idleWaiters: Array<() => void> = [];
+  private static readonly WRITERS = 8;
+
+  private queueWrite(p: string, buf: Buffer): void {
+    const list = this.pending.get(p);
+    if (list) list.push(buf);
+    else {
+      this.pending.set(p, [buf]);
+      if (!this.writing.has(p)) this.writeQueue.push(p);
+    }
+    this.pump();
+  }
+
+  private pump(): void {
+    while (this.writing.size < SecondStore.WRITERS && this.writeQueue.length) {
+      const p = this.writeQueue.shift() as string;
+      const bufs = this.pending.get(p);
+      if (!bufs || this.writing.has(p)) continue;
+      this.pending.delete(p);
+      const buf = bufs.length === 1 ? bufs[0] : Buffer.concat(bufs);
+      this.writing.set(p, buf);
+      this.prepare(p)
+        .then(() => fs.promises.appendFile(p, buf))
+        .catch((e: unknown) => this.log.warn(`seconds: write of ${p} failed: ${(e as Error).message}`))
+        .finally(() => {
+          this.writing.delete(p);
+          if (this.pending.has(p)) this.writeQueue.push(p);
+          this.pump();
+          if (!this.writing.size && !this.pending.size) {
+            const w = this.idleWaiters;
+            this.idleWaiters = [];
+            for (const f of w) f();
+          }
+        });
+    }
+  }
+
+  /** First write of a file (write-behind): its folder exists, and a row torn by a crash is cut back first. */
+  private async prepare(p: string): Promise<void> {
+    if (this.checked.has(p)) return;
+    this.checked.add(p);
+    await fs.promises.mkdir(path.dirname(p), { recursive: true });
+    try {
+      const size = (await fs.promises.stat(p)).size;
+      if (size % ROW_BYTES) await fs.promises.truncate(p, size - (size % ROW_BYTES));
+    } catch {
+      /* new file */
+    }
+  }
+
+  /** Resolves once every appended row is on disk (write-behind; at once otherwise). */
+  drain(): Promise<void> {
+    if (!this.writing.size && !this.pending.size) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
   /** Replace the day's recorded-coverage spans (seconds of the IST day, inclusive). */
@@ -293,6 +365,10 @@ export class SecondStore {
     } catch {
       /* compacted or never written */
     }
+    // Rows still being written (write-behind): a row both on disk and here is the same second, deduplicated below.
+    const inFlight = this.writing.get(p);
+    if (inFlight) parts.push(inFlight);
+    for (const b of this.pending.get(p) ?? []) parts.push(b);
     if (!parts.length) return [];
     const rows = parts.flatMap((b) => decodeRows(b, SecondStore.dayStart(date)));
     // Appends are in time order; a restart can repeat a second: keep the later row of a second.
@@ -361,6 +437,8 @@ export class SecondStore {
   async compact(today: string): Promise<string[]> {
     if (this.compacting) return [];
     this.compacting = true;
+    // Rows of a finished day still being written (just after midnight) go in before it is gzipped.
+    await this.drain();
     const done: string[] = [];
     try {
       for (const date of this.dates()) {

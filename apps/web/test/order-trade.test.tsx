@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ORDER_FLOW_METHOD, type OrderFlowMinute, type OrderFlowResponse } from '@q26/core';
+import { MinuteTable } from '../src/components/FlowDetails';
 import { OrderTradeChart } from '../src/components/OrderTradeChart';
 
 // Test data (not market data): 20 quiet minutes, then a buyer spike while the price rises.
@@ -53,5 +54,22 @@ describe('Order & Trade chart', () => {
     const out = html(<OrderTradeChart d={{ ...D, minutes: [] }} />);
     expect(out).toContain('No recorded minute of this contract yet this session');
     expect(out).not.toContain('Buyers in control');
+  });
+});
+
+describe('minutes the recorder did not see (Kotak 1-minute candles)', () => {
+  const kotak: OrderFlowMinute = { ts: T0 - 60_000, volume: 5000, buyVolume: 0, sellVolume: 0, unclassified: 5000, gapVolume: null, partial: false, delta: 0, cumDelta: 0, buyPct: null, open: 24_990, high: 25_000, low: 24_980, close: 24_995, source: 'kotak' };
+  const d: OrderFlowResponse = { ...D, minutes: [kotak, ...minutes] };
+
+  it('the chart says how many came from Kotak and that they have no buyer / seller split', () => {
+    expect(html(<OrderTradeChart d={d} />)).toContain('1 minute the recorder did not see (before it started, or during a restart) are drawn from Kotak 1-minute candles');
+    expect(html(<OrderTradeChart d={D} />)).not.toContain('Kotak 1-minute candles');
+  });
+
+  it('the minute table shows its volume and price, with the split left blank and the source named', () => {
+    const out = html(<MinuteTable d={d} unit="qty" />);
+    expect(out).toContain('Kotak 1-min candle (not recorded: no buy / sell split)');
+    expect(out).toContain('Not recorded: this minute is a Kotak 1-minute candle');
+    expect(out).toContain('24,995');
   });
 });

@@ -484,6 +484,12 @@ export interface MarketDataProvider {
    * they are streamed in the 'user' tier, above the index chains and ad-hoc watches. Null clears it.
    */
   setUserContracts(fn: (() => Iterable<UserContract>) | null): void;
+  /**
+   * Kotak 1-minute candles of a listed NSE/BSE instrument on `date` (completed minutes, cached): the
+   * minutes the recorder did not see. NoLiveData when Kotak cannot serve them (MCX, expired, no session).
+   * Absent where there is no Kotak REST (tests).
+   */
+  historicalMinutes?(key: InstrumentKey, date: string): Promise<Array<Candle & { open: number; high: number; low: number }>>;
   /** One-second snapshots recorded from the live feed (second-level backtests); absent when not recorded. */
   seconds?: SecondReader;
   start(): Promise<void>;

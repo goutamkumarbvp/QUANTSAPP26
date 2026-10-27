@@ -65,7 +65,8 @@ export function FlowSummary({ d, unit }: { d: OrderFlowResponse; unit: FlowUnit 
 /** The recorded minutes, latest first (the last 60). */
 export function MinuteTable({ d, unit }: { d: OrderFlowResponse; unit: FlowUnit }) {
   const { u, fmt } = flowUnits(d, unit);
-  const noteOf = (m: OrderFlowMinute) => [m.gapVolume ? `feed gap +${formatCompact(u(m.gapVolume))}` : '', m.partial ? 'partial (lower bound)' : ''].filter(Boolean).join(' · ');
+  const noteOf = (m: OrderFlowMinute) => [m.source === 'kotak' ? 'Kotak 1-min candle (not recorded: no buy / sell split)' : '', m.gapVolume ? `feed gap +${formatCompact(u(m.gapVolume))}` : '', m.partial ? 'partial (lower bound)' : ''].filter(Boolean).join(' · ');
+  const noSplit = 'Not recorded: this minute is a Kotak 1-minute candle (price and volume); the buyer / seller split needs live ticks';
   return (
     <Card title="Minute-by-minute (latest first)" pad={false}>
       <div className="max-h-[50vh] overflow-auto">
@@ -75,14 +76,14 @@ export function MinuteTable({ d, unit }: { d: OrderFlowResponse; unit: FlowUnit 
             {[...d.minutes].reverse().slice(0, 60).map((m) => (
               <tr key={m.ts}>
                 <td>{formatSessionTime(m.ts)}</td>
-                <td className="num text-up">{fmt(m.buyVolume)}</td>
-                <td className="num text-down">{fmt(m.sellVolume)}</td>
+                <td className="num text-up">{m.source === 'kotak' ? <Dash reason={noSplit} /> : fmt(m.buyVolume)}</td>
+                <td className="num text-down">{m.source === 'kotak' ? <Dash reason={noSplit} /> : fmt(m.sellVolume)}</td>
                 <td className="num text-muted">{fmt(m.unclassified)}</td>
                 <td className="num">{fmt(m.volume)}</td>
-                <td className="num"><Chg value={u(m.delta)} decimals={0} /></td>
+                <td className="num">{m.source === 'kotak' ? <Dash reason={noSplit} /> : <Chg value={u(m.delta)} decimals={0} />}</td>
                 <td>
                   {m.buyPct === null ? (
-                    <Dash reason="Nothing in this minute could be classified as buy or sell" />
+                    <Dash reason={m.source === 'kotak' ? noSplit : 'Nothing in this minute could be classified as buy or sell'} />
                   ) : (
                     <div className="flex items-center gap-2">
                       <span className="relative h-1.5 w-16 overflow-hidden rounded bg-down/60"><span className="absolute inset-y-0 left-0 bg-up" style={{ width: `${m.buyPct}%` }} /></span>

@@ -1083,6 +1083,11 @@ export interface OrderFlowMinute {
   high: number | null;
   low: number | null;
   close: number | null;
+  /**
+   * 'kotak': a minute the recorder did not see, from Kotak's 1-minute candle of the contract — real price and
+   * traded volume, all unclassified (the buyer / seller split needs live ticks). Absent for recorded minutes.
+   */
+  source?: 'kotak';
 }
 
 /** Totals over recorded minutes (see ORDER_FLOW_METHOD). */

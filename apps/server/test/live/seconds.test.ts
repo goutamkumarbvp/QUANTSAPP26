@@ -220,3 +220,25 @@ describe('SecondRecorder', () => {
     expect(rows.map((r) => [r.ts - t, r.ltp])).toEqual([[0, 100], [2000, 101]]);
   });
 });
+
+describe('SecondStore write-behind', () => {
+  it('rows are readable at once, written in the background in order, a torn file is cut back first, and compaction waits for the writes', async () => {
+    const data = tmp();
+    const s = new SecondStore({ dataDir: data, writeBehind: true, freeBytes: () => 100 * 1024 ** 3 });
+    const file = path.join(data, 'seconds', DAY, 'NIFTY', 'CE_2026-10-13_25000.bin');
+    // A row torn by an earlier crash.
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.concat([encodeRows([{ ts: at(DAY, 9, 15, 0), ltp: 99, traded: true }], SecondStore.dayStart(DAY)), Buffer.alloc(10, 7)]));
+    for (let i = 1; i <= 50; i++) s.append(DAY, CE, [{ ts: at(DAY, 9, 15, i), ltp: 100 + i, traded: true }]);
+    // Before anything is on disk the reader already sees every row.
+    expect(s.read(CE, DAY).map((r) => r.ltp)).toEqual([99, ...Array.from({ length: 50 }, (_, i) => 101 + i)]);
+    await s.drain();
+    expect(fs.statSync(file).size).toBe(51 * ROW_BYTES);
+    expect(s.read(CE, DAY).map((r) => r.ltp)).toEqual([99, ...Array.from({ length: 50 }, (_, i) => 101 + i)]);
+    // Rows appended just before compaction are in the gzipped day.
+    s.append(DAY, CE, [{ ts: at(DAY, 9, 16, 0), ltp: 200, traded: true }]);
+    expect(await s.compact(NEXT)).toEqual([DAY]);
+    expect(s.read(CE, DAY).at(-1)?.ltp).toBe(200);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+});

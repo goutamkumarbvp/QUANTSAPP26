@@ -190,6 +190,36 @@ export type LastMinuteFlow = OrderFlowSummary & { ts: number; close: number | nu
  * unclassified); a record without the split is counted as unclassified, never divided up. The volume
  * reported after a feed gap (gapVolume) is carried apart and never classified.
  */
+/** A Kotak 1-minute candle of the contract (MarketDataProvider.historicalMinutes). */
+export type FlowHistoryMinute = { ts: number; open: number; high: number; low: number; close: number; volume?: number };
+
+/**
+ * Recorded order-flow minutes with the Kotak minutes the recorder did not see, oldest first. A Kotak minute
+ * has its price and traded volume, all of it unclassified (no ticks: no buyer / seller split, delta 0), and
+ * `source: 'kotak'`; the cumulative delta carries over it unchanged.
+ */
+export function withKotakMinutes(recorded: readonly OrderFlowMinute[], kotak: readonly FlowHistoryMinute[]): OrderFlowMinute[] {
+  if (!kotak.length) return [...recorded];
+  const out: OrderFlowMinute[] = [...recorded];
+  for (const k of kotak) {
+    const v = isNum(k.volume) ? k.volume : 0;
+    out.push({ ts: k.ts, volume: v, buyVolume: 0, sellVolume: 0, unclassified: v, gapVolume: null, partial: false, delta: 0, cumDelta: 0, buyPct: null, open: k.open, high: k.high, low: k.low, close: k.close, source: 'kotak' });
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  let cum = 0;
+  return out.map((m) => {
+    cum += m.delta;
+    return m.cumDelta === cum ? m : { ...m, cumDelta: cum };
+  });
+}
+
+/** Gap note naming the minutes filled from Kotak 1-minute candles. */
+function kotakNote(fromKotak: readonly FlowHistoryMinute[]): string {
+  const a = fromKotak[0].ts;
+  const b = fromKotak[fromKotak.length - 1].ts;
+  return `${fromKotak.length} minute${fromKotak.length > 1 ? 's' : ''} (${formatTimeIST(a)}–${formatTimeIST(b + MINUTE)}) the recorder did not see are Kotak 1-minute candles: their price and traded volume are real, but who initiated the trades is not known (that needs live ticks), so they are unclassified and not in the buyer / seller figures`;
+}
+
 function flowOf(r: MinuteRecord): FlowMin {
   const buy = isNum(r.buyVolume) && r.buyVolume > 0 ? r.buyVolume : 0;
   const sell = isNum(r.sellVolume) && r.sellVolume > 0 ? r.sellVolume : 0;
@@ -973,7 +1003,29 @@ export class MarketTools {
    * minutes and the session. Today: a listed contract (watched so it is recorded from now on);
    * a past session: a contract recorded that day. NoLiveData when nothing was recorded.
    */
-  orderFlow(symbol: string, spec: ContractSpec, ts: number, opts: { date?: string; limit?: number } & ToolViewOptions = {}): OrderFlowResponse {
+  /**
+   * `orderFlow` with the minutes the recorder did not see (the app started after the open, a restart, a
+   * feed outage) taken from Kotak 1-minute candles of the contract (NSE/BSE; Kotak serves no MCX history):
+   * their price and traded volume, unclassified — the buyer / seller split needs live ticks. Without them
+   * (MCX, expired contract, Kotak not answering) the recorded minutes alone, as before.
+   */
+  async orderFlowWithHistory(symbol: string, spec: ContractSpec, ts: number, opts: { date?: string; limit?: number } & ToolViewOptions = {}): Promise<OrderFlowResponse> {
+    const md = mdFor(this.md, symbol);
+    if (!md.historicalMinutes) return this.orderFlow(symbol, spec, ts, opts);
+    const { c, date } = this.flowContract(symbol, spec, ts, opts);
+    let history: FlowHistoryMinute[] | undefined;
+    let historyWhy: string | undefined;
+    try {
+      history = await md.historicalMinutes(c.key, date);
+    } catch (e) {
+      if (!(e instanceof NoLiveData)) throw e;
+      historyWhy = e.message;
+    }
+    return this.orderFlow(symbol, spec, ts, { ...opts, history, historyWhy });
+  }
+
+  /** The contract and session of an order-flow request (today: a listed contract, streamed from now on; a past session: a recorded one). */
+  private flowContract(symbol: string, spec: ContractSpec, ts: number, opts: { date?: string } & ToolViewOptions): { md: MarketDataProvider; c: Contract; date: string; live: boolean } {
     const md = mdFor(this.md, symbol);
     md.ref.underlying(symbol);
     const today = md.calendar.session(ts).date;
@@ -985,23 +1037,65 @@ export class MarketTools {
       opts.touch?.(c.key, 'quote');
       md.live.watch([c.key], 'quote');
     } else c = this.resolveRecorded(symbol, spec, date);
+    return { md, c, date, live };
+  }
+
+  /** Order flow of a session with no recorded minute yet: Kotak 1-minute candles only (price and volume, nothing classified). */
+  private historyOnlyFlow(md: MarketDataProvider, c: Contract, date: string, live: boolean, fromKotak: readonly FlowHistoryMinute[], opts: { limit?: number }): OrderFlowResponse {
+    const minutes = withKotakMinutes([], fromKotak);
+    const gaps = new Gaps();
+    gaps.add('kotakMinutes', kotakNote(fromKotak));
+    gaps.add('minutes', live ? `${c.label} has no recorded minute yet this session: it is now streamed, and buyer / seller initiated quantity is estimated from live ticks from the next minute on` : `${c.label} was not recorded on ${date}`);
+    const limit = Math.max(1, Math.min(md.calendar.sessionMinutes(date), Math.floor(opts.limit ?? 60) || 60));
+    const lastTs = minutes[minutes.length - 1].ts;
+    return {
+      symbol: c.symbol,
+      instrument: c.label,
+      type: c.key.kind === 'FUT' ? 'FUT' : (c.key.kind as 'CE' | 'PE'),
+      expiry: c.expiry,
+      ...(c.strike !== undefined ? { strike: c.strike } : {}),
+      date,
+      live,
+      lotSize: this.lotSizeOf(c.key, date),
+      method: ORDER_FLOW_METHOD,
+      lastMinute: null,
+      currentMinute: null,
+      last5: null,
+      session: summariseOrderFlow([]),
+      minutes: minutes.slice(-limit),
+      signal: `No recorded minute of ${c.label} yet: price and volume up to ${formatTimeIST(lastTs + MINUTE)} are Kotak 1-minute candles; the buyer / seller split starts with the live recording — ${ORDER_FLOW_METHOD}`,
+      coverage: `0 recorded minutes; ${minutes.length} minutes from Kotak 1-minute candles (price and volume, not split)`,
+      expiries: c.expiries,
+      strikes: c.strikes,
+      ...gaps.out(),
+    };
+  }
+
+  orderFlow(symbol: string, spec: ContractSpec, ts: number, opts: { date?: string; limit?: number; history?: readonly FlowHistoryMinute[]; historyWhy?: string } & ToolViewOptions = {}): OrderFlowResponse {
+    const { md, c, date, live } = this.flowContract(symbol, spec, ts, opts);
 
     const all = md.intraday.bars(c.key, date);
     // Completed minutes only (live: ended by now); minutes without a volume (none for futures/options) carry no flow.
     const recs = all.filter((r) => (isNum(r.volume) || isNum(r.gapVolume)) && (!live || r.ts + MINUTE <= ts));
-    if (!recs.length) {
+    // Kotak 1-minute candles where no minute was recorded (completed, traded minutes of this session only).
+    const recorded = new Set(all.map((r) => r.ts));
+    const open0 = md.calendar.ts(date, 0);
+    const close0 = md.calendar.ts(date, md.calendar.sessionMinutes(date));
+    const fromKotak = (opts.history ?? []).filter((k) => !recorded.has(k.ts) && k.ts >= open0 && k.ts < close0 && (!live || k.ts + MINUTE <= ts) && isNum(k.volume) && k.volume > 0);
+    if (!recs.length && !fromKotak.length) {
       throw new NoLiveData(
-        all.length
+        (all.length
           ? `${c.label}: the feed reports no traded volume, so its order flow cannot be estimated`
           : live
             ? `${c.label} has no recorded minutes yet this session: it is now streamed, and its order flow is estimated from live ticks from the next minute on`
-            : `${c.label} was not recorded on ${date}`,
+            : `${c.label} was not recorded on ${date}`) + (opts.historyWhy ? `; Kotak 1-minute candles: ${opts.historyWhy}` : ''),
       );
     }
+    if (!recs.length) return this.historyOnlyFlow(md, c, date, live, fromKotak, opts);
 
     const flows = recs.map(flowOf);
     let cum = 0;
-    const minutes: OrderFlowMinute[] = flows.map((f) => {
+    const recordedMinutes: OrderFlowMinute[] = flows.map((f) => {
       const delta = f.buyVolume - f.sellVolume;
       cum += delta;
       const classified = f.buyVolume + f.sellVolume;
@@ -1022,6 +1116,7 @@ export class MarketTools {
         close: f.close,
       };
     });
+    const minutes = withKotakMinutes(recordedMinutes, fromKotak);
     const last = flows[flows.length - 1];
     const lastMinute = { ...summariseOrderFlow([last]), ts: last.ts, close: last.close };
     const last5 = summariseOrderFlow(flows.filter((f) => f.ts > last.ts - 5 * MINUTE));
@@ -1061,8 +1156,8 @@ export class MarketTools {
     const gaps = new Gaps();
     const first = recs[0].ts;
     const missing = Math.round((last.ts - first) / MINUTE) + 1 - recs.length;
-    const open0 = md.calendar.ts(date, 0);
-    if (first > open0) gaps.add('minutes', `Recording of ${c.label} on ${date} starts at ${formatTimeIST(first)}`);
+    if (first > open0) gaps.add('minutes', `Recording of ${c.label} on ${date} starts at ${formatTimeIST(first)}${fromKotak.length ? '' : opts.historyWhy ? ` (earlier minutes not available from Kotak: ${opts.historyWhy})` : ''}`);
+    if (fromKotak.length) gaps.add('kotakMinutes', kotakNote(fromKotak));
     const gapMins = flows.filter((f) => f.gapVolume > 0);
     if (gapMins.length) {
       gaps.add('feedGaps', `${gapMins.length} minute${gapMins.length > 1 ? 's' : ''} (${gapMins.slice(0, 5).map((f) => formatTimeIST(f.ts)).join(', ')}${gapMins.length > 5 ? ' …' : ''}) follow a feed gap: ${formatCompact(session.gapVolume)} traded during the gaps at unknown times, shown as gapVolume, not in the minutes' volume and never classified`);
@@ -1071,7 +1166,7 @@ export class MarketTools {
     if (partialMins.length) {
       gaps.add('partial', `Recording of ${c.label} started (or restarted) inside ${partialMins.map((f) => formatTimeIST(f.ts)).slice(0, 5).join(', ')}: the volume of ${partialMins.length > 1 ? 'those minutes is a lower bound' : 'that minute is a lower bound'} (trades before the first tick seen are not counted)`);
     }
-    const coverage = `${recs.length} recorded minutes ${formatTimeIST(first)}–${formatTimeIST(last.ts + MINUTE)}${missing > 0 ? `; ${missing} minutes in between have no record (no ticks received)` : ''}`;
+    const coverage = `${recs.length} recorded minutes ${formatTimeIST(first)}–${formatTimeIST(last.ts + MINUTE)}${missing > 0 ? `; ${missing} minutes in between have no record (no ticks received)` : ''}${fromKotak.length ? `; ${fromKotak.length} minutes the recorder did not see from Kotak 1-minute candles (price and volume, not split)` : ''}`;
 
     const limit = Math.max(1, Math.min(md.calendar.sessionMinutes(date), Math.floor(opts.limit ?? 60) || 60));
     return {

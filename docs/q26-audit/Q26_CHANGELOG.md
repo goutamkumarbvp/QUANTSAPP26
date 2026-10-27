@@ -231,3 +231,43 @@ their time in ECharts drawing, the Strategy Wizard in payoff maths. Nothing a pa
 - Tests:
   - core: `strategyPnlAt` equals the sum of `legPnl` for every kind of leg and context;
   - e2e: a chart below the screen gets its canvas when scrolled to, and a blank chart draws none.
+
+## C-55 — Minutes the recorder missed come from Kotak 1-minute candles; server log findings fixed
+
+From the user's photos and server log of 27 Oct. The app was started at 21:20, after the NSE close, so the day's
+NSE minutes had not been recorded. The log also showed one supervisor health check timing out at 22:22, event-loop
+pauses, and the token-budget warning every few seconds.
+
+- **1-minute candles** (`LiveProvider.candles`): until now, Kotak 1-minute candles were used only for a session with
+  no recorded minute at all. A session recorded in part now has its missed minutes added from Kotak (NSE/BSE):
+  - a "part" is a start ≥ 3 minutes after the open, a stop before the close, a hole of 5+ minutes, or a `partial`
+    minute;
+  - a `partial` recorded minute is replaced by Kotak's complete one;
+  - a fully recorded minute always wins (`recordingHasGap`, `mergeKotakMinutes`).
+  
+  The fetch runs in the background. The recorded minutes answer at once, and the next request (charts poll every few
+  seconds) has the Kotak minutes, cached 15 minutes for today. Kotak history is paced at one call per 1.5 s, so a page
+  of cards never waits on a queue of them. A failed fetch is not retried for 15 minutes.
+- **Order Flow & Book** (`MarketTools.orderFlowWithHistory`, `/api/order-flow`): minutes the recorder did not see
+  come from Kotak's 1-minute candles of the contract (`OrderFlowMinute.source: 'kotak'`):
+  - their price and traded volume are shown, all unclassified — the buyer/seller split needs live ticks, which Kotak
+    history does not have;
+  - the chart draws them (faint volume bars) with the buyer/seller lines as a gap;
+  - the minute table shows "—" for the split and names the source;
+  - spikes, the read and the session figures stay on recorded minutes;
+  - with nothing recorded yet, the page shows the Kotak minutes instead of a blank card.
+- **MCX**: Kotak does not serve MCX history (its docs: "not available for mcx_fo"), so MCX minutes before the app
+  started stay blank. The Order Flow gap note now says why. Start the app before 09:00 to record the whole day.
+- **Log findings**:
+  - the 1-second store writes in the background (`writeBehind`; 8 files at a time, each in order; reads include rows
+    not yet written; compaction and shutdown wait for the writes). Thousands of `appendFileSync` calls every 5 s
+    during NSE hours would hold up the server;
+  - a request answered in 2 s or more is logged as `slow request: GET /api/... in N ms`, so a pause like the one at
+    22:22 names its cause next time;
+  - the "N instrument(s) over the 2700-token budget" warning is logged when instruments first go over, then at most
+    every 15 minutes (it was every few seconds as pages opened and closed).
+- Tests:
+  - provider: gap rules, merge, background fill and the cached order-flow source;
+  - order flow: Kotak minutes added, recorded wins, nothing recorded, and Kotak refusing (MCX);
+  - write-behind store;
+  - web: chart note and minute table.

@@ -325,6 +325,7 @@ export class KotakLiveMarket implements LiveMarket {
   private desiredSubs: SFeedSub[] = [];
   private subscribedIds = new Set<string>();
   private dropped = { count: 0, examples: [] as string[] };
+  private droppedLoggedAt = 0;
   private unresolved = { count: 0, examples: [] as string[] };
   private syncQueued = false;
   private expiryTimer: unknown = null;
@@ -574,7 +575,10 @@ export class KotakLiveMarket implements LiveMarket {
       subs.push({ segment: listing.segment, token: listing.token, intent: isIndexSpot(listing) ? 'index' : INTENT[w.level] });
       ids.push(keyId(w.key));
     }
-    if (dropped.length && dropped.length !== this.dropped.count) {
+    // Logged when instruments first go over the budget, then at most every 15 minutes while the count
+    // moves (the user tier changes with every page opened: a line every few seconds otherwise).
+    if (dropped.length && dropped.length !== this.dropped.count && (this.dropped.count === 0 || this.now() - this.droppedLoggedAt >= 15 * 60_000)) {
+      this.droppedLoggedAt = this.now();
       this.log.warn(`live: ${dropped.length} instrument(s) over the ${this.budget}-token budget not streamed (e.g. ${dropped.slice(0, 3).join(', ')})`);
     }
     this.dropped = { count: dropped.length, examples: dropped.slice(0, 5) };

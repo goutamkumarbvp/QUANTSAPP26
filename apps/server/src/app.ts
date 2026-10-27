@@ -41,6 +41,8 @@ declare module 'fastify' {
 const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'];
 /** Websocket: each socket gets the quotes that changed at most every WS_BATCH_MS (one message per batch); a heartbeat (clock + feed status) at least every WS_HEARTBEAT_MS. */
 export const WS_BATCH_MS = 250;
+/** Requests answered slower than this are logged as warnings. */
+export const SLOW_REQUEST_MS = 2000;
 const WS_HEARTBEAT_MS = 5000;
 const WS_MAX_SYMBOLS = 40;
 /** Open market-data sockets per client address (an IPv6 client: per /64), and in total. */
@@ -276,7 +278,10 @@ export async function buildApp(
   await app.register(websocket);
 
   app.addHook('onResponse', async (req, reply) => {
-    if (app.log.level === 'debug' || app.log.level === 'trace') app.log.debug(`${req.method} ${req.url} → ${reply.statusCode} (${Math.round(reply.elapsedTime)} ms)`);
+    const ms = Math.round(reply.elapsedTime);
+    // A slow answer is named in the log (which page asked for what), so a pause the watchdog reports can be traced.
+    if (ms >= SLOW_REQUEST_MS && !req.headers.upgrade) app.log.warn(`slow request: ${req.method} ${req.url.split('?')[0]} → ${reply.statusCode} in ${ms} ms`);
+    else if (app.log.level === 'debug' || app.log.level === 'trace') app.log.debug(`${req.method} ${req.url} → ${reply.statusCode} (${ms} ms)`);
   });
 
   // Sign-in and operations actions: a fixed window per client address and route (password guessing,
@@ -544,7 +549,7 @@ export async function buildApp(
   });
   app.get<{ Params: { symbol: string } }>('/api/order-flow/:symbol', async (req) => {
     const q = flowQuery.parse(qs(req));
-    return svc.tools.orderFlow(req.params.symbol, { type: q.type, strike: q.strike, expiry: q.expiry || undefined }, now(), { date: notFuture(q.date), limit: q.limit, ...userTier });
+    return svc.tools.orderFlowWithHistory(req.params.symbol, { type: q.type, strike: q.strike, expiry: q.expiry || undefined }, now(), { date: notFuture(q.date), limit: q.limit, ...userTier });
   });
 
   /* ---------------------------- open interest ---------------------------- */
