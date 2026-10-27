@@ -62,8 +62,8 @@ const ARTICLES: Article[] = [
     summary: 'Is the option expensive or cheap?',
     body: [
       { p: ['Implied volatility (IV) is the volatility that makes the Black-Scholes price equal the market premium — the market\'s forecast of movement. Compare it with historical (realised) volatility to judge whether options are rich or cheap.'] },
-      { h: 'IV Rank vs IV Percentile', p: ['IV Rank places today\'s IV between the 1-year low (0) and high (100). IV Percentile is the share of days in the past year when IV was lower. High values favour premium-selling strategies; low values favour buying.'], tool: { to: '/vol/ivp', label: 'IV Rank & Percentile table' } },
-      { h: 'Skew', p: ['Index options usually show higher IV for OTM puts than OTM calls (crash protection is in demand). Changes in skew reveal shifting fear.'], tool: { to: '/vol/skew', label: 'Volatility skew' } },
+      { h: 'IV Rank vs IV Percentile', p: ['IV Rank places today\'s IV between the 1-year low (0) and high (100). IV Percentile is the share of days in the past year when IV was lower. High values favour premium-selling strategies; low values favour buying.'] },
+      { h: 'Skew', p: ['Index options usually show higher IV for OTM puts than OTM calls (crash protection is in demand). Changes in skew reveal shifting fear.'] },
     ],
   },
   {

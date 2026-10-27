@@ -20,7 +20,7 @@ import { istTs, maxPain, type OptionChain, type Quote, type ServerMessage } from
 import { gunzipSync } from 'node:zlib';
 import { buildApp, GZIP_MIN_BYTES } from '../src/app';
 import { loadConfig } from '../src/config';
-import { futKey, optKey, spotKey } from '../src/services/live';
+import { optKey, spotKey } from '../src/services/live';
 import { createServices, type Services } from '../src/services';
 import { SCANNERS } from '../src/services/market-tools';
 import { FakeProvider, loadSampleBook, type SampleBook } from './support/fake-provider';
@@ -169,11 +169,6 @@ const ROUTES: RouteCase[] = [
   G('/api/oi/breadth', '/api/oi/breadth', { full200: true }),
   G('/api/participants', '/api/participants'),
   G('/api/fii-dii', '/api/fii-dii'),
-  G('/api/vol/iv-chart/:symbol', (c) => `/api/vol/iv-chart/NIFTY?date=${c.b.recordedDate}`, { full200: true }),
-  G('/api/vol/table', '/api/vol/table', { full200: true, liveOnly: true }),
-  G('/api/vol/skew/:symbol', '/api/vol/skew/NIFTY', { full200: true, liveOnly: true }),
-  G('/api/vol/surface/:symbol', '/api/vol/surface/NIFTY', { full200: true, liveOnly: true }),
-  G('/api/vol/cone/:symbol', '/api/vol/cone/NIFTY', { full200: true }),
   G('/api/straddle/:symbol', (c) => `/api/straddle/NIFTY?date=${c.b.recordedDate}`, { full200: true }),
   { method: 'POST', route: '/api/strategy-chart', url: () => '/api/strategy-chart', body: (c) => ({ symbol: 'NIFTY', legs: [leg(c)], date: c.b.recordedDate }), full200: true },
   { method: 'POST', route: '/api/optimizer', url: () => '/api/optimizer', body: (c) => ({ symbol: 'NIFTY', expiry: w1(c), targetPrice: 25200, targetDate: w1(c) }), full200: true, liveOnly: true },
@@ -291,7 +286,7 @@ describe('every route in every data state', () => {
         if (state === 'stale') expect(walked).toEqual(expect.arrayContaining(['GET /api/futures/:symbol', 'GET /api/strategies/:id']));
       }
       if (state === 'empty' || state === 'stale') {
-        for (const u of ['/api/quotes?symbols=NIFTY,BANKNIFTY,RELIANCE', '/api/indices', '/api/chain/NIFTY', '/api/oi/strikes/NIFTY', '/api/vol/table', '/api/vol/skew/NIFTY', '/api/unusual', '/api/synopsis']) expect(statuses[`GET ${u}`], u).toBe(503);
+        for (const u of ['/api/quotes?symbols=NIFTY,BANKNIFTY,RELIANCE', '/api/indices', '/api/chain/NIFTY', '/api/oi/strikes/NIFTY', '/api/unusual', '/api/synopsis']) expect(statuses[`GET ${u}`], u).toBe(503);
         for (const u of ['/api/health', '/api/meta', '/api/clock', '/api/dashboard', '/api/scanners', '/api/algos']) expect(statuses[`GET ${u}`], u).toBe(200);
         expect(statuses['POST /api/broker/orders']).not.toBe(500);
       }
@@ -333,16 +328,6 @@ describe('values are traceable to the inputs (sample book)', () => {
 
     const futs = (await call(app, 'GET', '/api/futures/BANKNIFTY')).body as { expiry: string; ltp: number; basis: number; oi: number }[];
     expect(futs.map((f) => [f.expiry, f.ltp, f.oi, f.basis])).toEqual(b.expiries.BANKNIFTY.map((e) => [e, b.futures[`BANKNIFTY|${e}`], 1_200_000, +(b.futures[`BANKNIFTY|${e}`] - 56000).toFixed(2)]));
-
-    const table = (await call(app, 'GET', '/api/vol/table')).body as { symbol: string; iv: number | null }[];
-    for (const [s, vol] of Object.entries(b.vols)) expect(Math.abs((table.find((r) => r.symbol === s)?.iv as number) - vol * 100), s).toBeLessThan(0.2);
-
-    const surface = (await call(app, 'GET', '/api/vol/surface/NIFTY')).body as { strikes: (number | null)[][]; iv: (number | null)[][] };
-    const listed = new Set(p.ref.strikes('NIFTY', w1));
-    surface.strikes[0].forEach((k, i) => {
-      if (k === null) expect(surface.iv[0][i]).toBeNull(); // no smile fill-in
-      else expect(listed.has(k)).toBe(true);
-    });
 
     const oiTop = (await call(app, 'GET', '/api/scanners/highest-call-oi')).body as { rows: { oi: number; metric: number }[] };
     expect(oiTop.rows[0].metric).toBe(oiTop.rows[0].oi);
@@ -398,7 +383,7 @@ describe('?at= (as of a past time)', () => {
       expect((await call(app, 'GET', `${u}${sep}at=nope`)).status, u).toBe(400);
     }
     // Live-only routes never answer a past ?at= with live data.
-    for (const u of ['/api/oi/max-pain/NIFTY', '/api/vol/skew/NIFTY', '/api/vol/surface/NIFTY', '/api/vol/table', '/api/dashboard', '/api/scanners/highest-call-oi', '/api/order-book/NIFTY', '/api/oi/futures']) {
+    for (const u of ['/api/oi/max-pain/NIFTY', '/api/dashboard', '/api/scanners/highest-call-oi', '/api/order-book/NIFTY', '/api/oi/futures']) {
       const res = await call(app, 'GET', `${u}?at=${past}`);
       expect(res.status, u).toBe(503);
       expect(res.body).toEqual({ error: expect.stringMatching(/live data only/), code: 'NO_LIVE_DATA' });

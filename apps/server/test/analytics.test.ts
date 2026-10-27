@@ -15,7 +15,6 @@ import {
   ivRank,
   MARKET_CLOSE_MIN,
   maxPain,
-  volatilityCone,
   type FiiDiiDay,
   type Leg,
   type ParticipantDay,
@@ -23,7 +22,7 @@ import {
 import { black76Price, timeToExpiry } from '../src/live/pricing';
 import type { SymbolRow } from '../src/live/store/history';
 import { NoLiveData, keyId, type DailyOption, type InstrumentKey, type OptKind } from '../src/live/types';
-import { Analytics, IV_WINDOW, RECORDED_CHAIN_COVERAGE, SURFACE_MONEYNESS, changePcrOf, inWindows, sumFiiDii } from '../src/services/analytics';
+import { Analytics, IV_WINDOW, RECORDED_CHAIN_COVERAGE, changePcrOf, inWindows, sumFiiDii } from '../src/services/analytics';
 import { buildOptionChain, futKey, optKey, sessionsBack, spotKey } from '../src/services/live';
 import { Pricer } from '../src/services/pricer';
 import { FakeProvider, loadSampleBook } from './support/fake-provider';
@@ -443,32 +442,7 @@ describe('volatility', () => {
     expect(n.gaps?.ivr).toMatch(/history of the last 252 sessions is flat/);
   });
 
-  it('IV chart: recorded intraday ATM IV, daily rows from the official files, current IV from live premiums', () => {
-    const { p, an, w1 } = setup();
-    const r = an.ivChart('NIFTY', undefined, PREV, 60, 30);
-    expect([r.expiry, r.date]).toEqual([w1, PREV]);
-    const series = p.intraday.chainSeries('NIFTY', w1, PREV);
-    expect(r.intraday).toHaveLength(7);
-    for (const pt of r.intraday) {
-      const cm = series.find((c) => c.ts === pt.ts - MIN)!;
-      expect([pt.atmIv, pt.spot]).toEqual([pct(cm.atmIv!), cm.spot]);
-      expect(pt.ceIv!).toBeCloseTo(14, 0);
-      expect(pt.peIv!).toBeCloseTo(14, 0);
-    }
-    // no official F&O file yet: the daily rows carry the official closes only
-    expect(r.daily.map((d) => d.date)).toEqual(['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', PREV]);
-    expect(r.daily.every((d) => d.iv === null && d.hv === null && d.expiry === null)).toBe(true);
-    expect(r.daily.at(-1)!.close).toBe(24800.3);
-    expect(r.currentIv).toBe(pct(p.pricing.atmIv('NIFTY', w1)!));
-    expect([r.ivr, r.ivp]).toEqual([null, null]);
-    expect(r.gaps?.ivr).toMatch(/0 loaded/);
-
-    const today = an.ivChart('NIFTY', undefined, undefined, 5, 30); // today is not recorded
-    expect(today.intraday).toEqual([]);
-    expect(today.gaps?.intraday).toMatch(/recording started 2026-10-09/);
-  });
-
-  it('a year of official history: daily ATM IV, IV rank/percentile, HV 20D and the realised-vol cone', async () => {
+  it('a year of official history: daily ATM IV, IV rank/percentile and HV 20D', async () => {
     const { p, an, w1 } = setup();
     const n = 260;
     const dates = sessionsBack(p, PREV, n);
@@ -485,10 +459,6 @@ describe('volatility', () => {
     hist.forEach((h, i) => expect(h.iv).toBeCloseTo(vol(i), 3));
     const hv = historicalVol(closes.slice(-21), 20);
 
-    const daily = an.ivHistory('NIFTY', 120);
-    expect(daily.map((d) => d.date)).toEqual(dates.filter((d) => d >= sessionsBack(p, DAY, 120)[0]));
-    expect(daily.at(-1)).toEqual({ date: PREV, iv: pct(hist.at(-1)!.iv), hv: pct(hv), close: closes.at(-1), expiry: addDays(PREV, 7) });
-
     const live = p.pricing.atmIv('NIFTY', w1)!;
     const window = hist.slice(-IV_WINDOW).map((h) => h.iv);
     const row = an.ivTable().find((x) => x.symbol === 'NIFTY')!;
@@ -498,76 +468,6 @@ describe('volatility', () => {
     expect(row.hv).toBe(pct(hv));
     expect(row.ivHvSpread).toBe(r2(row.iv! - row.hv!));
     expect(row.gaps?.ivr).toBeUndefined();
-    const chart = an.ivChart('NIFTY', undefined, PREV, 60, 120);
-    expect([chart.ivr, chart.ivp]).toEqual([row.ivr, row.ivp]);
-
-    const c = an.cone('NIFTY');
-    expect([c.closes, c.from, c.to]).toEqual([n, dates[0], PREV]);
-    expect(c.rows).toEqual(
-      volatilityCone(closes, [10, 20, 30, 60, 90, 120]).map((e) => ({ window: e.window, min: pct(e.min), p25: pct(e.p25), median: pct(e.median), p75: pct(e.p75), max: pct(e.max), current: pct(e.current) })),
-    );
-    expect(c.atmIv).toBe(pct(live));
-    expect(c.gaps).toBeUndefined();
-  });
-
-  it('cone: windows longer than the official history are blank; NoLiveData without closes', () => {
-    const { an } = setup();
-    const c = an.cone('NIFTY'); // five sample closes
-    expect(c.closes).toBe(5);
-    expect(c.rows.map((r) => r.window)).toEqual([10, 20, 30, 60, 90, 120]);
-    expect(c.rows.every((r) => [r.min, r.p25, r.median, r.p75, r.max, r.current].every((v) => v === null))).toBe(true);
-    expect(c.gaps?.rows).toMatch(/5 consecutive official closes \(from 2026-10-05\): the 10\/20\/30\/60\/90\/120-session windows need 17\+/);
-    expect(c.atmIv!).toBeCloseTo(14, 0);
-    expect(() => an.cone('BANKNIFTY')).toThrow(NoLiveData);
-  });
-
-  it('skew: IV per listed strike from live premiums, and the previous official close for comparison', async () => {
-    const { p, an, w1, m1 } = setup();
-    p.history.writeFo(PREV, { options: officialOptions(p, 'NIFTY', PREV, w1, { vol: 0.12, strikes: p.ref.strikes('NIFTY', w1) }) });
-    const s = await an.skew('NIFTY', [], undefined, 'prev');
-    expect(s.spot).toBe(25000);
-    expect(s.curves.map((c) => [c.expiry, c.source, c.date])).toEqual([
-      [w1, 'live', DAY],
-      [w1, 'eod', PREV],
-      [m1, 'live', DAY],
-    ]);
-    expect(s.gaps?.[`${m1} (prev close)`]).toMatch(/No traded official option closes of NIFTY/);
-    const live = s.curves[0];
-    expect(live.points.length).toBeGreaterThan(15);
-    for (const pt of live.points) {
-      expect(p.ref.strikes('NIFTY', w1)).toContain(pt.strike);
-      expect(pt.moneyness).toBe(+((pt.strike / 25000 - 1) * 100).toFixed(2));
-      expect(pt.iv).toBe(pt.strike >= live.forward! ? pt.ceIv : pt.peIv);
-      if (Math.abs(pt.strike - 25000) <= 300) expect(pt.iv!).toBeCloseTo(14, 0);
-    }
-    const prev = s.curves[1];
-    expect(prev.points.length).toBeGreaterThan(15);
-    expect(prev.atmIv!).toBeCloseTo(12, 0);
-    for (const pt of prev.points) if (Math.abs(pt.strike - 24800) <= 300) expect(pt.iv!).toBeCloseTo(12, 0);
-
-    expect((await an.skew('NIFTY', [m1])).curves.map((c) => c.expiry)).toEqual([m1]);
-    expect(await errOf(() => an.skew('NIFTY', ['2030-01-08']))).toMatchObject({ statusCode: 400 });
-  });
-
-  it('surface: solved IV on listed strikes only; buckets without a listed live premium stay blank (no smile fill-in)', async () => {
-    const { p, an, w1, m1 } = setup();
-    const s = await an.surface('NIFTY');
-    expect(s.expiries).toEqual([w1, m1]);
-    expect(s.moneyness).toEqual(SURFACE_MONEYNESS);
-    expect(s.spot).toBe(25000);
-    s.iv.forEach((row, i) =>
-      row.forEach((v, j) => {
-        const k = s.strikes[i][j];
-        expect(v === null).toBe(k === null);
-        if (k === null) return;
-        expect(p.ref.strikes('NIFTY', s.expiries[i])).toContain(k);
-        expect(Math.abs((k / 25000 - 1) * 100 - s.moneyness[j])).toBeLessThanOrEqual(1);
-      }),
-    );
-    // the sample lists strikes within ±2 % only: every wider bucket is blank
-    for (const row of s.iv) expect(s.moneyness.filter((_, j) => row[j] !== null)).toEqual([-2, -1, 0, 1, 2]);
-    expect(s.iv[0][s.moneyness.indexOf(0)]!).toBeCloseTo(14, 0);
-    expect(s.strikes[0][s.moneyness.indexOf(0)]).toBe(25000);
   });
 });
 
@@ -769,11 +669,7 @@ describe('before any data exists', () => {
     expect(() => an.breadth()).toThrow(NoLiveData);
     expect(() => an.participants('2026-10-01', DAY)).toThrow(NoLiveData);
     expect(() => an.fiiDii('2026-10-01', DAY)).toThrow(NoLiveData);
-    expect(() => an.ivChart('NIFTY', undefined, undefined, 5, 120)).toThrow(NoLiveData);
     expect(() => an.ivTable()).toThrow(/No live underlying price or ATM IV yet/);
-    await expect(an.skew('NIFTY', [])).rejects.toThrow(NoLiveData);
-    await expect(an.surface('NIFTY')).rejects.toThrow(NoLiveData);
-    expect(() => an.cone('NIFTY')).toThrow(NoLiveData);
     await expect(an.straddle('NIFTY', undefined, 'atm', 'rolling', undefined, 5)).rejects.toThrow(NoLiveData);
     await expect(an.strategyChart('NIFTY', [leg], undefined, 5)).rejects.toThrow(NoLiveData);
     expect(() => an.recap({ symbol: 'NIFTY', legs: [leg], fromTs: at(DAY, '09:30') })).toThrow(NoLiveData);
@@ -785,9 +681,9 @@ describe('before any data exists', () => {
 
     // instrument master not loaded yet: NoLiveData; unknown symbol: 404
     p.ref.setLoaded(false);
-    expect(() => an.cone('NIFTY')).toThrow(/Instrument master not loaded yet/);
+    expect(() => an.ivTable()).toThrow(/Instrument master not loaded yet/);
     await expect(an.orb('NIFTY')).rejects.toThrow(NoLiveData);
     p.ref.setLoaded(true);
-    expect(await errOf(() => an.cone('NOPE'))).toMatchObject({ statusCode: 404 });
+    expect(await errOf(() => an.strategyChart('NOPE', [leg], undefined, 5))).toMatchObject({ statusCode: 404 });
   });
 });

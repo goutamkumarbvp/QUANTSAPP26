@@ -1,7 +1,7 @@
 # Q26 Options
 
 An options-analytics and paper-trading platform for Indian F&O (NSE / BSE), modelled on the feature set of
-Quantsapp — option chain, open-interest suite, implied-volatility suite, strategy builder, strategy wizard,
+Quantsapp — option chain, open-interest suite, strategy builder, strategy wizard,
 optimizer, straddle & strategy charts, trade recap, scanners, unusual option activity, synopsis heat-map,
 order-book analytics, FII/DII & participant data, watchlists, alerts, rule-based algos and a paper broker.
 
@@ -30,7 +30,7 @@ order-book analytics, FII/DII & participant data, watchlists, alerts, rule-based
 - **Order flow** — an *estimate*: each traded volume increment is classified buyer- or seller-initiated with the
   quote rule (last price at/above the prior ask = buy, at/below the prior bid = sell, otherwise unclassified).
   Only meaningful if the feed reports each trade.
-- **HV, IV rank / percentile, volatility cone** — from official daily closes and daily IV.
+- **HV, IV rank / percentile** — from official daily closes and daily IV (used by the IV scanners).
 
 **When a value is blank:** without Kotak credentials or before login, nothing live is shown; before the
 instrument master loads, no contract is known; before the first stock-option sweep, stock scanners are empty;
@@ -161,7 +161,6 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
 | Market | Home dashboard, Watchlist, **Market Terminal** (price with EMA 20/50, total CE vs PE OI with build-up, PCR of OI and COI, volume vs OI — one screen), Option Chain, **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias; their option chains are streamed tick by tick), F&O Market (heat-map · futures build-up · sector breadth) |
 | Order flow & trend | Order Flow & Book (Order & Trade chart: the security's price, buyer vs seller initiated quantity per minute on one scale, cumulative delta; session split; 5-level depth; minute table; past sessions), Opening range breakout |
 | Open interest | OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
-| Volatility | IV chart (intraday + IV vs HV), IV Rank & Percentile, Skew, Surface, Volatility cone |
 | Institutions | FII/DII cash flows, Participant-wise OI (official end-of-day data) |
 | Scanners | 23 F&O scanners (incl. 3 opening-range scans), Unusual option activity |
 | Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Straddle chart, Strategy chart, Trade recap |
@@ -258,7 +257,7 @@ and add the generated Digital Asset Links file at `/.well-known/assetlinks.json`
 All endpoints are under `/api`. Status: `health`, `meta`, `clock`. Market data: `quotes`, `indices`,
 `expiries/:symbol`, `chain/:symbol` (`?at=` for a recorded minute), `futures/:symbol`, `candles/:symbol`,
 `dashboard`, `oi/{strikes,multi-strike,trend,pcr,max-pain}/:symbol`, `oi/futures`, `oi/breadth`, `participants`,
-`fii-dii`, `vol/{iv-chart,skew,surface,cone}/:symbol`, `vol/table`, `straddle/:symbol`, `orb`, `orb/:symbol`,
+`fii-dii`, `straddle/:symbol`, `orb`, `orb/:symbol`,
 `orb/:symbol/history`, `order-flow/:symbol`, `algos`, `algos/:id/defaults`, `algos/:id/backtest` (POST),
 `algos/:id/backtest-range` (POST), `strategy-chart` (POST), `optimizer` (POST), `recap` (POST),
 `scanners[/:id]`, `unusual`, `synopsis`, `order-book/:symbol`. User data (Bearer token): `auth/*`, `settings`,

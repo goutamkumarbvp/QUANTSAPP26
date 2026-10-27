@@ -589,20 +589,6 @@ export async function buildApp(
     return an.fiiDii(from, to);
   });
 
-  /* ---------------------------- volatility ---------------------------- */
-
-  app.get<{ Params: { symbol: string } }>('/api/vol/iv-chart/:symbol', async (req) => {
-    const q = qs(req);
-    return an.ivChart(req.params.symbol, q.expiry, q.date, num(q.interval, 5), Math.min(400, num(q.days, 120)), now());
-  });
-  app.get('/api/vol/table', async () => an.ivTable(now()));
-  app.get<{ Params: { symbol: string } }>('/api/vol/skew/:symbol', async (req) => {
-    const q = qs(req);
-    return an.skew(req.params.symbol, (q.expiries ?? '').split(',').filter(Boolean), now(), q.compare === 'prev' ? 'prev' : 'none');
-  });
-  app.get<{ Params: { symbol: string } }>('/api/vol/surface/:symbol', async (req) => an.surface(req.params.symbol, now()));
-  app.get<{ Params: { symbol: string } }>('/api/vol/cone/:symbol', async (req) => an.cone(req.params.symbol, now()));
-
   /* ---------------------------- strategy tools ---------------------------- */
 
   // A malformed strike or width is a 400, never replaced by ATM / 0 (Analytics also rejects ones outside the strikes).

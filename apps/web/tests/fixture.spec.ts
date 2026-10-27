@@ -161,16 +161,6 @@ test('NIFTY Top 10 desk: ten heavyweights with futures, options, flow and a bias
   await clean(page, watch);
 });
 
-test('IV chart: ATM IV solved from live premiums; IV rank blank with its reason', async ({ page }, info) => {
-  const watch = watchErrors(page);
-  await open(page, '/vol/iv-chart', /IV Chart/);
-  await expect(page.getByText('14.00%').first()).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByText('solved from live premiums').first()).toBeVisible();
-  await expect(page.getByText(/IV rank\/percentile need 252 sessions/).first()).toBeVisible();
-  await shot(page, info, 'iv-chart');
-  await clean(page, watch);
-});
-
 test('paper market order fills at the live ask and shows in positions', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/positions', /Positions & Orders/);

@@ -73,3 +73,10 @@ Two items were reviewed and left as they are:
 
 - **Restored at the user's request:** `apps/server/src/live/net.ts`, a fetch-error helper added during this work, was removed and both of its call sites restored to their original code, as the user asked.
 - **Deferred:** the dev-only toolchain advisories (vitest, vite, tailwind 3). They are not shipped in the image; see ZERO_TRUST_45_POINT_AUDIT.md control 39. The runtime advisories were fixed (C-23).
+
+## C-43 — Volatility tab removed
+
+The Volatility tab (IV Chart, IV Rank & Percentile, Volatility Skew, Surface, Cone) was removed on request, with its code:
+web pages (`pages/vol/`), routes `/api/vol/*`, `Analytics.ivChart/ivHistory/skew/surface/cone`, the core cone/rolling-HV/Parkinson
+estimators, the response types, and their tests. Kept because other features need them: `Analytics.ivTable()` (IV scanners and
+the market synopsis), `historicalVol`, `ivRank`, `ivPercentile`, and the IV/Greeks of the option chain and payoff.

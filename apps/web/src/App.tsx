@@ -43,11 +43,6 @@ const StrikeOI = page(() => import('./pages/oi/StrikeOI'));
 const MultiStrike = page(() => import('./pages/oi/MultiStrike'));
 const Pcr = page(() => import('./pages/oi/Pcr'));
 const MaxPain = page(() => import('./pages/oi/MaxPain'));
-const IvChart = page(() => import('./pages/vol/IvChart'));
-const IvTable = page(() => import('./pages/vol/IvTable'));
-const Skew = page(() => import('./pages/vol/Skew'));
-const Surface = page(() => import('./pages/vol/Surface'));
-const Cone = page(() => import('./pages/vol/Cone'));
 const Builder = page(() => import('./pages/Builder'));
 const Templates = page(() => import('./pages/Templates'));
 const Optimizer = page(() => import('./pages/Optimizer'));
@@ -178,11 +173,6 @@ export function App() {
             <Route path="/oi/max-pain" element={<MaxPain />} />
             <Route path="/oi/futures" element={<Navigate to="/fno-market?view=futures" replace />} />
             <Route path="/oi/breadth" element={<Navigate to="/fno-market?view=breadth" replace />} />
-            <Route path="/vol/iv-chart" element={<IvChart />} />
-            <Route path="/vol/ivp" element={<IvTable />} />
-            <Route path="/vol/skew" element={<Skew />} />
-            <Route path="/vol/surface" element={<Surface />} />
-            <Route path="/vol/cone" element={<Cone />} />
             <Route path="/builder" element={<Builder />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/optimizer" element={<Optimizer />} />

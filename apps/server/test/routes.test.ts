@@ -213,11 +213,6 @@ const MARKET_GETS = [
   '/api/oi/breadth',
   '/api/participants',
   '/api/fii-dii',
-  '/api/vol/iv-chart/NIFTY',
-  '/api/vol/table',
-  '/api/vol/skew/NIFTY',
-  '/api/vol/surface/NIFTY',
-  '/api/vol/cone/NIFTY',
   '/api/straddle/NIFTY',
   '/api/scanners',
   ...SCANNERS.map((x) => `/api/scanners/${x.id}`),
@@ -258,12 +253,12 @@ describe('market routes never answer 500', () => {
       }
       if (sample) {
         // What the sample book holds is served.
-        for (const url of ['/api/quotes', '/api/chain/NIFTY', '/api/futures/NIFTY', '/api/oi/strikes/NIFTY', '/api/oi/max-pain/NIFTY', '/api/oi/futures', '/api/vol/skew/NIFTY', '/api/vol/surface/NIFTY', '/api/oi/trend/NIFTY?date=' + book!.recordedDate, '/api/optimizer', '/api/strategy-chart']) {
+        for (const url of ['/api/quotes', '/api/chain/NIFTY', '/api/futures/NIFTY', '/api/oi/strikes/NIFTY', '/api/oi/max-pain/NIFTY', '/api/oi/futures', '/api/oi/trend/NIFTY?date=' + book!.recordedDate, '/api/optimizer', '/api/strategy-chart']) {
           if (url.includes('?')) expect((await call(app, 'GET', url)).status, url).toBe(200);
           else expect(seen[url], url).toBe(200);
         }
       } else {
-        for (const url of ['/api/quotes', '/api/chain/NIFTY', '/api/orb', '/api/vol/table', '/api/optimizer']) expect(seen[url], url).toBe(503);
+        for (const url of ['/api/quotes', '/api/chain/NIFTY', '/api/orb', '/api/optimizer']) expect(seen[url], url).toBe(503);
         expect(seen['/api/health']).toBe(200);
         expect(seen['/api/dashboard']).toBe(200);
       }
@@ -272,7 +267,7 @@ describe('market routes never answer 500', () => {
 
   it('unknown symbols are 404; malformed queries are 400', async () => {
     const { app } = await setup();
-    for (const url of ['/api/chain/NOPE', '/api/expiries/NOPE', '/api/futures/NOPE', '/api/candles/NOPE', '/api/orb/NOPE', '/api/order-flow/NOPE', '/api/oi/strikes/NOPE', '/api/oi/max-pain/NOPE', '/api/vol/skew/NOPE', '/api/vol/surface/NOPE', '/api/straddle/NOPE', '/api/order-book/NOPE', '/api/scanners/nope']) {
+    for (const url of ['/api/chain/NOPE', '/api/expiries/NOPE', '/api/futures/NOPE', '/api/candles/NOPE', '/api/orb/NOPE', '/api/order-flow/NOPE', '/api/oi/strikes/NOPE', '/api/oi/max-pain/NOPE', '/api/straddle/NOPE', '/api/order-book/NOPE', '/api/scanners/nope']) {
       const { status, body } = await call(app, 'GET', url);
       expect(status, `${url} ${JSON.stringify(body)}`).toBe(404);
     }

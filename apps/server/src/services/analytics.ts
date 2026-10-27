@@ -18,33 +18,24 @@ import {
   type UnderlyingKind,
   addDays,
   classifyBuildUp,
-  daysToExpiry,
   describeOrb,
   evaluateOpeningRange,
-  expiryTs,
-  formatExpiry,
   formatTimeIST,
   historicalVol,
   marginParamsOf,
-  istTs,
   ivPercentile,
   ivRank,
-  legQty,
-  MARKET_CLOSE_MIN,
   maxPain,
   optimizeStrategies,
   orbAtPrice,
   SESSION_MINUTES,
   sideSign,
-  volatilityCone,
   type BreadthResponse,
   type BuildUp,
   type BuildUpCounts,
-  type ConeResponse,
   type DailyPcrPoint,
   type FiiDiiDay,
   type FuturesBuildUpRow,
-  type IvChartResponse,
   type IvTableRow,
   type Leg,
   type MaxPainResponse,
@@ -65,12 +56,10 @@ import {
   type PcrResponse,
   type RecapRequest,
   type RecapResponse,
-  type SkewResponse,
   type StraddlePoint,
   type StraddleResponse,
   type StrategyChartPoint,
   type StrikeOiResponse,
-  type SurfaceResponse,
 } from '@q26/core';
 import { isIsoDate } from '../live/calendar';
 import { black76Iv, impliedForward, timeToExpiry, type PremiumRow } from '../live/pricing';
@@ -123,8 +112,6 @@ export const MAX_KOTAK_CONTRACTS = 6;
 /** Market-wide snapshots (option snapshot, futures, IV table, ORB scan) are rebuilt at most every 5 s. */
 export const SNAPSHOT_MS = 5_000;
 /** Moneyness buckets (%) of the surface. */
-export const SURFACE_MONEYNESS = [-10, -8, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 8, 10];
-const CONE_WINDOWS = [10, 20, 30, 60, 90, 120];
 
 /** What the recorded chain totals (ChainMinute) cover (Phase B review item d/g). */
 export const RECORDED_CHAIN_COVERAGE = 'streamed strikes (±8 %): the strikes the recorder tracked, re-centred during the day — not the whole chain';
@@ -1265,74 +1252,6 @@ export class Analytics {
   /* Volatility                                                                                   */
   /* ------------------------------------------------------------------------------------------ */
 
-  /** Official daily ATM IV (bhavcopy closes, nearest expiry with ≥ 1 day left), HV 20D and close of the last `days` sessions. */
-  ivHistory(symbol: string, days: number, _ts?: number): IvChartResponse['daily'] {
-    const md = mdFor(this.md, symbol);
-    const s = md.ref.underlying(symbol).symbol;
-    const n = clampInt(days, 1, 400, 120);
-    const cur = currentSession(md);
-    const from = sessionsBack(md, cur, n)[0];
-    const warm = sessionsBack(md, from, 22)[0];
-    const atm = new Map(md.history.dailyAtmIv(s, from, cur).map((x) => [x.date, x]));
-    const bars = md.history.dailyBars(s, warm, cur);
-    const hv = this.hv20(bars, md.calendar);
-    const closes = new Map(bars.map((b) => [b.date, b.close]));
-    const dates = [...new Set([...atm.keys(), ...bars.map((b) => b.date).filter((d) => d >= from)])].sort();
-    if (!dates.length) throw new NoLiveData(`No official ATM IV or daily closes of ${s} loaded for ${from}..${cur}`);
-    return dates.map((d) => ({ date: d, iv: pct(atm.get(d)?.iv), hv: pct(hv.get(d)), close: closes.get(d) ?? null, expiry: atm.get(d)?.expiry ?? null }));
-  }
-
-  /** Intraday ATM IV of a recorded session, official daily ATM IV/HV, IV rank and percentile. */
-  ivChart(symbol: string, expiryIn: string | undefined, date: string | undefined, interval: number, days: number, _ts?: number): IvChartResponse {
-    const md = mdFor(this.md, symbol);
-    const s = md.ref.underlying(symbol).symbol;
-    const day = requireDate(md, date);
-    const gaps = new Gaps();
-    const intra = gaps.try('intraday', () => this.intradayIv(s, day, expiryIn, interval));
-    const daily = gaps.try('daily', () => this.ivHistory(s, days)) ?? [];
-    const live = this.ivExpiry(s);
-    const liveIv = live ? md.pricing.atmIv(s, live) : null;
-    const lastDaily = [...daily].reverse().find((d) => d.iv !== null);
-    const lastIv = lastDaily && lastDaily.iv !== null ? lastDaily.iv / 100 : null;
-    const current = liveIv ?? lastIv;
-    const asOf = liveIv !== null ? currentSession(md) : (lastDaily?.date ?? currentSession(md));
-    if (liveIv === null) gaps.add('currentIv', lastDaily ? `No live ATM IV: the latest official one (${lastDaily.date}) is used` : 'No live or official ATM IV');
-    const st = this.ivStats(s, current, asOf);
-    if (st.reason) gaps.add('ivr', st.reason);
-    if (!intra?.points.length && !daily.length && current === null) throw new NoLiveData(Object.values(gaps.out().gaps ?? {}).join('; '));
-    return { symbol: s, expiry: intra?.expiry ?? null, date: day, intraday: intra?.points ?? [], daily, currentIv: pct(current), ivr: st.ivr, ivp: st.ivp, ...gaps.out() };
-  }
-
-  private intradayIv(s: string, day: string, expiryIn: string | undefined, interval: number): { expiry: string; points: IvChartResponse['intraday'] } {
-    const md = mdFor(this.md, s);
-    requireRecorded(md, day);
-    const expiry = this.chainExpiry(s, day, expiryIn);
-    const mk = this.requireMarks(this.marks(day, interval, s));
-    const picks = inWindows(byTs(md.intraday.chainSeries(s, expiry, day)), mk.starts, mk.times);
-    const fut = inWindows(byTs(md.intraday.bars(futKey(s, expiry), day)), mk.starts, mk.times, traded);
-    const legs = new Map<string, MinuteRecord[]>();
-    const legClose = (type: OptKind, strike: number, k: number): number | null => {
-      const id = `${type}|${strike}`;
-      let recs = legs.get(id);
-      if (!recs) legs.set(id, (recs = byTs(md.intraday.bars(optKey(s, expiry, type, strike), day))));
-      return inWindows(recs, [mk.starts[k]], [mk.times[k]], traded)[0]?.close ?? null;
-    };
-    const r = md.pricing.r;
-    const points: IvChartResponse['intraday'] = [];
-    mk.times.forEach((t, k) => {
-      const cm = picks[k];
-      if (!cm) return;
-      const K = cm.atmStrike;
-      const ce = legClose('CE', K, k);
-      const pe = legClose('PE', K, k);
-      const F = impliedForward({ spot: isPos(cm.spot) ? cm.spot : undefined, future: fut[k]?.close, rows: ce !== null && pe !== null ? [{ strike: K, ce, pe }] : [] }, timeToExpiry(expiry, t, md.calendar.exchange), r)?.forward ?? null;
-      const iv = (type: OptKind, p: number | null) => (p !== null && F !== null ? pct(md.pricing.iv({ symbol: s, expiry, type, strike: K, premium: p, ts: t, forward: F })) : null);
-      points.push({ ts: t, spot: isPos(cm.spot) ? cm.spot : null, atmIv: pct(cm.atmIv), ceIv: iv('CE', ce), peIv: iv('PE', pe) });
-    });
-    if (!points.length) throw new NoLiveData(`No recorded ${s} ${expiry} chain minutes on ${day}`);
-    return { expiry, points };
-  }
-
   /** ATM IV, its change, IV rank/percentile and HV of every underlying (cached 5 s). */
   ivTable(_ts?: number): IvTableRow[] {
     return this.ivCache.get(this.bucket(), () => this.computeIvTable());
@@ -1386,154 +1305,6 @@ export class Analytics {
     if (!q || ltp === null) throw new NoLiveData(`No live price for ${symbol}`);
     const prev = isPos(q.prevClose) ? q.prevClose : eodClose(md, symbol, md.calendar.prev(sessionDateOf(md, q.ts)));
     return { ltp, changePct: changeOf(ltp, prev).changePct };
-  }
-
-  /**
-   * IV per listed strike of up to 5 expiries, solved from live premiums (no fill-in); with
-   * compare='prev', the same expiries at the previous session's official traded closes.
-   */
-  async skew(symbol: string, expiriesIn: string[], _ts?: number, compare: 'none' | 'prev' = 'none'): Promise<SkewResponse> {
-    const md = mdFor(this.md, symbol);
-    const s = md.ref.underlying(symbol).symbol;
-    const listed = liveOptionExpiries(md, s);
-    let chosen: string[];
-    if (expiriesIn.length) {
-      for (const e of expiriesIn) this.checkExpiry(e);
-      chosen = expiriesIn.filter((e) => listed.includes(e));
-      if (!chosen.length) throw httpError(400, `None of ${expiriesIn.join(', ')} is a listed ${s} option expiry`);
-    } else chosen = listed.slice(0, 3);
-    chosen = [...new Set(chosen)].slice(0, 5);
-    if (!chosen.length) throw new NoLiveData(`No ${s} option expiry is listed`);
-    const gaps = new Gaps();
-    const chains = await Promise.allSettled(chosen.map((e) => buildOptionChain(md, s, e)));
-    let spot: number | null = null;
-    for (const c of chains) if (c.status === 'fulfilled' && c.value.spot !== null) spot ??= c.value.spot;
-    const prevDate = md.calendar.prev(currentSession(md));
-    const curves: SkewResponse['curves'] = [];
-    chosen.forEach((expiry, i) => {
-      const res = chains[i];
-      if (res.status === 'rejected') {
-        if (!(res.reason instanceof NoLiveData)) throw res.reason;
-        gaps.add(expiry, res.reason.message);
-      } else {
-        const c = res.value;
-        const ref = c.spot ?? c.forward;
-        const F = c.forward ?? c.spot;
-        if (ref === null || F === null) gaps.add(expiry, c.gaps?.forward ?? `No live ${s} price or forward for ${expiry}`);
-        else {
-          const points = c.rows
-            .filter((row) => row.ce.iv !== null || row.pe.iv !== null)
-            .map((row) => ({ strike: row.strike, moneyness: +((row.strike / ref - 1) * 100).toFixed(2), ceIv: row.ce.iv, peIv: row.pe.iv, iv: row.strike >= F ? row.ce.iv : row.pe.iv }));
-          if (!points.length) gaps.add(expiry, `No ${s} ${expiry} strike has a live premium to solve`);
-          curves.push({ expiry, label: formatExpiry(expiry), source: 'live', date: currentSession(md), atmIv: c.atmIv, forward: c.forward, points });
-        }
-      }
-      if (compare === 'prev') {
-        const eod = this.eodCurve(s, expiry, prevDate);
-        const ref = eod.spot ?? eod.forward;
-        const F = eod.forward;
-        if (!eod.iv.size || ref === null || F === null) gaps.add(`${expiry} (prev close)`, `No traded official option closes of ${s} ${expiry} for ${prevDate}`);
-        else {
-          const strikes = [...new Set([...eod.rows.values()].map((o) => o.strike))].sort((a, b) => a - b);
-          const points = strikes
-            .map((strike) => {
-              const ceIv = pct(eod.iv.get(`CE|${strike}`));
-              const peIv = pct(eod.iv.get(`PE|${strike}`));
-              return { strike, moneyness: +((strike / ref - 1) * 100).toFixed(2), ceIv, peIv, iv: strike >= F ? ceIv : peIv };
-            })
-            .filter((p) => p.ceIv !== null || p.peIv !== null);
-          curves.push({ expiry, label: `${formatExpiry(expiry)} (prev close)`, source: 'eod', date: prevDate, atmIv: pct(eodAtmIvOf(md, s, expiry, prevDate)), forward: r2(F), points });
-        }
-      }
-    });
-    if (!curves.some((c) => c.points.length)) throw new NoLiveData(Object.values(gaps.out().gaps ?? {}).join('; ') || `No ${s} option premium to solve`);
-    return { symbol: s, spot, curves, ...gaps.out() };
-  }
-
-  /**
-   * IV by moneyness bucket × expiry (≤ 8 listed expiries): each cell is the solved IV (OTM side) of the
-   * listed strike nearest the bucket centre within the bucket; null when there is none (no smile model).
-   */
-  async surface(symbol: string, _ts?: number): Promise<SurfaceResponse> {
-    const md = mdFor(this.md, symbol);
-    const s = md.ref.underlying(symbol).symbol;
-    const now = this.now();
-    const expiries = liveOptionExpiries(md, s, now).slice(0, 8);
-    if (!expiries.length) throw new NoLiveData(`No ${s} option expiry is listed`);
-    const gaps = new Gaps();
-    const chains = await Promise.allSettled(expiries.map((e) => buildOptionChain(md, s, e)));
-    let spot: number | null = null;
-    for (const c of chains) if (c.status === 'fulfilled' && c.value.spot !== null) spot ??= c.value.spot;
-    const B = SURFACE_MONEYNESS;
-    const lo = B.map((c, j) => c - (j > 0 ? (c - B[j - 1]) / 2 : (B[1] - c) / 2));
-    const hi = B.map((c, j) => c + (j < B.length - 1 ? (B[j + 1] - c) / 2 : (c - B[j - 1]) / 2));
-    const iv: (number | null)[][] = [];
-    const strikes: (number | null)[][] = [];
-    expiries.forEach((expiry, i) => {
-      const res = chains[i];
-      const blank = () => {
-        iv.push(B.map(() => null));
-        strikes.push(B.map(() => null));
-      };
-      if (res.status === 'rejected') {
-        if (!(res.reason instanceof NoLiveData)) throw res.reason;
-        gaps.add(expiry, res.reason.message);
-        return blank();
-      }
-      const c = res.value;
-      const ref = spot ?? c.forward;
-      const F = c.forward ?? spot;
-      if (ref === null || F === null) {
-        gaps.add(expiry, c.gaps?.forward ?? `No live ${s} price or forward for ${expiry}`);
-        return blank();
-      }
-      const cand = c.rows
-        .map((row) => ({ strike: row.strike, m: (row.strike / ref - 1) * 100, v: row.strike >= F ? row.ce.iv : row.pe.iv }))
-        .filter((x): x is { strike: number; m: number; v: number } => x.v !== null);
-      const rowIv: (number | null)[] = [];
-      const rowK: (number | null)[] = [];
-      B.forEach((centre, j) => {
-        let best: { strike: number; m: number; v: number } | null = null;
-        for (const x of cand) {
-          if (x.m < lo[j] || x.m >= hi[j]) continue;
-          if (!best || Math.abs(x.m - centre) < Math.abs(best.m - centre)) best = x;
-        }
-        rowIv.push(best ? best.v : null);
-        rowK.push(best ? best.strike : null);
-      });
-      if (rowIv.every((v) => v === null)) gaps.add(expiry, `No listed ${s} ${expiry} strike inside the moneyness buckets has a live premium`);
-      iv.push(rowIv);
-      strikes.push(rowK);
-    });
-    if (iv.every((row) => row.every((v) => v === null))) throw new NoLiveData(Object.values(gaps.out().gaps ?? {}).join('; ') || `No ${s} option premium to solve`);
-    // Days to expiry from the valuation time the IVs are solved at (outside the session: the last close).
-    const valTs = md.pricing.valuationTs(now, undefined, s);
-    return { symbol: s, spot, expiries, daysToExpiry: expiries.map((e) => +daysToExpiry(valTs, e, md.calendar.exchange).toFixed(1)), moneyness: [...B], iv, strikes, ...gaps.out() };
-  }
-
-  /** Realised-volatility cone of the consecutive official daily closes (≤ 505); short windows are null. */
-  cone(symbol: string, _ts?: number): ConeResponse {
-    const md = mdFor(this.md, symbol);
-    const s = md.ref.underlying(symbol).symbol;
-    const cur = currentSession(md);
-    const from = sessionsBack(md, cur, 505)[0];
-    const bars = md.history.dailyBars(s, from, cur).filter((b) => isPos(b.close));
-    if (!bars.length) throw new NoLiveData(`No official daily closes of ${s} loaded for ${from}..${cur}`);
-    const run = this.runs(bars, md.calendar);
-    const used = bars.slice(bars.length - run[run.length - 1]);
-    const closes = used.map((b) => b.close);
-    const byWindow = new Map(volatilityCone(closes, CONE_WINDOWS).map((r) => [r.window, r]));
-    const gaps = new Gaps();
-    const rows = CONE_WINDOWS.map((w) => {
-      const r = byWindow.get(w);
-      return { window: w, min: pct(r?.min), p25: pct(r?.p25), median: pct(r?.median), p75: pct(r?.p75), max: pct(r?.max), current: pct(r?.current) };
-    });
-    const short = rows.filter((r) => r.median === null).map((r) => r.window);
-    if (short.length) gaps.add('rows', `${closes.length} consecutive official closes (from ${used[0].date}): the ${short.join('/')}-session windows need ${short[0] + 7}+`);
-    const e = this.ivExpiry(s);
-    const atm = e ? md.pricing.atmIv(s, e) : null;
-    if (atm === null) gaps.add('atmIv', `No live ATM IV of ${s}`);
-    return { symbol: s, atmIv: pct(atm), closes: closes.length, from: used[0].date, to: used[used.length - 1].date, rows, ...gaps.out() };
   }
 
   /* ------------------------------------------------------------------------------------------ */

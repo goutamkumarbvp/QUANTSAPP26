@@ -44,16 +44,6 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
-    title: 'Volatility',
-    items: [
-      { to: '/vol/iv-chart', label: 'IV Chart', icon: '∿', desc: 'ATM IV intraday and IV vs HV history' },
-      { to: '/vol/ivp', label: 'IV Rank & Percentile', icon: '%', desc: 'IV, IVR, IVP and HV for all F&O symbols' },
-      { to: '/vol/skew', label: 'Volatility Skew', icon: '⌣', desc: 'IV smile across strikes and expiries' },
-      { to: '/vol/surface', label: 'Volatility Surface', icon: '▩', desc: 'IV by moneyness × expiry' },
-      { to: '/vol/cone', label: 'Volatility Cone', icon: '◇', desc: 'Realised vol percentiles by horizon' },
-    ],
-  },
-  {
     title: 'Institutions',
     items: [
       { to: '/fii-dii', label: 'FII / DII', icon: '₹', desc: 'Institutional cash-market flows (official, daily)' },

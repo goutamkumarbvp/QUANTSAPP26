@@ -6,11 +6,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ORDER_FLOW_METHOD,
   type BreadthResponse,
-  type ConeResponse,
   type FiiDiiDay,
   type FuturesBuildUpRow,
-  type IvChartResponse,
-  type IvTableRow,
   type MarketClockInfo,
   type MaxPainResponse,
   type MultiStrikeResponse,
@@ -23,11 +20,9 @@ import {
   type PcrResponse,
   type ScannerDef,
   type ScannerResponse,
-  type SkewResponse,
   type StraddleResponse,
   type StrategyChartPoint,
   type StrikeOiResponse,
-  type SurfaceResponse,
   type SynopsisResponse,
   type UnusualResponse,
 } from '@q26/core';
@@ -42,11 +37,6 @@ import MaxPain from '../src/pages/oi/MaxPain';
 import MultiStrike from '../src/pages/oi/MultiStrike';
 import Pcr from '../src/pages/oi/Pcr';
 import StrikeOI from '../src/pages/oi/StrikeOI';
-import Cone from '../src/pages/vol/Cone';
-import IvChart from '../src/pages/vol/IvChart';
-import IvTable from '../src/pages/vol/IvTable';
-import Skew from '../src/pages/vol/Skew';
-import Surface from '../src/pages/vol/Surface';
 import FiiDii from '../src/pages/FiiDii';
 import Orb from '../src/pages/Orb';
 import OrderBook from '../src/pages/OrderBook';
@@ -300,113 +290,6 @@ describe('Build-up Breadth', () => {
     expect(out).not.toMatch(/>0<\/div>/);
   });
   it('503', () => expectBlank(render(<Breadth />, [[['breadth'], noLive('No live stock futures and no official F&O history loaded')]]), 'No live stock futures and no official F&O history loaded'));
-});
-
-/* ------------------------------------------------------------------ volatility */
-
-describe('IV Chart', () => {
-  const key = ['iv-chart', 'NIFTY', undefined, 5, '', 120];
-  const data: IvChartResponse = {
-    symbol: 'NIFTY', expiry: '2026-10-20', date: '2026-10-19',
-    intraday: [{ ts: T0 + 5 * 60_000, atmIv: 13.2, spot: 24100, ceIv: null, peIv: 13.4 }],
-    daily: [{ date: '2026-10-15', iv: 14, hv: null, close: 24000, expiry: '2026-10-20' }, { date: '2026-10-16', iv: null, hv: 12, close: null, expiry: null }],
-    currentIv: 13.2, ivr: null, ivp: null,
-    gaps: { ivr: 'IV rank/percentile need 252 sessions of official ATM IV history (at least 227); 31 loaded' },
-  };
-  it('IV rank / percentile are blank with "need N sessions (M loaded)"', () => {
-    const out = decode(render(<IvChart />, [[key, data]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('need 252 sessions of official ATM IV history (at least 227); 31 loaded');
-    expect(out).toContain('solved from live premiums');
-    expect(out).toContain('solved from recorded premiums');
-  });
-  it('no live IV: the latest official one is labelled as such', () => {
-    const out = decode(render(<IvChart />, [[key, { ...data, gaps: { ...data.gaps, currentIv: 'No live ATM IV: the latest official one (2026-10-15) is used' } }]]));
-    expect(out).toContain('latest official close-based IV (not live)');
-  });
-  it('503', () => expectBlank(render(<IvChart />, [[key, noLive('No live or official ATM IV')]]), 'No live or official ATM IV'));
-});
-
-describe('IV Rank & IV Percentile', () => {
-  const row = (symbol: string, over: Partial<IvTableRow> = {}): IvTableRow => ({ symbol, kind: 'index', sector: '', ltp: 24100, changePct: 0.5, iv: 13, ivChange: null, ivr: null, ivp: null, hv: null, ivHvSpread: null, expiry: '2026-10-20', gaps: { ivr: 'IV rank/percentile need 252 sessions of official ATM IV history (at least 227); 31 loaded', hv: 'HV 20D needs 21 consecutive official closes of NIFTY' }, ...over });
-  it('IVR/IVP are dashes with the history reason; the reason is also stated once', () => {
-    const out = decode(render(<IvTable />, [[['iv-table'], [row('NIFTY'), row('SBIN', { iv: null, ltp: null, changePct: null, expiry: null, gaps: { iv: 'No listed SBIN option expiry' } })]]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('1 of 2 underlyings have an ATM IV solved from live premiums');
-    expect(out).toContain('31 loaded');
-    expect(out).toContain('No listed SBIN option expiry');
-  });
-  it('503', () => expectBlank(render(<IvTable />, [[['iv-table'], noLive('No live underlying price or ATM IV yet')]]), 'No live underlying price or ATM IV yet'));
-});
-
-describe('Volatility Skew', () => {
-  const exp = ['expiries', 'NIFTY', 'live'];
-  const key = ['skew', 'NIFTY', '2026-10-20,2026-10-27', false];
-  const expiries = { options: ['2026-10-20', '2026-10-27'], futures: [] };
-  const data: SkewResponse = {
-    symbol: 'NIFTY', spot: null,
-    curves: [{ expiry: '2026-10-20', label: '20 Oct 26', source: 'live', date: '2026-10-19', atmIv: null, forward: null, points: [{ strike: 24000, moneyness: -0.4, ceIv: null, peIv: 13, iv: null }, { strike: 24100, moneyness: 0, ceIv: 12, peIv: null, iv: 12 }] }],
-    gaps: { '2026-10-27': 'No NIFTY 2026-10-27 strike has a live premium to solve' },
-  };
-  it('a narrow smile has decimal y ticks (not every tick "13%")', () => {
-    render(<Skew />, [[exp, expiries], [key, data]]);
-    const y = (charts[0].option as { yAxis: { axisLabel: { formatter: (v: number) => string } } }).yAxis;
-    expect([12.25, 12.5, 12.75].map((v) => y.axisLabel.formatter(v))).toEqual(['12.25%', '12.50%', '12.75%']);
-  });
-  it('missing IVs are gaps; the per-expiry reason is shown; no smoothing', () => {
-    const out = decode(render(<Skew />, [[exp, expiries], [key, data]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('No NIFTY 2026-10-27 strike has a live premium to solve');
-    expect(out).toContain('nothing is interpolated');
-    expect(out).toContain('20 Oct 26 · live');
-  });
-  it('no listed expiry', () => {
-    const out = decode(render(<Skew />, [[exp, { options: [], futures: [] }]]));
-    expect(out).toContain('No option expiry is listed for NIFTY');
-    expect(out).not.toMatch(BAD);
-  });
-  it('503', () => expectBlank(render(<Skew />, [[exp, expiries], [key, noLive('No NIFTY option premium to solve')]]), 'No NIFTY option premium to solve'));
-});
-
-describe('Volatility Surface', () => {
-  const key = ['surface', 'NIFTY'];
-  const data: SurfaceResponse = {
-    symbol: 'NIFTY', spot: 24100, expiries: ['2026-10-20', '2026-10-27'], daysToExpiry: [0.9, 7.9], moneyness: [-2, 0, 2],
-    iv: [[null, 13, null], [null, null, null]], strikes: [[null, 24100, null], [null, null, null]], gaps: { '2026-10-27': 'No listed NIFTY 2026-10-27 strike inside the moneyness buckets has a live premium' },
-  };
-  it('row labels get the room they need and the colour scale sits below the axis title', () => {
-    render(<Surface />, [[key, data]]);
-    const o = charts[0].option as { grid: { left: number; bottom: number; containLabel: boolean }; yAxis: { data: string[] }; xAxis: { nameGap: number }; visualMap: { bottom: number; itemWidth: number } };
-    const longest = Math.max(...o.yAxis.data.map((l) => l.length));
-    expect(o.yAxis.data[1]).toMatch(/^27.*\(7\.9d\)$/);
-    expect(o.grid.containLabel).toBe(false);
-    expect(o.grid.left).toBeGreaterThanOrEqual(longest * 7);
-    // x labels + title (nameGap below the axis) end above the colour scale (its bar + handle labels).
-    expect(o.grid.bottom - o.xAxis.nameGap - 14).toBeGreaterThan(o.visualMap.bottom + o.visualMap.itemWidth + 30);
-  });
-  it('only solved cells are drawn; the empty ones are counted, never interpolated', () => {
-    const out = decode(render(<Surface />, [[key, data]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('1 of 6 cells have an IV solved from a live premium');
-    expect(out).toContain('not interpolated or smoothed');
-  });
-  it('503', () => expectBlank(render(<Surface />, [[key, noLive('No NIFTY option expiry is listed')]]), 'No NIFTY option expiry is listed'));
-});
-
-describe('Volatility Cone', () => {
-  const key = ['cone', 'NIFTY'];
-  const data: ConeResponse = {
-    symbol: 'NIFTY', atmIv: null, closes: 40, from: '2026-08-20', to: '2026-10-16',
-    rows: [{ window: 10, min: 8, p25: 9, median: 10, p75: 11, max: 14, current: 10 }, { window: 20, min: 8, p25: 9, median: 10, p75: 11, max: 14, current: 11 }, { window: 60, min: null, p25: null, median: null, p75: null, max: null, current: null }],
-    gaps: { rows: '40 consecutive official closes (from 2026-08-20): the 60-session windows need 67+', atmIv: 'No live ATM IV of NIFTY' },
-  };
-  it('short windows are blank with the reason; ATM IV blank without a live IV', () => {
-    const out = decode(render(<Cone />, [[key, data]]));
-    expect(out).not.toMatch(BAD);
-    expect(out).toContain('the 60-session windows need 67+');
-    expect(out).toContain('Built from 40 consecutive official daily closes');
-  });
-  it('503', () => expectBlank(render(<Cone />, [[key, noLive('No official daily closes of NIFTY loaded')]]), 'No official daily closes of NIFTY loaded'));
 });
 
 /* ------------------------------------------------------------------ strategy tools */

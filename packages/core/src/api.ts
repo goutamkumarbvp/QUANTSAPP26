@@ -419,23 +419,6 @@ export interface FiiDiiDay {
   scope?: 'combined' | 'nse';
 }
 
-export interface IvChartResponse extends DataGaps {
-  symbol: string;
-  /** Expiry of the intraday series (recorded chain), null when there is none. */
-  expiry: string | null;
-  /** Session of the intraday series. */
-  date: string;
-  /** Recorded chain minutes: ATM IV (percent) and the ATM strike's CE/PE IV solved from their traded premiums. */
-  intraday: { ts: number; atmIv: number | null; spot: number | null; ceIv: number | null; peIv: number | null }[];
-  /** Official end-of-day: ATM IV solved from the bhavcopy closes (nearest expiry with ≥ 1 day left), HV 20D of official closes. */
-  daily: { date: string; iv: number | null; hv: number | null; close: number | null; expiry: string | null }[];
-  /** ATM IV now (live premiums), else the latest official one (percent). */
-  currentIv: number | null;
-  /** IV rank / percentile of `currentIv` over the last 252 sessions of official ATM IV; null while that history is shorter. */
-  ivr: number | null;
-  ivp: number | null;
-}
-
 export interface IvTableRow extends DataGaps {
   symbol: string;
   kind: UnderlyingKind;
@@ -453,48 +436,6 @@ export interface IvTableRow extends DataGaps {
   ivHvSpread: number | null;
   /** Nearest listed option expiry with at least one day left. */
   expiry: string | null;
-}
-
-export interface SkewPoint {
-  strike: number;
-  /** (strike / reference − 1) × 100; reference = spot, else the forward. */
-  moneyness: number;
-  ceIv: number | null;
-  peIv: number | null;
-  /** Out-of-the-money side (CE at/above the forward, PE below). */
-  iv: number | null;
-}
-
-export interface SkewResponse extends DataGaps {
-  symbol: string;
-  spot: number | null;
-  curves: {
-    expiry: string;
-    label: string;
-    /** 'live' = solved from live premiums; 'eod' = from the previous session's official traded closes. */
-    source: 'live' | 'eod';
-    /** Session of the premiums. */
-    date: string;
-    atmIv: number | null;
-    forward: number | null;
-    points: SkewPoint[];
-  }[];
-}
-
-export interface SurfaceResponse extends DataGaps {
-  symbol: string;
-  spot: number | null;
-  expiries: string[];
-  daysToExpiry: number[];
-  /** Bucket centres (K / reference − 1, %). */
-  moneyness: number[];
-  /**
-   * iv[expiryIdx][moneynessIdx] in percent: the solved IV of the listed strike nearest the bucket
-   * centre within the bucket; null when no listed strike there has a live premium (no smile fill-in).
-   */
-  iv: (number | null)[][];
-  /** The listed strike behind each cell (null with the cell). */
-  strikes: (number | null)[][];
 }
 
 export interface StraddlePoint extends TimePoint {
@@ -529,18 +470,6 @@ export interface StrategyChartPoint extends TimePoint {
   theta: number | null;
   vega: number | null;
   gamma: number | null;
-}
-
-/** Realised-vol cone of official daily closes; a window is null when the history is too short. */
-export interface ConeResponse extends DataGaps {
-  symbol: string;
-  /** Live ATM IV (percent), null when not live. */
-  atmIv: number | null;
-  /** Consecutive official closes used. */
-  closes: number;
-  from: string | null;
-  to: string | null;
-  rows: { window: number; min: number | null; p25: number | null; median: number | null; p75: number | null; max: number | null; current: number | null }[];
 }
 
 /**

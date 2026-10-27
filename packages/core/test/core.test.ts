@@ -28,7 +28,6 @@ import {
   STRATEGY_TEMPLATES,
   strategyPnl,
   tradingDaysBetween,
-  volatilityCone,
   weekday,
   type Leg,
 } from '../src';
@@ -225,9 +224,6 @@ describe('volatility', () => {
     expect(hv).toBeLessThan(0.2);
     expect(ivRank(15, [10, 20])).toBe(50);
     expect(ivPercentile(15, [10, 12, 14, 16, 18])).toBe(60);
-    const cone = volatilityCone(closes);
-    expect(cone[0].min).toBeLessThanOrEqual(cone[0].median);
-    expect(cone[0].median).toBeLessThanOrEqual(cone[0].max);
   });
 
   it('IV rank / percentile are null (not 50) for a flat or too-short history', () => {

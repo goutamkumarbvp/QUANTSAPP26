@@ -128,22 +128,20 @@ describe('valuation time outside the session', () => {
     expect(a.triggeredValue).toBeCloseTo(15, 0);
   });
 
-  it('surface days to expiry, the optimizer and the margin estimate are valued at the same time as the IVs', async () => {
+  it('the optimizer and the margin estimate are valued at the same time as the IVs', async () => {
     const { p, db, pricer, an, w1 } = setup();
     const broker = new PaperBroker(p, db, pricer, () => p.now(), () => undefined, () => undefined);
     expect(broker.place('u1', { symbol: 'NIFTY', type: 'CE', strike: 25_000, expiry: w1, side: 'SELL', lots: 1, orderType: 'MARKET', product: 'NRML' }).status).toBe('COMPLETE');
     const req = { symbol: 'NIFTY', expiry: w1, targetPrice: 25_150, targetDate: w1 };
     const snap = async () => {
       const opt = await an.optimize(req);
-      return { dte: (await an.surface('NIFTY')).daysToExpiry[0], margin: broker.funds('u1').usedMargin as number, best: opt.results.slice(0, 5).map((c) => JSON.stringify({ legs: c.legs, metrics: { ...c, legs: undefined } })) };
+      return { margin: broker.funds('u1').usedMargin as number, best: opt.results.slice(0, 5).map((c) => JSON.stringify({ legs: c.legs, metrics: { ...c, legs: undefined } })) };
     };
     p.setNow(hm(FRI, '16:00'));
     const close = await snap();
-    expect(close.dte).toBeCloseTo((Date.parse(`${w1}T10:00:00Z`) - hm(FRI, '15:30')) / 86_400_000, 1);
     expect(close.margin).toBeGreaterThan(0);
     p.setNow(hm(SUN, '12:00'));
     const sun = await snap();
-    expect(sun.dte).toBe(close.dte);
     expect(sun.margin).toBeCloseTo(close.margin, 2);
     expect(sun.best).toEqual(close.best);
   });
