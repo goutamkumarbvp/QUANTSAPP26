@@ -295,7 +295,7 @@ export default function Home() {
                 <MoverTable title="OI Gainers (Futures)" rows={d.oiGainers} metric="oi" reason={g.oiGainers} none="No stock future has added OI vs the previous session" />
               </div>
 
-              <Card title="FII / DII cash flows (last sessions)" actions={<Link to="/fii-dii" className="text-xs text-accent">More →</Link>}>
+              <Card title="FII / DII cash flows (last sessions)" actions={<Link to="/institutions?view=fii-dii" className="text-xs text-accent">More →</Link>}>
                 {d.fiiDii.length ? (
                   <>
                     <FlowsChart days={d.fiiDii} />

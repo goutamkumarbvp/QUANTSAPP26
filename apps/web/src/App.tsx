@@ -38,8 +38,7 @@ const Terminal = page(() => import('./pages/Terminal'));
 const ExpectedRange = page(() => import('./pages/ExpectedRange'));
 const Watchlist = page(() => import('./pages/Watchlist'));
 const FnoMarket = page(() => import('./pages/FnoMarket'));
-const FiiDii = page(() => import('./pages/FiiDii'));
-const Participants = page(() => import('./pages/Participants'));
+const Institutions = page(() => import('./pages/Institutions'));
 const StrikeOI = page(() => import('./pages/oi/StrikeOI'));
 const MultiStrike = page(() => import('./pages/oi/MultiStrike'));
 const Pcr = page(() => import('./pages/oi/Pcr'));
@@ -53,8 +52,7 @@ const Recap = page(() => import('./pages/Recap'));
 const Positions = page(() => import('./pages/Positions'));
 const Strategies = page(() => import('./pages/Strategies'));
 const Alerts = page(() => import('./pages/Alerts'));
-const Scanners = page(() => import('./pages/Scanners'));
-const Unusual = page(() => import('./pages/Unusual'));
+const ScannersHub = page(() => import('./pages/ScannersHub'));
 const OrderBook = page(() => import('./pages/OrderBook'));
 const Orb = page(() => import('./pages/Orb'));
 const Algo = page(() => import('./pages/Algo'));
@@ -166,8 +164,9 @@ export function App() {
             <Route path="/fno-market" element={<FnoMarket />} />
             {/* Merged tabs: the old addresses still work. */}
             <Route path="/synopsis" element={<Navigate to="/fno-market?view=heatmap" replace />} />
-            <Route path="/fii-dii" element={<FiiDii />} />
-            <Route path="/participants" element={<Participants />} />
+            <Route path="/institutions" element={<Institutions />} />
+            <Route path="/fii-dii" element={<Navigate to="/institutions?view=fii-dii" replace />} />
+            <Route path="/participants" element={<Navigate to="/institutions?view=participants" replace />} />
             <Route path="/oi/strikes" element={<StrikeOI />} />
             <Route path="/oi/multi-strike" element={<MultiStrike />} />
             <Route path="/oi/trend" element={<Navigate to="/oi/pcr" replace />} />
@@ -184,8 +183,8 @@ export function App() {
             <Route path="/positions" element={<Positions />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/alerts" element={<Alerts />} />
-            <Route path="/scanners" element={<Scanners />} />
-            <Route path="/unusual" element={<Unusual />} />
+            <Route path="/scanners" element={<ScannersHub />} />
+            <Route path="/unusual" element={<Navigate to="/scanners?view=unusual" replace />} />
             <Route path="/order-book" element={<OrderBook />} />
             <Route path="/orb" element={<Orb />} />
             <Route path="/order-flow" element={<Navigate to="/order-book" replace />} />

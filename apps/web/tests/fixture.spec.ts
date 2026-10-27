@@ -57,6 +57,13 @@ test('scanners: a build-up row with its coverage note', async ({ page }, info) =
   await expect(row).toContainText('1,403.20');
   await expect(page.getByText(/17 of 17 near-month futures/).first()).toBeVisible(); // NIFTY, BANKNIFTY, SENSEX, RELIANCE, the 9 test heavyweights + MCX CRUDEOIL, GOLD, SILVER, NATURALGAS
   await shot(page, info, 'scanners');
+  // Unusual option activity is a view of the same tab; its old address redirects there
+  await page.goto('/unusual');
+  await expect(page).toHaveURL(/\/scanners\?view=unusual/);
+  await expect(page.getByRole('heading', { name: 'Unusual Option Activity' })).toBeVisible({ timeout: 20_000 });
+  await page.goto('/participants');
+  await expect(page).toHaveURL(/\/institutions\?view=participants/);
+  await expect(page.getByRole('heading', { name: 'Participant-wise OI' })).toBeVisible({ timeout: 20_000 });
   await clean(page, watch);
 });
 

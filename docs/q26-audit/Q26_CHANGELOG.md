@@ -115,3 +115,17 @@ straddle is about 0.8 σ, so roughly 58 % of closes are expected inside it. Quan
   for today (1), this week (7) and this month (30). Checked against that page's published figures (VIX 14.63, future
   22,648.50 → ±0.77 % / ±173, ±2.03 %, ±4.2 %). Back-checked on official NIFTY and India VIX closes.
 - The e2e fixture gains a TEST-ONLY SENSEX (BSE) index with a weekly chain.
+
+## C-47 — Menu reorganised by kind of work; duplicate tabs merged
+
+Every tool now sits in exactly one group (Market Overview · Option Chain & OI · Intraday Charts & Range · Strategy ·
+Paper Trading · More; 29 → 26 menu entries):
+- F&O Scanners + Unusual Options → one tab **F&O Scanners** (views: pre-built scans · unusual option activity); `/unusual`
+  redirects to `/scanners?view=unusual`.
+- FII / DII + Participant OI → one tab **Institutional Activity** (`/institutions`, views fii-dii · participants); `/fii-dii`
+  and `/participants` redirect there; the Home "More →" link points to it.
+- Market Terminal, Order Flow & Book, Opening range breakout, Expected Range and Straddle chart (one underlying's charts
+  through the session) moved together under Intraday Charts & Range; the option chain and its OI readings under Option
+  Chain & OI.
+Kept separate on purpose: Market Terminal vs PCR & OI Trend (summary vs expiry/date-selectable detail with daily PCR),
+Straddle chart vs Strategy chart (rolling ATM vs your own legs). A unit test fails if any menu entry, label or group repeats.

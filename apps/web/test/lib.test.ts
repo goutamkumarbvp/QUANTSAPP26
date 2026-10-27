@@ -4,6 +4,7 @@ import { ApiError, api, errorText, isClientError, isNoLiveData, RequestTimeoutEr
 import { feedView, STALE_TICK_MS } from '../src/lib/feed';
 import * as fmt from '../src/lib/format';
 import { adaptivePoll, NO_LIVE_POLL_MS } from '../src/lib/hooks';
+import { NAV } from '../src/lib/nav';
 import { shouldRetry } from '../src/lib/query';
 import { trackSymbols } from '../src/lib/ws';
 
@@ -263,5 +264,19 @@ describe('Market Terminal EMA', () => {
     expect(e[3]).toBeCloseTo(3); // 4·0.5 + 2·0.5
     expect(e[4]).toBeCloseTo(4);
     expect(ema([10], 20)).toEqual([null]);
+  });
+});
+
+describe('menu', () => {
+  it('lists each tool once, in one group, with the merged tabs only under their new address', () => {
+    const items = NAV.flatMap((g) => g.items);
+    const dup = (xs: string[]) => xs.filter((x, i) => xs.indexOf(x) !== i);
+    expect(dup(items.map((i) => i.to))).toEqual([]);
+    expect(dup(items.map((i) => i.label))).toEqual([]);
+    expect(dup(NAV.map((g) => g.title))).toEqual([]);
+    // merged into F&O Scanners / Institutional Activity / F&O Market (the old addresses redirect)
+    for (const old of ['/unusual', '/fii-dii', '/participants', '/synopsis', '/oi/futures', '/oi/breadth', '/oi/trend', '/order-flow', '/mcx-chain']) expect(items.map((i) => i.to)).not.toContain(old);
+    expect(items.map((i) => i.to)).toEqual(expect.arrayContaining(['/scanners', '/institutions', '/fno-market', '/expected-range', '/terminal']));
+    expect(NAV.every((g) => g.items.length >= 3)).toBe(true);
   });
 });

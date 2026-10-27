@@ -11,33 +11,33 @@ export interface NavGroup {
 }
 
 /**
- * The menu, grouped by what the data is: live market overview → tick-by-tick flow → open interest →
- * institutional (official end-of-day) data → scanners → strategy → trading. Each tab shows
- * its own data; tabs that showed the same data were merged (old addresses redirect, see App.tsx).
+ * The menu, one group per kind of work, each tool in exactly one place:
+ *   Market Overview      — the whole market at a glance (indices, F&O universe, scans, heavyweights, institutions)
+ *   Option Chain & OI    — one underlying's option chain and its open-interest readings
+ *   Intraday Charts & Range — one underlying's price, flow and expected-move charts through the session
+ *   Strategy             — build, find, chart and replay option strategies
+ *   Paper Trading        — the paper account, saved strategies, alerts and algos
+ *   More                 — calculators, lessons, settings
+ * Tabs that showed the same kind of data were merged into one tab with views (old addresses redirect,
+ * see App.tsx): F&O Market (heat-map · futures build-up · breadth), F&O Scanners (pre-built scans ·
+ * unusual option activity), Institutional Activity (FII / DII · participant-wise OI).
  */
 export const NAV: NavGroup[] = [
   {
-    title: 'Market',
+    title: 'Market Overview',
     items: [
       { to: '/', label: 'Home', icon: '⌂', desc: 'Indices, MCX commodities, movers, build-up and flows at a glance' },
       { to: '/watchlist', label: 'Watchlist', icon: '☆', desc: 'Track underlyings, futures and option contracts' },
-      { to: '/terminal', label: 'Market Terminal', icon: '▣', desc: 'Price with EMA, total CE vs PE OI with build-up, PCR (OI & COI) and volume vs OI on one screen' },
-      { to: '/expected-range', label: 'Expected Range', icon: '↕', desc: 'Daily expected move (±1σ / ±2σ) of NIFTY, SENSEX, GOLD, SILVER, NATURAL GAS and CRUDE OIL from ATM IV, with its hit-rate' },
-      { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up — indices, stocks and MCX commodities (GOLD, CRUDEOIL …)' },
-      { to: '/nifty-top10', label: 'NIFTY Top 10 Desk', icon: '★', desc: 'The index heavyweights: futures, options and order flow side by side, with a transparent bias' },
       { to: '/fno-market', label: 'F&O Market', icon: '▦', desc: 'Every F&O future: heat-map, price vs OI build-up, sector breadth' },
+      { to: '/scanners', label: 'F&O Scanners', icon: '⌕', desc: 'Pre-built build-up, OI, price, IV, option and trend scans, and unusual option activity' },
+      { to: '/nifty-top10', label: 'NIFTY Top 10 Desk', icon: '★', desc: 'The index heavyweights: futures, options and order flow side by side, with a transparent bias' },
+      { to: '/institutions', label: 'Institutional Activity', icon: '₹', desc: 'FII / DII cash flows and participant-wise F&O positions (official, daily)' },
     ],
   },
   {
-    title: 'Order Flow & Trend',
+    title: 'Option Chain & OI',
     items: [
-      { to: '/order-book', label: 'Order Flow & Book', icon: '⇄', desc: 'Buyer vs seller initiated quantity per minute, cumulative delta, market depth' },
-      { to: '/orb', label: '15-min Range Breakout', icon: '⇥', desc: 'First 15-min candle high/low — broken = trending' },
-    ],
-  },
-  {
-    title: 'Open Interest',
-    items: [
+      { to: '/option-chain', label: 'Option Chain', icon: '⛓', desc: 'Live chain with OI, IV, Greeks and build-up — indices, stocks and MCX commodities (GOLD, CRUDEOIL …)' },
       { to: '/oi/strikes', label: 'OI Analysis', icon: '▮', desc: 'Strike-wise OI and change in OI' },
       { to: '/oi/multi-strike', label: 'Multi-Strike OI', icon: '≋', desc: 'Intraday OI of chosen strikes' },
       { to: '/oi/pcr', label: 'PCR & OI Trend', icon: '⚖', desc: 'Call vs put OI through the day, PCR and change-in-OI PCR, daily PCR' },
@@ -45,17 +45,13 @@ export const NAV: NavGroup[] = [
     ],
   },
   {
-    title: 'Institutions',
+    title: 'Intraday Charts & Range',
     items: [
-      { to: '/fii-dii', label: 'FII / DII', icon: '₹', desc: 'Institutional cash-market flows (official, daily)' },
-      { to: '/participants', label: 'Participant OI', icon: '👥', desc: 'Client, DII, FII and Pro F&O positions (official, daily)' },
-    ],
-  },
-  {
-    title: 'Scanners',
-    items: [
-      { to: '/scanners', label: 'F&O Scanners', icon: '⌕', desc: 'Build-up, OI, price, IV and option scans' },
-      { to: '/unusual', label: 'Unusual Options', icon: '⚡', desc: 'Abnormal volume, OI and IV activity' },
+      { to: '/terminal', label: 'Market Terminal', icon: '▣', desc: 'Price with EMA, total CE vs PE OI with build-up, PCR (OI & COI) and volume vs OI on one screen' },
+      { to: '/order-book', label: 'Order Flow & Book', icon: '⇄', desc: 'Buyer vs seller initiated quantity per minute, cumulative delta, market depth' },
+      { to: '/orb', label: '15-min Range Breakout', icon: '⇥', desc: 'First 15-min candle high/low — broken = trending' },
+      { to: '/expected-range', label: 'Expected Range', icon: '↕', desc: 'Daily and intraday expected move of NIFTY, SENSEX, GOLD, SILVER, NATURAL GAS and CRUDE OIL (ATM IV, straddle, India VIX), with hit-rates' },
+      { to: '/straddle', label: 'Straddle Chart', icon: '⋈', desc: 'ATM straddle / strangle premium intraday' },
     ],
   },
   {
@@ -64,13 +60,12 @@ export const NAV: NavGroup[] = [
       { to: '/builder', label: 'Strategy Builder', icon: '✚', desc: 'Payoff, Greeks, POP, margin and what-if' },
       { to: '/templates', label: 'Strategy Wizard', icon: '✦', desc: '49 ready-made strategies by market view' },
       { to: '/optimizer', label: 'Optimizer', icon: '⚙', desc: 'Best reward-to-risk strategies for your view' },
-      { to: '/straddle', label: 'Straddle Chart', icon: '⋈', desc: 'ATM straddle / strangle premium intraday' },
       { to: '/strategy-chart', label: 'Strategy Chart', icon: '📈', desc: 'Chart any multi-leg strategy like one instrument' },
       { to: '/recap', label: 'Trade Recap', icon: '⏪', desc: 'Replay the market from any past date & time' },
     ],
   },
   {
-    title: 'Trade',
+    title: 'Paper Trading',
     items: [
       { to: '/positions', label: 'Positions & Orders', icon: '💼', desc: 'Paper-trading account: orders, trades, funds' },
       { to: '/strategies', label: 'Strategy Manager', icon: '🗂', desc: 'Virtual strategies with live MTM & alerts' },
