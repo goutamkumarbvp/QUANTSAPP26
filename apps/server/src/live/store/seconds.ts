@@ -11,7 +11,7 @@
  * ignored on read and trimmed before the next append. After the day, each file is gzipped to .bin.gz
  * (about a fifth of the size). The store is capped by size (maxBytes) and age (retentionDays): the
  * oldest days are deleted first, never the current one. Writing pauses while the disk has less than
- * minFreeBytes free.
+ * minFreeBytes free, and prune() frees the oldest days while the disk has less than keepFreeBytes free.
  *
  * Row: u32 second of the IST day · u32 flags · i32 ltp · i32 bid · i32 ask (paise) · u32 bidQty ·
  *      u32 askQty · f64 cumulative session volume · f64 open interest.
@@ -54,16 +54,24 @@ export interface SecondRow {
 
 export interface SecondStoreOptions {
   dataDir: string;
+  /** Directory of the store itself (SECONDS_DIR, e.g. another drive); default <dataDir>/seconds. */
+  dir?: string;
   /** Size cap of the whole store (default 75 GB). */
   maxBytes?: number;
   /** Days kept (default 183, about six months). */
   retentionDays?: number;
   /** Writing pauses below this much free disk (default 2 GB) and resumes above 1.5× it. */
   minFreeBytes?: number;
+  /** prune() deletes the oldest days while the disk has less than this free (default 5 GB). */
+  keepFreeBytes?: number;
+  /** Free bytes of the store's disk (tests); default fs.statfsSync. */
+  freeBytes?: () => number | null;
   logger?: { warn(msg: string): void; info?(msg: string): void };
 }
 
 export interface SecondStoreUsage {
+  /** Folder of the store (DATA_DIR/seconds or SECONDS_DIR). */
+  dir: string;
   bytes: number;
   maxBytes: number;
   retentionDays: number;
@@ -163,6 +171,8 @@ export class SecondStore {
   readonly maxBytes: number;
   readonly retentionDays: number;
   private readonly minFree: number;
+  private readonly keepFree: number;
+  private readonly free: (() => number | null) | undefined;
   private readonly log: NonNullable<SecondStoreOptions['logger']>;
   /** Files appended to by this process (their length is checked once for a torn row). */
   private readonly checked = new Set<string>();
@@ -172,10 +182,12 @@ export class SecondStore {
   private compacting = false;
 
   constructor(opts: SecondStoreOptions) {
-    this.root = path.join(opts.dataDir, 'seconds');
+    this.root = opts.dir ? path.resolve(opts.dir) : path.join(opts.dataDir, 'seconds');
     this.maxBytes = opts.maxBytes ?? 75 * GB;
     this.retentionDays = opts.retentionDays ?? 183;
     this.minFree = opts.minFreeBytes ?? 2 * GB;
+    this.keepFree = opts.keepFreeBytes ?? 5 * GB;
+    this.free = opts.freeBytes;
     this.log = opts.logger ?? { warn: () => {} };
   }
 
@@ -387,7 +399,10 @@ export class SecondStore {
     return done;
   }
 
-  /** Delete the oldest dates beyond the age limit or while the store is over its size cap (never `today`). */
+  /**
+   * Delete the oldest dates beyond the age limit, while the store is over its size cap, or while its disk
+   * has less than keepFreeBytes free (so the store fits the disk it is on). Never `today`.
+   */
   prune(today: string): string[] {
     const removed: string[] = [];
     const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - this.retentionDays * DAY_MS).toISOString().slice(0, 10);
@@ -395,19 +410,21 @@ export class SecondStore {
     let total = dates.reduce((a, d) => a + (this.sizeOf(d) ?? 0), 0);
     for (const d of dates) {
       if (d >= today) break;
-      if (d >= cutoff && total <= this.maxBytes) break;
+      const free = this.freeBytes();
+      if (d >= cutoff && total <= this.maxBytes && (free === null || free >= this.keepFree)) break;
       total -= this.sizeOf(d) ?? 0;
       fs.rmSync(this.dayDir(d), { recursive: true, force: true });
       this.sizes.delete(d);
       for (const p of [...this.checked]) if (p.startsWith(this.dayDir(d))) this.checked.delete(p);
       removed.push(d);
     }
-    if (removed.length) this.log.info?.(`seconds: removed ${removed.length} old day(s) (${removed[0]}…${removed[removed.length - 1]}) to stay within ${(this.maxBytes / GB).toFixed(0)} GB / ${this.retentionDays} days`);
+    if (removed.length) this.log.info?.(`seconds: removed ${removed.length} old day(s) (${removed[0]}…${removed[removed.length - 1]}) to stay within ${(this.maxBytes / GB).toFixed(0)} GB / ${this.retentionDays} days / ${(this.keepFree / GB).toFixed(0)} GB free disk`);
     return removed;
   }
 
   /** Free disk space of the store (null when unknown). */
   freeBytes(): number | null {
+    if (this.free) return this.free();
     try {
       fs.mkdirSync(this.root, { recursive: true });
       const s = (fs as unknown as { statfsSync?: (p: string) => { bavail: number; bsize: number } }).statfsSync?.(this.root);
@@ -433,6 +450,7 @@ export class SecondStore {
   usage(): SecondStoreUsage {
     const dates = this.dates();
     return {
+      dir: this.root,
       bytes: dates.reduce((a, d) => a + (this.sizeOf(d) ?? 0), 0),
       maxBytes: this.maxBytes,
       retentionDays: this.retentionDays,

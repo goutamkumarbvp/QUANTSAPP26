@@ -65,7 +65,7 @@ export interface LiveProviderConfig {
   /** Recorded sessions kept on disk; unset = keep all. */
   intradayRetentionDays?: number;
   /** Record one-second snapshots (SecondStore) with these limits; unset = not recorded. */
-  seconds?: { maxGb: number; retentionDays: number };
+  seconds?: { maxGb: number; retentionDays: number; /** SECONDS_DIR (default DATA_DIR/seconds). */ dir?: string };
   /**
    * The app's stocks (NIFTY_TOP10: the NIFTY top 10 by market cap): the only stocks listed, and their nearest
    * option chains are streamed after the index chains; unset = DEFAULT_TOP10.
@@ -458,7 +458,7 @@ export class LiveProvider implements MarketDataProvider {
     });
 
     if (config.seconds) {
-      this.secondStore = new SecondStore({ dataDir: config.dataDir, maxBytes: config.seconds.maxGb * 1024 ** 3, retentionDays: config.seconds.retentionDays, logger: this.log });
+      this.secondStore = new SecondStore({ dataDir: config.dataDir, ...(config.seconds.dir ? { dir: config.seconds.dir } : {}), maxBytes: config.seconds.maxGb * 1024 ** 3, retentionDays: config.seconds.retentionDays, logger: this.log });
       this.secondRecorder = new SecondRecorder({
         live: this.live,
         store: this.secondStore,
@@ -524,7 +524,7 @@ export class LiveProvider implements MarketDataProvider {
       if (this.secondRecorder) {
         this.secondRecorder.start();
         this.secondsMaintenance();
-        this.intervals.push(this.timers.setInterval(() => this.secondsMaintenance(), 60 * MINUTE));
+        this.intervals.push(this.timers.setInterval(() => this.secondsMaintenance(), 10 * MINUTE));
       }
       this.sessionTick();
       this.intervals.push(this.timers.setInterval(() => this.sessionTick(), 30 * SECOND));
@@ -536,13 +536,14 @@ export class LiveProvider implements MarketDataProvider {
     this.boot = this.bootKotak().catch((e) => this.log.warn(`live: boot failed: ${errMsg(e)}`));
   }
 
-  /** One-second store upkeep: disk check, gzip of finished days, then the size / age limits. */
+  /** One-second store upkeep (every 10 min): free space by deleting the oldest days, disk check, gzip of finished days, size / age limits. */
   private secondsMaintenance(): void {
     const store = this.secondStore;
     if (!store || this.stopped) return;
     try {
-      store.checkDisk();
       const today = this.calendar.session(this.now()).date;
+      store.prune(today);
+      store.checkDisk();
       store
         .compact(today)
         .then(() => {

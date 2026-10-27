@@ -170,11 +170,11 @@ export function SecondsCard() {
                 <div className={cx('h-full', s.bytes / s.maxBytes > 0.9 ? 'bg-warn' : 'bg-accent')} style={{ width: `${Math.min(100, (s.bytes / s.maxBytes) * 100)}%` }} />
               </div>
               <div className="text-xs text-muted">
-                Free disk: {s.freeBytes === null ? 'not reported by this system' : gb(s.freeBytes)}. Recorded from the live feed while the market is open (every streamed instrument, one row per second it ticked); finished days are compressed.
+                Folder <span className="font-mono text-ink">{s.dir}</span> · free disk there: {s.freeBytes === null ? 'not reported by this system' : gb(s.freeBytes)} (the oldest days are removed to keep 5 GB free). Recorded from the live feed while the market is open (every streamed instrument, one row per second it ticked); finished days are compressed.
               </div>
               {s.paused && <div className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-xs text-warn" role="status">{s.paused}</div>}
               {s.freeBytes !== null && s.freeBytes < s.maxBytes - s.bytes && !s.paused && (
-                <div className="text-xs text-warn">The disk has less free space ({gb(s.freeBytes)}) than the rest of the {gb(s.maxBytes)} limit: recording pauses when under 2 GB are free.</div>
+                <div className="text-xs text-warn">The disk has less free space ({gb(s.freeBytes)}) than the rest of the {gb(s.maxBytes)} limit: the store will keep fewer days, deleting the oldest to keep 5 GB free (or set SECONDS_DIR to a bigger drive).</div>
               )}
             </div>
           )

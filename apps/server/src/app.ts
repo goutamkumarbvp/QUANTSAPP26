@@ -750,7 +750,7 @@ export async function buildApp(
 
   app.get('/api/seconds/status', async (): Promise<SecondsStatus> => {
     const u = md.seconds?.usage();
-    return u ? { enabled: true, ...u } : { enabled: false, bytes: 0, maxBytes: 0, retentionDays: 0, days: 0, oldest: null, newest: null, freeBytes: null, paused: null };
+    return u ? { enabled: true, ...u } : { enabled: false, dir: '', bytes: 0, maxBytes: 0, retentionDays: 0, days: 0, oldest: null, newest: null, freeBytes: null, paused: null };
   });
 
   /* ============================== algo strategies ============================== */

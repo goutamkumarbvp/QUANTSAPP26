@@ -200,3 +200,11 @@ The sidebar lists only the six kinds of work — Market Overview (10 pages), Opt
 Strategy (5), Paper Trading (4), More (3) — instead of 13 entries under six headings. All pages of an entry are tabs
 across the top of each of its pages, in labelled sections (e.g. Home · F&O Market · Institutions). No page or address
 changed. Tests: the menu (six entries, every page once, `locate()` with the entry) and an e2e walk.
+
+## C-53 — One-second data on another drive; the store fits its disk
+
+- `SECONDS_DIR` puts the one-second store in its own folder (e.g. `D:/Q26-seconds`); everything else stays in `DATA_DIR`.
+- `SecondStore.prune` also deletes the oldest days (never today) while the store's drive has less than 5 GB free, so a
+  drive smaller than `SECONDS_MAX_GB` keeps recording with fewer days instead of pausing; the provider runs the upkeep
+  every 10 minutes (was hourly). The pause below 2 GB free remains the last guard.
+- `GET /api/seconds/status` and the Settings card show the store's folder and the free space of its drive.

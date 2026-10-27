@@ -1429,6 +1429,8 @@ export interface Top10Response extends DataGaps {
 export interface SecondsStatus {
   /** False when one-second recording is off (SECONDS_RECORD=false). */
   enabled: boolean;
+  /** Folder the data goes to (DATA_DIR/seconds, or SECONDS_DIR); '' when off. */
+  dir: string;
   bytes: number;
   maxBytes: number;
   retentionDays: number;

@@ -59,6 +59,8 @@ export interface AppConfig {
   secondsMaxGb: number;
   /** SECONDS_RETENTION_DAYS (default 183, about six months): days of one-second data kept. */
   secondsRetentionDays: number;
+  /** SECONDS_DIR: where the one-second data goes (e.g. D:/Q26-seconds on another drive); default DATA_DIR/seconds. */
+  secondsDir?: string;
 }
 
 /**
@@ -132,6 +134,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     secondsRecord: process.env.SECONDS_RECORD !== 'false',
     secondsMaxGb: Math.max(1, num('SECONDS_MAX_GB', 75)),
     secondsRetentionDays: Math.max(1, Math.floor(num('SECONDS_RETENTION_DAYS', 183))),
+    ...(process.env.SECONDS_DIR?.trim() ? { secondsDir: process.env.SECONDS_DIR.trim() } : {}),
   };
   return { ...base, ...overrides };
 }

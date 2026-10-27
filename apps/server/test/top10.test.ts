@@ -54,3 +54,18 @@ describe('GET /api/top10', () => {
     expect(res.json()).toMatchObject({ code: 'NO_LIVE_DATA' });
   });
 });
+
+describe('one-second data settings', () => {
+  it('SECONDS_RECORD / SECONDS_MAX_GB / SECONDS_RETENTION_DAYS / SECONDS_DIR from the environment', () => {
+    const keep = { ...process.env };
+    try {
+      for (const k of ['SECONDS_RECORD', 'SECONDS_MAX_GB', 'SECONDS_RETENTION_DAYS', 'SECONDS_DIR']) delete process.env[k];
+      expect(loadConfig()).toMatchObject({ secondsRecord: true, secondsMaxGb: 75, secondsRetentionDays: 183 });
+      expect(loadConfig().secondsDir).toBeUndefined();
+      Object.assign(process.env, { SECONDS_RECORD: 'false', SECONDS_MAX_GB: '60', SECONDS_RETENTION_DAYS: '120', SECONDS_DIR: ' D:/Q26-seconds ' });
+      expect(loadConfig()).toMatchObject({ secondsRecord: false, secondsMaxGb: 60, secondsRetentionDays: 120, secondsDir: 'D:/Q26-seconds' });
+    } finally {
+      process.env = keep;
+    }
+  });
+});

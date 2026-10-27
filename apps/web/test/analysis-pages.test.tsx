@@ -637,20 +637,21 @@ describe('Expected Range', () => {
 
 describe('1-second data card', () => {
   const GB = 1024 ** 3;
-  const base: SecondsStatus = { enabled: true, bytes: 12.5 * GB, maxBytes: 75 * GB, retentionDays: 183, days: 21, oldest: '2026-09-14', newest: '2026-10-12', freeBytes: 300 * GB, paused: null };
+  const base: SecondsStatus = { enabled: true, dir: 'D:\\Q26-seconds', bytes: 12.5 * GB, maxBytes: 75 * GB, retentionDays: 183, days: 21, oldest: '2026-09-14', newest: '2026-10-12', freeBytes: 300 * GB, paused: null };
   it('space used against the cap, the days held and free disk', () => {
     const out = decode(render(<SecondsCard />, [[['seconds-status'], base]]));
     expect(out).toContain('12.5 GB');
     expect(out).toContain('of 75.0 GB · 21 days');
     expect(out).toContain('kept 183 days or 75.0 GB, oldest removed first');
-    expect(out).toContain('Free disk: 300.0 GB');
+    expect(out).toContain('D:\\Q26-seconds');
+    expect(out).toContain('free disk there: 300.0 GB');
     expect(out).not.toContain('less free space');
   });
   it('a nearly full disk: paused with the reason, and the free space warning', () => {
     const out = decode(render(<SecondsCard />, [[['seconds-status'], { ...base, freeBytes: 1.5 * GB, paused: 'Disk almost full (1.5 GB free, 2 GB needed): 1-second recording paused' }]]));
     expect(out).toContain('1-second recording paused');
     const low = decode(render(<SecondsCard />, [[['seconds-status'], { ...base, freeBytes: 20 * GB }]]));
-    expect(low).toContain('less free space (20.0 GB) than the rest of the 75.0 GB limit');
+    expect(low).toContain('less free space (20.0 GB) than the rest of the 75.0 GB limit: the store will keep fewer days');
   });
   it('recording off', () => {
     expect(decode(render(<SecondsCard />, [[['seconds-status'], { ...base, enabled: false }]]))).toContain('One-second recording is off (SECONDS_RECORD=false in .env)');

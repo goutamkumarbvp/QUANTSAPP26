@@ -95,6 +95,39 @@ describe('SecondStore', () => {
     expect(s.read(CE, DAY)).toHaveLength(10);
   });
 
+  it('SECONDS_DIR: the store lives in its own folder (e.g. another drive)', () => {
+    const data = tmp();
+    const other = tmp();
+    const s = new SecondStore({ dataDir: data, dir: path.join(other, 'q26-seconds') });
+    s.append(DAY, CE, [{ ts: at(DAY, 9, 15, 1), ltp: 100, traded: true }]);
+    expect(fs.existsSync(path.join(other, 'q26-seconds', DAY, 'NIFTY', 'CE_2026-10-13_25000.bin'))).toBe(true);
+    expect(fs.existsSync(path.join(data, 'seconds'))).toBe(false);
+    expect(s.usage().dir).toBe(path.join(other, 'q26-seconds'));
+  });
+
+  it('deletes the oldest days while the disk has less than keepFreeBytes free, never today', () => {
+    let free = 3 * 1024 ** 3;
+    const s = new SecondStore({ dataDir: tmp(), keepFreeBytes: 5 * 1024 ** 3, freeBytes: () => free });
+    for (const d of ['2026-10-07', '2026-10-08', '2026-10-09', DAY]) s.append(d, CE, [{ ts: at(d, 9, 15, 1), ltp: 100, traded: true }]);
+    // each deletion frees 1 GB in this test
+    const real = fs.rmSync;
+    const spy = (p: fs.PathLike, o?: fs.RmOptions) => {
+      real(p, o);
+      free += 1024 ** 3;
+    };
+    (fs as unknown as { rmSync: typeof spy }).rmSync = spy;
+    try {
+      expect(s.prune(DAY)).toEqual(['2026-10-07', '2026-10-08']);
+    } finally {
+      (fs as unknown as { rmSync: typeof real }).rmSync = real;
+    }
+    expect(s.dates()).toEqual(['2026-10-09', DAY]);
+    // a disk that stays full never loses today's data
+    free = 0;
+    expect(s.prune(DAY)).toEqual(['2026-10-09']);
+    expect(s.dates()).toEqual([DAY]);
+  });
+
   it('reads coverage spans back', () => {
     const s = new SecondStore({ dataDir: tmp() });
     s.setCoverage(DAY, [[33_300, 33_400], [33_401, 33_500], [40_000, 40_010]]);

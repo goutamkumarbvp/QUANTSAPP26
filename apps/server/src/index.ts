@@ -59,7 +59,7 @@ const provider = new LiveProvider(
     eodBackfillDays: config.eodBackfillDays,
     sfeedTokenBudget: config.sfeedTokenBudget,
     focusStocks: config.focusStocks,
-    ...(config.secondsRecord ? { seconds: { maxGb: config.secondsMaxGb, retentionDays: config.secondsRetentionDays } } : {}),
+    ...(config.secondsRecord ? { seconds: { maxGb: config.secondsMaxGb, retentionDays: config.secondsRetentionDays, ...(config.secondsDir ? { dir: config.secondsDir } : {}) } } : {}),
   },
   {
     logger: {
