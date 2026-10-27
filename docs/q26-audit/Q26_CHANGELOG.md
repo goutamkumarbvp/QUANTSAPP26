@@ -129,3 +129,17 @@ Paper Trading · More; 29 → 26 menu entries):
   Chain & OI.
 Kept separate on purpose: Market Terminal vs PCR & OI Trend (summary vs expiry/date-selectable detail with daily PCR),
 Straddle chart vs Strategy chart (rolling ATM vs your own legs). A unit test fails if any menu entry, label or group repeats.
+
+## C-48 — Sidebar entries with sub-tabs (26 → 13 entries, every page kept)
+
+The sidebar now lists 13 entries in the same 6 groups (at most 3 per group); each entry's related pages appear as tabs
+across the top of its pages (`SubTabs` in Layout; `locate()` in lib/nav.ts maps an address, including `?view=` and
+`/learn/<lesson>`, to its entry and tab). No page or feature was removed and every address is unchanged:
+Home (Overview · Watchlist), F&O Market (Heat-map · Futures build-up · Sector breadth · Scanners · Unusual options ·
+NIFTY Top 10), Institutional Activity (FII / DII · Participant OI), Option Chain, Open Interest (OI analysis · Multi-strike
+· PCR & OI trend · Max pain), Market Terminal (Terminal · Order Flow & Book · 15-min Range Breakout), Expected Range
+(Expected Range · Straddle Chart), Strategy Builder (Builder · Wizard · Optimizer), Strategy Analysis (Strategy Chart ·
+Trade Recap), Portfolio (Positions & Orders · Strategy Manager · Alerts), Algo Strategies, Tools (Calculators · Learn),
+Settings. The view switchers inside F&O Market, F&O Scanners and Institutional Activity were replaced by these tabs.
+The mobile Tools page lists every entry with its pages. Tests: every page is in the menu exactly once; `locate()`;
+an e2e walk through the sidebar and sub-tabs.

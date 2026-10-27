@@ -153,17 +153,20 @@ API: `GET /api/ops` (status, public like `/api/health`), `POST /api/ops/login/re
   start and the date of each official file loaded. A banner under the header explains blanks while the feed is
   not live.
 
-## Features (26 menu entries in 6 groups, each tool in one place)
+## Features (13 menu entries in 6 groups; 32 pages as sub-tabs, each in one place)
 
 | Area | Tabs |
 |---|---|
 | **MCX commodities** | GOLD, SILVER, CRUDEOIL, NATURALGAS, COPPER … are ordinary symbols of **every** tab (symbol picker group *Commodities (MCX)*, ticker, Home card), exactly like NIFTY/SENSEX: option chain, OI, PCR, max pain, IV/skew/surface, order flow & book, opening range, strategy builder, paper trading. MCX runs on its own calendar (09:00–23:30, 23:55 in US winter), its "spot" is the near-month future, and its options are valued with Black-76 on the future they settle into. Previous-session values come from MCX sessions this app recorded from live ticks (no official MCX files are loaded). Units per lot are checked against MCX contract specifications. |
-| Market Overview | Home dashboard, Watchlist, F&O Market (heat-map · futures build-up · sector breadth), **F&O Scanners** (23 pre-built scans incl. 3 opening-range scans · unusual option activity), **NIFTY Top 10 Desk** (the heavyweights' spot, future, option chain and futures order flow side by side, with a transparent four-reading bias), **Institutional Activity** (FII/DII cash flows · participant-wise OI, official end-of-day data) |
-| Option Chain & OI | Option Chain (indices, stocks, MCX commodities), OI analysis, Multi-strike OI, PCR & OI trend (PCR / total OI, change-in-OI PCR, daily PCR), Max pain |
-| Intraday Charts & Range | **Market Terminal** (price with EMA 20/50, total CE vs PE OI with build-up, PCR of OI and COI, volume vs OI — one screen), Order Flow & Book (Order & Trade chart, session split, 5-level depth, minute table, past sessions), Opening range breakout, **Expected Range** (daily ±1σ / ±2σ from ATM IV, straddle-implied move, intraday 15 / 30 / 60-minute and rest-of-day ranges, India VIX today / week / month for NIFTY — with back-checks; NIFTY, SENSEX, GOLD, SILVER, NATURALGAS, CRUDEOIL), Straddle chart |
-| Strategy | Strategy builder, Strategy wizard (49 templates), Optimizer, Strategy chart, Trade recap |
-| Paper Trading | Positions & orders (paper broker), Strategy manager (virtual strategies), Alerts, Algo Strategies (Strategy 2 · ₹20 and Strategy 3 · ₹50 premium ladders) |
-| More | Calculators (BS price/Greeks, IV, charges), Learn, Settings |
+| Market Overview | **Home** (Overview · Watchlist) · **F&O Market** (Heat-map · Futures build-up · Sector breadth · Scanners: 23 pre-built scans incl. 3 opening-range scans · Unusual options · NIFTY Top 10 desk) · **Institutional Activity** (FII / DII · Participant OI, official end-of-day data) |
+| Option Chain & OI | **Option Chain** (indices, stocks, MCX commodities) · **Open Interest** (OI analysis · Multi-strike OI · PCR & OI trend · Max pain) |
+| Intraday Charts & Range | **Market Terminal** (Terminal: price with EMA 20/50, total CE vs PE OI with build-up, PCR of OI and COI, volume vs OI · Order Flow & Book · 15-min Range Breakout) · **Expected Range** (daily ±1σ / ±2σ from ATM IV, straddle-implied move, intraday 15 / 30 / 60-minute and rest-of-day ranges, India VIX today / week / month — with back-checks · Straddle chart) |
+| Strategy | **Strategy Builder** (Builder · Wizard, 49 templates · Optimizer) · **Strategy Analysis** (Strategy chart · Trade recap) |
+| Paper Trading | **Portfolio** (Positions & orders · Strategy manager · Alerts) · **Algo Strategies** (Strategy 2 · ₹20 and Strategy 3 · ₹50 premium ladders) |
+| More | **Tools** (Calculators: BS price/Greeks, IV, charges · Learn) · **Settings** |
+
+The sidebar lists the entries; an entry's pages are tabs across the top of each of its pages. Every page keeps its own
+address, so links and bookmarks keep working.
 
 Old addresses of merged tabs (`/order-flow`, `/oi/trend`, `/synopsis`, `/oi/futures`, `/oi/breadth`, `/unusual`, `/fii-dii`, `/participants`) redirect to
 the tab that now holds their data.

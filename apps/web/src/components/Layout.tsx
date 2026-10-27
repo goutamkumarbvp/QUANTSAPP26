@@ -6,7 +6,7 @@ import { api } from '../lib/api';
 import { useFeed } from '../lib/feed';
 import { formatAge, formatAsOf, formatDateTime, formatIndian, formatPct, formatSessionTime, isNum } from '../lib/format';
 import { useMeta } from '../lib/hooks';
-import { MOBILE_TABS, NAV } from '../lib/nav';
+import { locate, MOBILE_TABS, NAV } from '../lib/nav';
 import { useApp, useTicks } from '../lib/store';
 import { FeedDetails, feedTone } from './FeedStatus';
 import { cx, Dash } from './ui';
@@ -196,25 +196,59 @@ function Toasts() {
 }
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+  const loc = useLocation();
+  const here = locate(loc.pathname, loc.search);
   return (
     <nav className="flex flex-col gap-4 px-2 py-3 text-sm" aria-label="Main">
       {NAV.map((g) => (
         <div key={g.title}>
           <div className="px-2 pb-1 text-2xs font-semibold uppercase tracking-wider text-muted">{g.title}</div>
-          {g.items.map((it) => (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              end={it.to === '/'}
-              onClick={onNavigate}
-              className={({ isActive }) => cx('flex items-center gap-2 rounded-md px-2 py-1.5', isActive ? 'bg-accent/15 font-semibold text-accent' : 'text-ink/85 hover:bg-panel2')}
-            >
-              <span className="w-5 text-center opacity-80">{it.icon}</span>
-              {it.label}
-            </NavLink>
-          ))}
+          {g.items.map((it) => {
+            const active = here?.item === it;
+            return (
+              <Link
+                key={it.label}
+                to={it.tabs[0].to}
+                onClick={onNavigate}
+                title={it.desc}
+                aria-current={active ? 'page' : undefined}
+                className={cx('flex items-center gap-2 rounded-md px-2 py-1.5', active ? 'bg-accent/15 font-semibold text-accent' : 'text-ink/85 hover:bg-panel2')}
+              >
+                <span className="w-5 text-center opacity-80">{it.icon}</span>
+                <span className="min-w-0 flex-1 truncate">{it.label}</span>
+                {it.tabs.length > 1 && <span className="text-2xs text-muted">{it.tabs.length}</span>}
+              </Link>
+            );
+          })}
         </div>
       ))}
+    </nav>
+  );
+}
+
+/** The current menu entry's pages as tabs above the page (entries with one page show none). */
+function SubTabs() {
+  const loc = useLocation();
+  const here = locate(loc.pathname, loc.search);
+  if (!here || here.item.tabs.length < 2) return null;
+  return (
+    <nav aria-label={`${here.item.label} pages`} className="-mx-3 mb-3 overflow-x-auto border-b border-line px-3 sm:-mx-4 sm:px-4">
+      <div className="flex min-w-max gap-1">
+        {here.item.tabs.map((t) => {
+          const active = t === here.tab;
+          return (
+            <Link
+              key={t.to}
+              to={t.to}
+              title={t.desc}
+              aria-current={active ? 'page' : undefined}
+              className={cx('-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm', active ? 'border-accent font-semibold text-accent' : 'border-transparent text-muted hover:text-ink')}
+            >
+              {t.label}
+            </Link>
+          );
+        })}
+      </div>
     </nav>
   );
 }
@@ -281,7 +315,10 @@ export function Layout({ children }: { children: ReactNode }) {
         <div className="border-b border-line bg-panel2/60 px-3 py-1 text-center text-2xs text-muted">
           Live Kotak Neo data and official NSE/BSE files — a value the sources do not provide is shown as — with the reason. Paper trading only; not investment advice.
         </div>
-        <main className="min-w-0 flex-1 px-3 pb-24 pt-3 sm:px-4 lg:pb-6">{children}</main>
+        <main className="min-w-0 flex-1 px-3 pb-24 pt-3 sm:px-4 lg:pb-6">
+          <SubTabs />
+          {children}
+        </main>
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-line bg-panel/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden" aria-label="Tabs">

@@ -186,6 +186,26 @@ test('expected range: ±1σ / ±2σ of NIFTY and the MCX commodities from live A
   await clean(page, watch);
 });
 
+test('menu: few sidebar entries; an entry opens its first page and its sub-tabs switch between the related pages', async ({ page }) => {
+  const watch = watchErrors(page);
+  await open(page, '/', /Market Overview/);
+  const side = page.getByRole('navigation', { name: 'Main' });
+  await expect(side.getByRole('link')).toHaveCount(13);
+  await side.getByRole('link', { name: /F&O Market/ }).click();
+  await expect(page).toHaveURL(/\/fno-market\?view=heatmap/);
+  const tabs = page.getByRole('navigation', { name: 'F&O Market pages' });
+  await expect(tabs.getByRole('link')).toHaveCount(6);
+  await tabs.getByRole('link', { name: 'Unusual options' }).click();
+  await expect(page).toHaveURL(/\/scanners\?view=unusual/);
+  await expect(page.getByRole('heading', { name: 'Unusual Option Activity' })).toBeVisible({ timeout: 20_000 });
+  await expect(tabs.getByRole('link', { name: 'Unusual options' })).toHaveAttribute('aria-current', 'page');
+  await side.getByRole('link', { name: /Market Terminal/ }).click();
+  await page.getByRole('navigation', { name: 'Market Terminal pages' }).getByRole('link', { name: 'Order Flow & Book' }).click();
+  await expect(page).toHaveURL(/\/order-book$/);
+  await expect(side.getByRole('link', { name: /Market Terminal/ })).toHaveAttribute('aria-current', 'page');
+  await clean(page, watch);
+});
+
 test('paper market order fills at the live ask and shows in positions', async ({ page }, info) => {
   const watch = watchErrors(page);
   await open(page, '/positions', /Positions & Orders/);

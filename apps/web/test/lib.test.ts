@@ -4,7 +4,7 @@ import { ApiError, api, errorText, isClientError, isNoLiveData, RequestTimeoutEr
 import { feedView, STALE_TICK_MS } from '../src/lib/feed';
 import * as fmt from '../src/lib/format';
 import { adaptivePoll, NO_LIVE_POLL_MS } from '../src/lib/hooks';
-import { NAV } from '../src/lib/nav';
+import { locate, NAV, NAV_PAGES } from '../src/lib/nav';
 import { shouldRetry } from '../src/lib/query';
 import { trackSymbols } from '../src/lib/ws';
 
@@ -268,15 +268,34 @@ describe('Market Terminal EMA', () => {
 });
 
 describe('menu', () => {
-  it('lists each tool once, in one group, with the merged tabs only under their new address', () => {
-    const items = NAV.flatMap((g) => g.items);
+  it('keeps every page, each once, under a few sidebar entries per group', () => {
     const dup = (xs: string[]) => xs.filter((x, i) => xs.indexOf(x) !== i);
-    expect(dup(items.map((i) => i.to))).toEqual([]);
-    expect(dup(items.map((i) => i.label))).toEqual([]);
+    expect(dup(NAV_PAGES.map((t) => t.to))).toEqual([]);
+    expect(dup(NAV.flatMap((g) => g.items.map((i) => i.label)))).toEqual([]);
     expect(dup(NAV.map((g) => g.title))).toEqual([]);
-    // merged into F&O Scanners / Institutional Activity / F&O Market (the old addresses redirect)
-    for (const old of ['/unusual', '/fii-dii', '/participants', '/synopsis', '/oi/futures', '/oi/breadth', '/oi/trend', '/order-flow', '/mcx-chain']) expect(items.map((i) => i.to)).not.toContain(old);
-    expect(items.map((i) => i.to)).toEqual(expect.arrayContaining(['/scanners', '/institutions', '/fno-market', '/expected-range', '/terminal']));
-    expect(NAV.every((g) => g.items.length >= 3)).toBe(true);
+    // every page of the app is reachable from the menu (no feature dropped)
+    const pages = ['/', '/watchlist', '/fno-market?view=heatmap', '/fno-market?view=futures', '/fno-market?view=breadth', '/scanners', '/scanners?view=unusual', '/nifty-top10', '/institutions?view=fii-dii', '/institutions?view=participants', '/option-chain', '/oi/strikes', '/oi/multi-strike', '/oi/pcr', '/oi/max-pain', '/terminal', '/order-book', '/orb', '/expected-range', '/straddle', '/builder', '/templates', '/optimizer', '/strategy-chart', '/recap', '/positions', '/strategies', '/alerts', '/algo', '/calculators', '/learn', '/settings'];
+    expect([...NAV_PAGES.map((t) => t.to)].sort()).toEqual([...pages].sort());
+    // few entries per group, 13 in all
+    expect(NAV.every((g) => g.items.length <= 3)).toBe(true);
+    expect(NAV.flatMap((g) => g.items)).toHaveLength(13);
+  });
+
+  it('locates the entry and sub-tab of an address, views and lessons included', () => {
+    const at = (url: string) => {
+      const [p, q = ''] = url.split('?');
+      const r = locate(p, q ? `?${q}` : '');
+      return r && [r.item.label, r.tab.label];
+    };
+    expect(at('/')).toEqual(['Home', 'Overview']);
+    expect(at('/fno-market')).toEqual(['F&O Market', 'Heat-map']);
+    expect(at('/fno-market?view=breadth')).toEqual(['F&O Market', 'Sector breadth']);
+    expect(at('/scanners?id=oi-gainers')).toEqual(['F&O Market', 'Scanners']);
+    expect(at('/scanners?view=unusual')).toEqual(['F&O Market', 'Unusual options']);
+    expect(at('/institutions')).toEqual(['Institutional Activity', 'FII / DII']);
+    expect(at('/orb')).toEqual(['Market Terminal', '15-min Range Breakout']);
+    expect(at('/straddle')).toEqual(['Expected Range', 'Straddle Chart']);
+    expect(at('/learn/implied-volatility')).toEqual(['Tools', 'Learn']);
+    expect(at('/tools')).toBeNull();
   });
 });
