@@ -159,7 +159,7 @@ export default function Top10() {
 
   return (
     <div className="space-y-3">
-      <PageHeader title="NIFTY Top 10 — F&O Desk" subtitle="The index heavyweights side by side: spot, near-month future, nearest option chain and futures order flow, with a transparent bias. Live ticks; click a stock for its readings." />
+      <PageHeader title="NIFTY Top 10 — F&O Desk" subtitle="The NIFTY top 10 by market cap side by side: spot, near-month future, nearest option chain and futures order flow, with a transparent bias. Live ticks; click a stock for its readings." />
       <Loadable q={q} hint="Needs the Kotak login: the heavyweights' futures and option chains are streamed tick by tick.">
         {(d) => {
           const sel = d.rows.find((r) => r.symbol === open) ?? null;

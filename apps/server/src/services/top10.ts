@@ -151,7 +151,7 @@ export async function buildTop10(md: MarketDataProvider, analytics: Analytics, t
   };
   return {
     ts,
-    listSource: 'NIFTY_TOP10 in .env (default: the NIFTY heavyweights). Index weights are not in any live feed, so the list is configuration; every figure below is live.',
+    listSource: 'NIFTY_TOP10 in .env (default: the ten largest NIFTY 50 companies by market cap — the app’s only stocks). Market caps are not in any live feed, so the list is configuration; every figure below is live.',
     rows,
     basket,
     ...gaps.out(),
