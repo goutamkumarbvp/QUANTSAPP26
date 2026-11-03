@@ -110,12 +110,11 @@ describe('algo catalogue, defaults and presets', () => {
     const { p, algos } = setupLive();
     const c: AlgoCatalog = algos.catalog();
     expect(c.algos.map((a) => a.id)).toContain('premium-ladder');
-    expect(c.presets.map((x) => x.id)).toEqual(['s1-ladder-40', 'strategy-2-rs20', 's3-fixed-40', 's4-fixed-20', 's5-atm-straddle-20', 's6-maxpain-straddle-25', 's7-sensex-top-oi', 'strategy-3-rs50']);
+    expect(c.presets.map((x) => x.id)).toEqual(['s1-ladder-40', 's2-ladder-20', 's3-fixed-40', 's4-fixed-20', 's5-atm-straddle-20', 's6-maxpain-straddle-25', 's7-sensex-top-oi']);
     expect(c.presets[1].params).toMatchObject({ symbol: 'NIFTY', startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', mode: 'ladder', stopLossPerLot: 0, allowAtm: true });
     expect(c.presets[0].params).toMatchObject({ startPremium: 40, mode: 'ladder', stopLossPerLot: 3000 });
     expect(c.presets[2].params).toMatchObject({ startPremium: 40, mode: 'fixed', stopLossPerLot: 3000 });
     expect(c.presets[3].params).toMatchObject({ startPremium: 20, mode: 'fixed', stopLossPerLot: 0 });
-    expect(c.presets[7].params).toMatchObject({ startPremium: 50, allowAtm: false });
     expect(c.symbols).toEqual([
       { symbol: 'NIFTY', lotSize: 75, strikeStep: 50, kind: 'index' },
       { symbol: 'BANKNIFTY', lotSize: 35, strikeStep: 100, kind: 'index' },
@@ -136,13 +135,13 @@ describe('algo catalogue, defaults and presets', () => {
   it('merges a preset with the request: preset values fill blanks, the preset name stays only while unchanged', async () => {
     const { p, book, algos } = setupLive();
     quoteChain(p, W(book), 25000);
-    const preset = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { lots: 1 } });
-    expect(preset).toMatchObject({ name: 'Ladder · Starting premium ₹50 (earlier Strategy 3)', presetId: 'strategy-3-rs50', status: 'running' });
-    expect(preset.params).toMatchObject({ ...ALGO_PRESETS.find((x) => x.id === 'strategy-3-rs50')!.params });
-    const blank = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: '' } });
-    expect(blank.params.startPremium).toBe(50);
-    expect(blank.presetId).toBe('strategy-3-rs50');
-    const edited = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: 30 } });
+    const preset = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { lots: 1 } });
+    expect(preset).toMatchObject({ name: 'S1 · NIFTY OTM premium ladder 40–60–90', presetId: 's1-ladder-40', status: 'running' });
+    expect(preset.params).toMatchObject({ ...ALGO_PRESETS.find((x) => x.id === 's1-ladder-40')!.params });
+    const blank = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { startPremium: '' } });
+    expect(blank.params.startPremium).toBe(40);
+    expect(blank.presetId).toBe('s1-ladder-40');
+    const edited = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { startPremium: 30 } });
     expect(edited.params.startPremium).toBe(30);
     expect(edited.name).toBe('Premium ladder · ₹30–45');
     expect(edited.presetId).toBeUndefined();
@@ -183,7 +182,7 @@ async function deployAndEnter() {
   const { p, book, algos } = ctx;
   const D = book.date;
   quoteChain(p, W(book), 25000);
-  const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+  const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
   p.setNow(at(D, '09:20', 1));
   quoteChain(p, W(book), 25000);
   await algos.tick();
@@ -195,7 +194,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const { p, book, algos, broker } = setupLive('08:50');
     const D = book.date;
     // Pre-open: deployed, but nothing happens before the session opens.
-    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
     expect(run).toMatchObject({ status: 'running', name: 'S2 · NIFTY OTM premium ladder 20–30–45', today: null });
 
     p.setNow(at(D, '09:16'));
@@ -313,7 +312,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const { p, book, algos, broker } = setupLive('09:16');
     const D = book.date;
     quoteChain(p, W(book), 25000);
-    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
     // Puts are quoted, but none has traded in this session: their LTPs are not live premiums.
     p.setNow(at(D, '09:20', 1));
     quoteChain(p, W(book), 25000, { noTrade: (type) => type === 'PE' });
@@ -349,7 +348,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const { p, book, algos, broker } = setupLive('09:16');
     const D = book.date;
     quoteChain(p, W(book), 25000);
-    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
     p.setNow(at(D, '09:20', 1));
     // 24800 PE has a live trade but no live book: the paper broker rejects a MARKET sell.
     quoteChain(p, W(book), 25000, { noBook: (type, k) => type === 'PE' && k === 24800 });
@@ -371,7 +370,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const { p, book, algos, broker } = setupLive('09:16');
     const D = book.date;
     quoteChain(p, W(book), 25000);
-    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
     p.setNow(at(D, '09:20', 1));
     quoteChain(p, W(book), 25000);
     p.live.clearQuote(spotKey('NIFTY')); // no live underlying price: OTM cannot be checked
@@ -421,7 +420,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const E = D;
     p.ref.setStrikes('NIFTY', E, strikesOf(24500, 25500, 50));
     quoteChain(p, E, 25000, { vol: 0.2 });
-    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
     p.setNow(at(D, '09:20', 1));
     quoteChain(p, E, 25000, { vol: 0.2 });
     await algos.tick();
@@ -760,7 +759,7 @@ describe('algo routes', () => {
 
     const token = ((await call('POST', '/api/auth/guest', {})).body as { token: string }).token;
     quoteChain(p, W(book), 25000);
-    const created = await call('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} }, token);
+    const created = await call('POST', '/api/algo-runs', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} }, token);
     expect(created.status).toBe(200);
     const run = created.body as AlgoRunView;
     expect(run.today?.phase).toBe('waiting');
@@ -919,5 +918,125 @@ describe('S5–S7, the user\'s own strategies and MCX underlyings', () => {
     expect(algos.params(algoById('rolling-straddle')!, { symbol: 'CRUDEOIL', entryTime: '18:00', exitTime: '23:00' })).toMatchObject({ symbol: 'CRUDEOIL', entryTime: '18:00' });
     expect(() => algos.params(algoById('rolling-straddle')!, { symbol: 'NIFTY', entryTime: '18:00', exitTime: '23:00' })).toThrow(/NIFTY trades 09:15–15:30 \(NSE\)/);
     expect(() => algos.params(algoById('premium-ladder')!, { symbol: 'CRUDEOIL', entryTime: '08:00', exitTime: '23:00' })).toThrow(/market hours|CRUDEOIL trades/);
+  });
+});
+
+describe('editing a deployed run, and manual execution', () => {
+  it('nothing traded yet: every setting applies now; with open positions: risk limits now, the rest from the next session', async () => {
+    const { p, book, algos } = setupLive('09:16');
+    const D = book.date;
+    quoteChain(p, W(book), 25000);
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: {} });
+    // Before the entry: all at once (lots and start premium too).
+    let v = await algos.update('u1', run.id, { params: { lots: 2, startPremium: 30, stopLossPerLot: 2500 } });
+    expect(v.params).toMatchObject({ lots: 2, startPremium: 30, stopLossPerLot: 2500 });
+    expect(v.pendingParams).toBeUndefined();
+    // Invalid settings are refused with the reason, nothing changed.
+    await expect(algos.update('u1', run.id, { params: { lots: 0 } })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(algos.update('u1', run.id, { params: { exitTime: '18:00' } })).rejects.toThrow(/inside that session|market hours/);
+    // Enter at 09:20.
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    expect(algos.get('u1', run.id).today?.legs.length).toBe(2);
+    // Open positions: the stop loss and exit change now; lots / premium wait for the next session.
+    v = await algos.update('u1', run.id, { params: { stopLossPerLot: 4000, exitTime: '15:00', lots: 3, startPremium: 50 }, execution: 'manual', name: 'S1 edited' });
+    expect(v.params).toMatchObject({ stopLossPerLot: 4000, exitTime: '15:00', lots: 2, startPremium: 30 });
+    expect(v.pendingParams).toMatchObject({ lots: 3, startPremium: 50, stopLossPerLot: 4000 });
+    expect(v.execution).toBe('auto');
+    expect(v.pendingExecution).toBe('manual');
+    expect(v.name).toBe('S1 edited');
+    expect(v.today!.events[0].message).toMatch(/Settings changed: .*now: .*stopLossPerLot 2500 → 4000.*from the next session .*lots 2 → 3/);
+    // The next session starts with them.
+    p.setNow(at(D, '15:31'));
+    await algos.tick();
+    const next = p.calendar.next(D);
+    p.setNow(at(next, '09:16'));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    await algos.tick();
+    v = algos.get('u1', run.id);
+    expect(v.params).toMatchObject({ lots: 3, startPremium: 50 });
+    expect(v.execution).toBe('manual');
+    expect(v.pendingParams).toBeUndefined();
+  });
+
+  it('manual execution: no broker order; each order is a signal at the live bid / ask, notified', async () => {
+    const { p, book, algos, broker, notifier } = setupLive('09:16');
+    const D = book.date;
+    quoteChain(p, W(book), 25000);
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: {}, execution: 'manual' });
+    expect(run.execution).toBe('manual');
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    const v = algos.get('u1', run.id);
+    expect(v.today?.legs.length).toBe(2);
+    expect(broker.orders('u1')).toHaveLength(0);
+    const fills = fillsOf(v.today!.events, 'ENTRY');
+    for (const f of fills) {
+      const q = p.live.quote(optKey('NIFTY', W(book), f.type, f.strike))!;
+      expect(f.price).toBe(q.bid); // a sell signal at the live bid
+    }
+    const signals = notifier.list('u1').filter((n) => n.title.startsWith('Algo SIGNAL'));
+    expect(signals).toHaveLength(2);
+    expect(signals[0].body).toMatch(/Place this order yourself \(manual mode\): SELL 1 lot\(s\) NIFTY/);
+  });
+});
+
+describe('portfolio stop loss (all algo runs together)', () => {
+  it('counts lots per underlying, fires at −(₹ per lot × peak lots), squares every run off and halts the day', async () => {
+    const { p, book, algos, broker, notifier } = setupLive('09:16');
+    const D = book.date;
+    quoteChain(p, W(book), 25000);
+    expect(algos.guardView('u1').settings).toEqual({ enabled: true, perLot: 3000, totalLoss: 0 });
+    algos.saveGuard('u1', { perLot: 1000 });
+    // Two runs without their own stop loss: only the portfolio guard protects them.
+    const a = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { stopLossPerLot: 0 } });
+    const b = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's3-fixed-40', params: { stopLossPerLot: 0 } });
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    let g = algos.guardView('u1');
+    expect(g.lots).toEqual([{ symbol: 'NIFTY', open: 4, peak: 4 }]);
+    expect(g).toMatchObject({ openLots: 4, peakLots: 4, perLotLimit: 4000, totalLimit: null, limit: 4000, halted: null });
+    expect(g.pnl).not.toBeNull();
+    // A sharp rally: every call the runs sold is repriced far higher.
+    p.setNow(at(D, '10:00', 2));
+    const sold = [...new Set(broker.positions('u1').filter((x) => x.type === 'CE').map((x) => x.strike!))];
+    quoteChain(p, W(book), 25000, { override: Object.fromEntries(sold.map((k) => [`CE${k}`, 400])) });
+    await algos.tick();
+    g = algos.guardView('u1');
+    expect(g.halted?.reason).toMatch(/Portfolio stop loss: today's combined P&L of the algo runs ₹-[\d,]+ reached −₹4,000 \(₹1,000 per lot × 4 lots\)/);
+    for (const id of [a.id, b.id]) {
+      const v = algos.get('u1', id);
+      expect(v.today?.legs ?? []).toHaveLength(0);
+      expect(v.status).toBe('running'); // runs again tomorrow
+    }
+    // Every algo book is flat.
+    for (const pos of broker.positions('u1').filter((x) => x.book)) expect(pos.netQty).toBe(0);
+    expect(notifier.list('u1').some((n) => n.title === 'PORTFOLIO STOP LOSS HIT — algo trading halted for today')).toBe(true);
+    // No run starts again today, even a newly deployed one.
+    const c = await algos.create('u1', { algoId: 'rolling-straddle', presetId: 's5-atm-straddle-20', params: {} });
+    p.setNow(at(D, '10:05'));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    expect(algos.get('u1', c.id).today).toBeNull();
+    expect(algos.get('u1', c.id).gaps?.liveData).toMatch(/Trading halted for today — Portfolio stop loss/);
+    // The user may lift the halt explicitly.
+    expect(algos.resumeGuard('u1').halted).toBeNull();
+    expect(() => algos.resumeGuard('u1')).toThrow(/not halted/);
+  });
+
+  it('the total loss limit: the smaller of the two applies; settings are validated', () => {
+    const { algos } = setupLive('09:16');
+    const v = algos.saveGuard('u1', { perLot: 3000, totalLoss: 2500 });
+    expect(v.settings).toEqual({ enabled: true, perLot: 3000, totalLoss: 2500 });
+    expect(v.totalLimit).toBe(2500);
+    expect(v.limit).toBe(2500); // no lots yet: only the total applies
+    expect(() => algos.saveGuard('u1', { perLot: -1 })).toThrow(/Per-lot limit/);
+    expect(() => algos.saveGuard('u1', { perLot: 0, totalLoss: 0 })).toThrow(/Set a per-lot or a total loss limit/);
+    expect(algos.saveGuard('u1', { enabled: false, perLot: 0, totalLoss: 0 }).settings.enabled).toBe(false);
+    expect(algos.guardView('u1').gaps?.limit).toMatch(/switched off/);
   });
 });

@@ -280,8 +280,8 @@ describe('live data: missing prices', () => {
 });
 
 describe('Strategy 3 (starting premium ₹50)', () => {
-  const P50 = ALGO_PRESETS.find((p) => p.id === 'strategy-3-rs50')!.params as unknown as PremiumLadderParams;
-  const P20 = ALGO_PRESETS.find((p) => p.id === 'strategy-2-rs20')!.params as unknown as PremiumLadderParams;
+  const P50 = { ...(ALGO_PRESETS.find((p) => p.id === 's2-ladder-20')!.params as unknown as PremiumLadderParams), startPremium: 50, allowAtm: false, stopLossPerLot: 0 };
+  const P20 = ALGO_PRESETS.find((p) => p.id === 's2-ladder-20')!.params as unknown as PremiumLadderParams;
 
   it('differs from Strategy 2 only in the starting premium', () => {
     expect(P50.startPremium).toBe(50);
@@ -336,7 +336,7 @@ describe('Strategy 3 (starting premium ₹50)', () => {
 });
 
 describe('Strategy 3 rolls the opposite leg to the strike nearest the new level', () => {
-  const P50 = ALGO_PRESETS.find((p) => p.id === 'strategy-3-rs50')!.params as unknown as PremiumLadderParams;
+  const P50 = { ...(ALGO_PRESETS.find((p) => p.id === 's2-ladder-20')!.params as unknown as PremiumLadderParams), startPremium: 50, allowAtm: false, stopLossPerLot: 0 };
   it('buys back the old put and sells the OTM put nearest ₹75', () => {
     const r = runner(P50);
     r.at(market(25050, 560));
@@ -383,7 +383,6 @@ describe('S1–S4 rules (ATM/OTM, daily stop loss, same-side fixed trigger)', ()
       'S5 · NIFTY ATM rolling straddle (20%)',
       'S6 · NIFTY max-pain rolling straddle (25%)',
       'S7 · SENSEX OI-based option selling',
-      'Ladder · Starting premium ₹50 (earlier Strategy 3)',
     ]);
     expect(ALGO_PRESETS.slice(0, 4).map((x) => [x.params.startPremium, x.params.mode, x.params.stopLossPerLot, x.params.allowAtm, x.params.strikeMultiple, x.params.entryTime, x.params.exitTime])).toEqual([
       [40, 'ladder', 3000, true, 100, '09:20', '15:25'],
@@ -489,5 +488,35 @@ describe('S1–S4 rules (ATM/OTM, daily stop loss, same-side fixed trigger)', ()
     expect(b.s.sideAdjustments).toEqual({ CE: 2, PE: 0 });
     expect(a.s.legs.CE).not.toBe(b.s.legs.CE);
     expect(a.orders).not.toEqual(b.orders);
+  });
+});
+
+describe('profit target and adjustment limit (ladder)', () => {
+  const S3x = { ...(ALGO_PRESETS.find((x) => x.id === 's3-fixed-40')!.params as unknown as PremiumLadderParams), stopLossPerLot: 0 };
+
+  it('profit target per lot: both legs squared off and stopped when realised + open P&L reaches it', () => {
+    const r = runner({ ...S3x, profitTargetPerLot: 500 });
+    r.at(market(25000, 560));
+    r.orders.length = 0;
+    // Spot unchanged an hour later, premiums lower (less time): the toy market keeps them, so lower them by hand.
+    const snap = market(25000, 620);
+    const ev = r.at({ ...snap, premium: (t, k) => Math.max(0.05, snap.premium(t, k)! - 10) });
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/Daily profit target reached: combined P&L .* reached \+₹500/);
+    expect(r.orders.map((o) => o.side)).toEqual(['BUY', 'BUY']);
+    expect(r.s.realized).toBeGreaterThanOrEqual(500);
+  });
+
+  it('max adjustments: the adjustment after the last allowed one squares everything off instead', () => {
+    const r = runner({ ...S3x, maxAdjustments: 1 });
+    r.at(market(25000, 560));
+    r.at(market(25150, 600)); // adjustment 1 (CE rolled)
+    expect(r.s.adjustments).toBe(1);
+    r.orders.length = 0;
+    const ev = r.at(market(25260, 620)); // a second one is due
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/the 1 adjustment allowed today are used up/);
+    expect(r.orders.every((o) => o.side === 'BUY')).toBe(true);
+    expect(r.s.phase).toBe('stopped');
   });
 });

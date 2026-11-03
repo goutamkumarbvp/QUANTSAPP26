@@ -190,6 +190,8 @@ export interface AlgoSeriesPoint {
   ce: number | null;
   peStrike: number | null;
   pe: number | null;
+  /** Every open position's premium at the point (e.g. "25100 CE"), for algos with more than one leg a side. */
+  positions?: { key: string; ltp: number | null }[];
 }
 
 export type AlgoExitKind = 'EXIT' | 'STOP' | 'ERROR' | 'MANUAL_STOP' | 'NONE';
@@ -309,6 +311,8 @@ export interface AlgoRunToday {
   mtm: number | null;
   series: AlgoSeriesPoint[];
   events: AlgoEvent[];
+  /** Contract lot size of the day (premium totals in the analysis). */
+  lotSize: number;
 }
 
 /** A deployed algo. `gaps`: `liveData` (why the run is waiting for live data), `today`, `totalNet`. */
@@ -326,4 +330,54 @@ export interface AlgoRunView extends DataGaps {
   /** Net P&L over finished days + today (₹, after charges); null when a day's result is not known. */
   totalNet: number | null;
   error?: string;
+  /**
+   * 'auto': the algo places its orders through the paper broker. 'manual': it places none — each order is a
+   * signal (notification + journal, at the live bid/ask) for the user to place by hand.
+   */
+  execution: AlgoExecution;
+  /** Settings saved while a day had open positions: they apply from the next session (with `pendingExecution`). */
+  pendingParams?: Record<string, unknown>;
+  pendingExecution?: AlgoExecution;
+}
+
+export type AlgoExecution = 'auto' | 'manual';
+
+/**
+ * Settings that may change while a day has open positions: risk limits and the exit, which only affect what the
+ * algo does next. Every other setting (underlying, expiry, lots, strikes, premiums, mode…) defines the open
+ * positions themselves and applies from the next session.
+ */
+export const LIVE_EDITABLE_PARAMS = ['stopLossPerLot', 'stopLoss', 'profitTargetPerLot', 'profitTarget', 'maxAdjustments', 'maxRolls', 'exitTime', 'maxGapPct'] as const;
+
+/* ---------------------------------------------------------------------------------- */
+/* Portfolio stop loss (all of a user's algo runs together)                             */
+/* ---------------------------------------------------------------------------------- */
+
+export interface PortfolioGuardSettings {
+  /** The guard is checked (every tick) only when enabled. */
+  enabled: boolean;
+  /** Loss limit in ₹ per lot traded today (× the most lots held at once today, all underlyings); 0 = not used. */
+  perLot: number;
+  /** Loss limit in ₹ for the whole portfolio of algo runs today; 0 = not used. With both set, the smaller limit applies. */
+  totalLoss: number;
+}
+
+export interface PortfolioGuardView extends DataGaps {
+  settings: PortfolioGuardSettings;
+  /** IST date the figures are of. */
+  date: string;
+  /** Lots open now and the most held at once today, per underlying (NIFTY, SENSEX, CRUDEOIL …). */
+  lots: { symbol: string; open: number; peak: number }[];
+  openLots: number;
+  peakLots: number;
+  /** Combined P&L today of every algo run (realised + open, before charges); null while an open leg has no live price. */
+  pnl: number | null;
+  /** perLot × peakLots (null when not used), totalLoss (null when not used), and the one that applies (the smaller). */
+  perLotLimit: number | null;
+  totalLimit: number | null;
+  limit: number | null;
+  /** Runs counted today (each run's own P&L and lots). */
+  runs: { id: string; name: string; symbol: string; pnl: number | null; openLots: number }[];
+  /** Set when the guard fired today: every run was squared off and trading is halted for the day. */
+  halted: { at: number; reason: string } | null;
 }

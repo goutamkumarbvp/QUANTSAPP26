@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AlertDef, AlgoPreset, Notification, Order, SavedStrategy, Trade, UserSettings, Watchlist } from '@q26/core';
-import type { StoredAlgoRun } from '../services/algo';
+import type { StoredAlgoRun, StoredGuard } from '../services/algo';
 
 export interface StoredUser {
   id: string;
@@ -32,6 +32,8 @@ export interface DbShape {
   algoRuns: Record<string, StoredAlgoRun[]>;
   /** The user's own algo strategies (an algo with saved settings and a name), shown in the library beside the built-in ones. */
   algoPresets: Record<string, AlgoPreset[]>;
+  /** Portfolio stop loss of each user's algo runs: settings, today's peak lots, and a halt. */
+  algoGuard: Record<string, StoredGuard>;
   /**
    * The server's owner: the first account given a password (register, or a guest upgraded), recorded
    * once. With OPS_ADMIN_EMAILS empty it is the only operations operator.
@@ -51,6 +53,7 @@ const empty = (): DbShape => ({
   watchlists: {},
   algoRuns: {},
   algoPresets: {},
+  algoGuard: {},
 });
 
 export class Db {
@@ -116,7 +119,7 @@ export class Db {
     this.flush();
   }
 
-  list<K extends Exclude<keyof DbShape, 'version' | 'users' | 'emailIndex' | 'ownerId'>>(key: K, userId: string): DbShape[K][string] {
+  list<K extends Exclude<keyof DbShape, 'version' | 'users' | 'emailIndex' | 'ownerId' | 'algoGuard'>>(key: K, userId: string): DbShape[K][string] {
     const bucket = this.data[key] as Record<string, unknown[]>;
     if (!bucket[userId]) bucket[userId] = [];
     return bucket[userId] as DbShape[K][string];

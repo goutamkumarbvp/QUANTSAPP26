@@ -31,6 +31,8 @@ export interface OiTopParams {
   /** Daily stop loss in ₹ on the combined P&L of all positions; 0 = none. */
   stopLoss: number;
   lateEntry: boolean;
+  /** Daily profit target in ₹ on the combined P&L of all positions: squared off and stopped when reached; 0 or absent = none. */
+  profitTarget?: number;
 }
 
 export interface OiTopState {
@@ -86,6 +88,7 @@ function rules(p: Partial<OiTopParams>): string[] {
     `Sell ${lots} lot${lots > 1 ? 's' : ''} at each of the ${n} highest-OI CE strikes and the ${n} highest-OI PE strikes: ${2 * n} positions, ${2 * n * lots} lots in all.`,
     'If a ranked strike has no traded premium it cannot be sold: then nothing is sold today (the ranking is never changed to skip it).',
     sl > 0 ? `Daily stop loss ₹${r2(sl)} on the combined P&L of all positions (realised + open, before charges): when hit, everything is squared off and trading stops for the day (no re-entry).` : 'Daily stop loss: not set (0).',
+    ...(num(p.profitTarget, 0) > 0 ? [`Daily profit target ₹${r2(num(p.profitTarget, 0))} on the combined P&L: when reached, everything is squared off and trading stops for the day.`] : []),
     `Exit: square off everything at ${p.exitTime || '15:25'}. No overnight positions.`,
     'This run keeps its own positions (its own book in Positions), P&L, stop loss and trade journal.',
     'Live data only: OI is the exchange feed’s and premiums are traded prices. Until OI is live on both sides the algo waits.',
@@ -135,10 +138,11 @@ export const oiTop: AlgoDefinition<OiTopParams, OiTopState> = {
     { key: 'entryTime', label: 'Entry time', type: 'time' },
     { key: 'exitTime', label: 'Exit time', type: 'time' },
     { key: 'stopLoss', label: 'Daily stop loss ₹ (all positions)', type: 'number', min: 0, max: 1000000, step: 100, help: 'Combined realised + open P&L of every position. 0 = none.' },
+    { key: 'profitTarget', label: 'Daily profit target ₹ (all positions)', type: 'number', min: 0, max: 1000000, step: 100, help: 'Combined realised + open P&L: squared off and stopped when reached. 0 = none.' },
     { key: 'lateEntry', label: 'Deployed after entry time: enter immediately', type: 'boolean' },
   ],
   defaults(instrument) {
-    return { symbol: instrument.symbol, expiry: 'current', lots: 1, topN: 3, strikeMultiple: 0, days: 'all', entryTime: '09:20', exitTime: '15:25', stopLoss: 3000, lateEntry: true };
+    return { symbol: instrument.symbol, expiry: 'current', lots: 1, topN: 3, strikeMultiple: 0, days: 'all', entryTime: '09:20', exitTime: '15:25', stopLoss: 3000, lateEntry: true, profitTarget: 0 };
   },
   validate(p) {
     if (!p.symbol) return 'Choose an underlying';
@@ -148,6 +152,7 @@ export const oiTop: AlgoDefinition<OiTopParams, OiTopState> = {
     if (!(p.days in DAYS)) return 'Unknown trading-day choice';
     if (!(p.stopLoss >= 0 && p.stopLoss <= 1000000)) return 'Daily stop loss must be between ₹0 (none) and ₹10,00,000';
     if (p.expiry !== 'current' && p.expiry !== 'next') return 'Expiry must be current or next';
+    if (p.profitTarget !== undefined && !(p.profitTarget >= 0 && p.profitTarget <= 1000000)) return 'Daily profit target must be between ₹0 (none) and ₹10,00,000';
     return validateTimes(p.entryTime, p.exitTime);
   },
   init: () => ({ phase: 'waiting', legs: [], ranked: { CE: [], PE: [] }, realized: 0, lotSize: 0, firstSeenMinute: null, stopReason: null, orders: 0 }),
@@ -215,14 +220,16 @@ export const oiTop: AlgoDefinition<OiTopParams, OiTopState> = {
       return [ev('ENTRY', `Sold the top ${p.topN} OI strikes — CE: ${fmt('CE')}; PE: ${fmt('PE')}. ${s.legs.length} positions, ${p.lots} lot${p.lots > 1 ? 's' : ''} each.`)];
     }
 
-    if (p.stopLoss > 0) {
+    if (p.stopLoss > 0 || (p.profitTarget ?? 0) > 0) {
       let pnl = s.realized;
       for (const l of s.legs) {
         const ltp = snap.premium(l.type, l.strike);
         if (ltp == null) return []; // P&L unknown right now: judged on the next price
         pnl += (l.entryPrice - ltp) * l.lots * s.lotSize;
       }
-      if (pnl <= -p.stopLoss + EPS) return stop('STOP', `Daily stop loss hit: combined P&L ${rupees(pnl)} of ${s.legs.length} positions reached −${rupees(p.stopLoss)}. Everything squared off; no more trades today.`, 'Daily stop loss');
+      if (p.stopLoss > 0 && pnl <= -p.stopLoss + EPS) return stop('STOP', `Daily stop loss hit: combined P&L ${rupees(pnl)} of ${s.legs.length} positions reached −${rupees(p.stopLoss)}. Everything squared off; no more trades today.`, 'Daily stop loss');
+      const target = p.profitTarget ?? 0;
+      if (target > 0 && pnl + EPS >= target) return stop('STOP', `Daily profit target reached: combined P&L ${rupees(pnl)} of ${s.legs.length} positions reached +${rupees(target)}. Everything squared off; no more trades today.`, 'Daily profit target');
     }
     return [];
   },
@@ -240,6 +247,7 @@ export const oiTop: AlgoDefinition<OiTopParams, OiTopState> = {
     items.push({ label: 'Trading days', value: DAYS_LABEL[p.days] });
     for (const t of SIDES) items.push({ label: `${t} positions`, value: s.legs.filter((l) => l.type === t).map((l) => `${l.strike} @ ${rupees(l.entryPrice)}`).join(', ') || '—' });
     items.push({ label: 'Daily stop loss', value: p.stopLoss > 0 ? `−${rupees(p.stopLoss)} (all positions)` : 'Not set' });
+    if ((p.profitTarget ?? 0) > 0) items.push({ label: 'Daily profit target', value: `+${rupees(p.profitTarget ?? 0)} (all positions)` });
     if (s.stopReason) items.push({ label: 'Reason', value: s.stopReason });
     return items;
   },

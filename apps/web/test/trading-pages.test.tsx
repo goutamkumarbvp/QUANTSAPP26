@@ -513,7 +513,7 @@ describe('Strategy Optimizer', () => {
 describe('Algo', () => {
   const catalog = {
     algos: [{ id: 'premium-ladder', name: 'Premium ladder', description: '', rules: ['r1'], params: [{ key: 'symbol', label: 'Underlying', type: 'symbol' }] }],
-    presets: [{ id: 'strategy-2-rs20', algoId: 'premium-ladder', name: 'Strategy 2 · Starting premium ₹20', summary: 's', params: { symbol: 'NIFTY', lots: 1, startPremium: 20, stepPct: 50, strikeMultiple: 3, entryTime: '09:20', exitTime: '15:25' } }],
+    presets: [{ id: 's2-ladder-20', algoId: 'premium-ladder', name: 'Strategy 2 · Starting premium ₹20', summary: 's', params: { symbol: 'NIFTY', lots: 1, startPremium: 20, stepPct: 50, strikeMultiple: 3, entryTime: '09:20', exitTime: '15:25' } }],
     symbols: [], gaps: { symbols: 'Instrument master not loaded yet' },
   } as unknown as AlgoCatalog;
   const run = {

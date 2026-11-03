@@ -174,3 +174,38 @@ describe('S7 · SENSEX top-OI selling', () => {
     expect(r.s.phase).toBe('waiting');
   });
 });
+
+describe('profit target and roll limit (straddle, top OI)', () => {
+  it('S5 with a profit target: squared off when the day P&L reaches it', () => {
+    const r = runner(rollingStraddle, { ...S5, stopLossPerLot: 0, profitTargetPerLot: 1000 });
+    r.at(market(25000, 560));
+    r.orders.length = 0;
+    const ev = r.at(market(25000, 620, { bump: -20 })); // both legs ₹20 cheaper: +₹2,600
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/Daily profit target reached: day P&L .* reached \+₹1000/);
+    expect(r.orders.map((o) => o.side)).toEqual(['BUY', 'BUY']);
+  });
+
+  it('S5 with max 1 roll: the second roll squares off instead', () => {
+    const r = runner(rollingStraddle, { ...S5, stopLossPerLot: 0, maxRolls: 1 });
+    r.at(market(25000, 560));
+    r.at(market(25400, 600)); // CE 25000 deep in the money: CE + PE ≈ ₹403 ≥ ₹360 (300 × 1.2) → roll to 25400
+    expect(r.s.rolls).toBe(1);
+    r.orders.length = 0;
+    const ev = r.at(market(25800, 620));
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/the 1 roll allowed today are used up/);
+    expect(r.orders.map((o) => o.side)).toEqual(['BUY', 'BUY']);
+  });
+
+  it('S7 with a profit target on all six positions', () => {
+    const oi = (t: 'CE' | 'PE', k: number) => (k % 100 ? null : t === 'CE' ? (k > 25000 ? 30_000_000 / (k - 24900) : 100) : k < 25000 ? 30_000_000 / (25100 - k) : 100);
+    const r = runner(oiTop, { ...S7, stopLoss: 0, profitTarget: 2000 });
+    r.at(market(25000, 560, { oi }));
+    r.orders.length = 0;
+    const ev = r.at(market(25000, 620, { oi, bump: -10 }));
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/Daily profit target reached: combined P&L .* of 6 positions reached \+₹2000/);
+    expect(r.orders).toHaveLength(6);
+  });
+});

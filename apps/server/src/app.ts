@@ -781,13 +781,25 @@ export async function buildApp(
     svc.algos.deletePreset(requireUser(req).id, req.params.id);
     return { ok: true };
   });
+  // Portfolio stop loss over all the user's algo runs (per lot traded today and / or a total).
+  app.get('/api/algo-guard', async (req) => svc.algos.guardView(requireUser(req).id));
+  app.put('/api/algo-guard', async (req) => {
+    const b = z.object({ enabled: z.boolean().optional(), perLot: z.coerce.number().optional(), totalLoss: z.coerce.number().optional() }).parse(req.body ?? {});
+    return svc.algos.saveGuard(requireUser(req).id, b);
+  });
+  app.post('/api/algo-guard/resume', async (req) => svc.algos.resumeGuard(requireUser(req).id));
   app.get('/api/algo-runs', async (req) => svc.algos.list(requireUser(req).id));
   app.post('/api/algo-runs', async (req) => {
-    const b = z.object({ algoId: z.string().min(1), presetId: z.string().optional(), name: z.string().max(60).optional(), params: algoParams }).parse(req.body ?? {});
+    const b = z.object({ algoId: z.string().min(1), presetId: z.string().optional(), name: z.string().max(60).optional(), params: algoParams, execution: z.enum(['auto', 'manual']).optional() }).parse(req.body ?? {});
     return svc.algos.create(requireUser(req).id, b);
   });
   app.get<{ Params: { id: string } }>('/api/algo-runs/:id', async (req) => svc.algos.get(requireUser(req).id, req.params.id));
   app.post<{ Params: { id: string } }>('/api/algo-runs/:id/stop', async (req) => svc.algos.stop(requireUser(req).id, req.params.id));
+  // Edit a deployed run: risk limits now; other settings (and execution) from the next session while positions are open.
+  app.patch<{ Params: { id: string } }>('/api/algo-runs/:id', async (req) => {
+    const b = z.object({ name: z.string().max(60).optional(), params: algoParams.optional(), execution: z.enum(['auto', 'manual']).optional() }).parse(req.body ?? {});
+    return svc.algos.update(requireUser(req).id, req.params.id, b);
+  });
   app.delete<{ Params: { id: string } }>('/api/algo-runs/:id', async (req) => {
     svc.algos.remove(requireUser(req).id, req.params.id);
     return { ok: true };

@@ -289,6 +289,7 @@ test('algo: one-day backtest replays only a recorded session', async ({ page }) 
 test('algo library: S1–S7, SENSEX and MCX underlyings, and the user\'s own strategy saved and deleted', async ({ page }) => {
   const watch = watchErrors(page);
   await open(page, '/algo', /Algo Strategies/);
+  await expect(page.getByText(/earlier Strategy/)).toHaveCount(0);
   for (const n of ['S1 · NIFTY OTM premium ladder 40–60–90', 'S5 · NIFTY ATM rolling straddle (20%)', 'S6 · NIFTY max-pain rolling straddle (25%)', 'S7 · SENSEX OI-based option selling']) {
     await expect(page.getByRole('button', { name: new RegExp(n.replace(/[()%·.]/g, '.')) }).first()).toBeVisible();
   }
@@ -300,6 +301,10 @@ test('algo library: S1–S7, SENSEX and MCX underlyings, and the user\'s own str
   expect(options.some((o) => o.startsWith('SENSEX'))).toBe(true);
   expect(options.some((o) => o.startsWith('CRUDEOIL'))).toBe(true);
   await expect(page.getByRole('combobox', { name: 'Trading days' })).toHaveValue('wed-thu');
+  // Every strategy can run in Manual (signals only) mode, and the portfolio stop loss guards all runs.
+  await expect(page.getByRole('combobox', { name: 'Execution' })).toHaveValue('auto');
+  await expect(page.getByText('Portfolio stop loss · all algo runs')).toBeVisible();
+  await expect(page.getByRole('spinbutton', { name: '₹ per lot traded today' })).toHaveValue('3000');
   // Save it under a new name: it appears under My strategies.
   await page.getByRole('textbox', { name: 'Run name (optional)' }).fill('My SENSEX OI');
   await page.getByRole('button', { name: 'Save as my strategy' }).click();

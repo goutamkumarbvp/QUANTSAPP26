@@ -378,3 +378,74 @@ Tests:
   - route table.
 - e2e: the library with S1–S7, SENSEX and MCX in the underlying list, and saving and deleting the user's own
   strategy.
+
+## C-58 — Algo tab for production use: every setting editable, manual mode, portfolio stop loss, analysis per strategy
+
+From the user's requests of 3–4 Nov 2026. Trading stays on the paper broker: no order reaches Kotak (see the note at
+the end).
+
+- **Duplicates removed**: the earlier "Strategy 3 · ₹50" preset is gone. The ₹20 ladder exists once, as S2 (id
+  `s2-ladder-20`). Runs saved earlier keep their settings.
+- **Every underlying for every strategy**: S1–S7 run on NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX and
+  every MCX commodity (CRUDEOIL, GOLD, SILVER, NATURALGAS …).
+  - Picking an underlying re-defaults its strike multiple.
+  - Times are checked against that symbol's own session.
+  - Checked on the test server:
+    - S6 on NATURALGAS entered;
+    - S1 on CRUDEOIL and S3 on SILVER stopped with the reason (no ₹40 premium near the money: set a starting
+      premium that fits the commodity);
+    - S5 on GOLD was refused by the paper broker's margin check.
+- **New limits, all editable**:
+  - daily profit target (ladder and straddle per lot; top-OI in ₹ for all positions);
+  - maximum adjustments (ladder) and rolls (straddle) per day: when one more is due, everything is squared off for
+    the day instead.
+- **Editing a deployed run** (`PATCH /api/algo-runs/:id`, "Edit settings" on each run):
+  - every setting, its name and execution can be changed;
+  - with nothing traded today, all of it applies now (a day waiting for its entry restarts with it);
+  - with positions open, only `LIVE_EDITABLE_PARAMS` change now (stop loss, profit target, max adjustments / rolls,
+    max premium gap, exit time). The rest, and the execution, apply when the next day starts, so the open positions
+    keep their rules. The run shows the pending changes;
+  - every change goes into the day's journal and a notification;
+  - invalid values are refused with the reason.
+- **Manual execution** (deploy form and edit): the run places no orders. Each order it would place becomes a signal
+  at the live bid (sell) / ask (buy): a notification "Algo SIGNAL …: SELL 1 lot … — place this order yourself" plus
+  the journal. The run is marked "Manual · signals" and its P&L assumes the user placed them. Picking another
+  strategy resets the form to Auto.
+- **Portfolio stop loss** (`/api/algo-guard`, a card on the Algo page), checked every few seconds over all of the
+  user's algo runs today, auto and manual:
+  - lots open and the most held at once today per underlying (every leg counts);
+  - combined realised + open P&L before charges, from each run's latest tick;
+  - limit = ₹ per lot (default 3,000, editable) × the most lots held today, and/or a total ₹ loss (editable); with
+    both, the smaller.
+  - On a breach:
+    - every run's day is squared off through the broker;
+    - trading is halted for the rest of the day (no run starts a day, newly deployed ones included);
+    - a notification is sent, plus a CRITICAL one naming any position the broker could not close.
+  - "Resume trading today" lifts the halt only on the user's explicit confirmation. Settings changes are notified.
+    Manual trades are not included.
+- **Analysis per strategy** (today and the one-day backtest):
+  - a "Day analysis" panel for every algo:
+    - premium sold and bought back, orders, adjustments / rolls;
+    - peak profit, maximum drawdown, amount given back from the peak;
+    - stop loss used now and at worst, profit-target progress;
+    - time in profit, net after charges.
+  - The strategy's own chart:
+    - ladder: sold legs vs level and next trigger, or vs the starting premium and fixed trigger for S3/S4;
+    - straddle: CE, PE, CE + PE vs the reference and the roll trigger;
+    - top-OI: one line per sold position (series points now carry every position's premium).
+  - The run's settings line now fits every algo.
+- **Runs at once**: 10.
+- **Tests**:
+  - core: profit target and adjustment / roll limits on all three algos;
+  - server:
+    - editing before entry and with open positions (journal, next-session apply);
+    - manual signals at the live bid with no broker order;
+    - portfolio stop loss: lots and peak, the fire with square-off of two runs and flat books, the halt that blocks
+      new runs, resume, the total limit, validation;
+    - route table;
+  - e2e: no "earlier Strategy" preset, Execution defaults to Auto, the portfolio stop loss card.
+
+Real-money note: the app sends nothing to Kotak. Every algo order goes to the paper broker, or is a signal in manual
+mode. Live order placement through Kotak Neo would be a separate, explicitly authorised change: order APIs, rejects,
+partial fills, freeze limits, kill switch and reconciliation with the broker's positions, tested on small quantities
+first.

@@ -19,6 +19,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   ALGO_PRESETS,
+  LIVE_EDITABLE_PARAMS,
   ALGOS,
   algoById,
   formatTimeIST,
@@ -30,6 +31,9 @@ import {
   type AlgoBacktestRange,
   type AlgoCatalog,
   type AlgoDaySummary,
+  type AlgoExecution,
+  type PortfolioGuardSettings,
+  type PortfolioGuardView,
   type AlgoDefinition,
   type AlgoEvent,
   type AlgoExitKind,
@@ -80,6 +84,8 @@ export interface StoredAlgoDay {
   closed: boolean;
   /** Contract lot size of the day's expiry (instrument master when the day started). */
   lotSize?: number;
+  /** Realised + open P&L at the latest tick (null when an open leg had no price then): the portfolio stop loss reads it. */
+  lastMtm?: number | null;
 }
 
 export interface StoredAlgoRun {
@@ -98,13 +104,35 @@ export interface StoredAlgoRun {
   waiting?: string;
   /** Finished days whose expired legs await the exchange settlement price (closed once it is published). */
   unsettled?: StoredAlgoDay[];
+  /** How orders are executed (absent: 'auto', runs saved before manual mode). */
+  execution?: AlgoExecution;
+  /** Settings / execution saved while a day had open positions: applied when the next day starts. */
+  nextParams?: Record<string, unknown>;
+  nextExecution?: AlgoExecution;
 }
+
+/** A user's portfolio stop loss: settings, today's peak lots per underlying, and today's halt. */
+export interface StoredGuard {
+  settings: PortfolioGuardSettings;
+  day?: { date: string; peak: Record<string, number> };
+  halted?: { date: string; at: number; reason: string };
+}
+
+/** Default portfolio stop loss: on, ₹3,000 per lot traded today, no separate total. */
+export const DEFAULT_GUARD: PortfolioGuardSettings = { enabled: true, perLot: 3000, totalLoss: 0 };
 
 export interface AlgoRunInput {
   algoId: string;
   presetId?: string;
   name?: string;
   params: Record<string, unknown>;
+  execution?: AlgoExecution;
+}
+
+export interface AlgoRunUpdate {
+  name?: string;
+  params?: Record<string, unknown>;
+  execution?: AlgoExecution;
 }
 
 const FINAL_KINDS: AlgoExitKind[] = ['EXIT', 'STOP', 'ERROR', 'MANUAL_STOP'];
@@ -475,6 +503,7 @@ export class AlgoService {
       ce: ce ? snap.premium('CE', ce.strike) : null,
       peStrike: pe?.strike ?? null,
       pe: pe ? snap.premium('PE', pe.strike) : null,
+      ...(legs.length > 2 ? { positions: legs.map((l) => ({ key: `${l.strike} ${l.type}`, ltp: snap.premium(l.type, l.strike) })) } : {}),
     };
   }
 
@@ -893,11 +922,76 @@ export class AlgoService {
       createdAt: now,
       day: null,
       history: [],
+      execution: input.execution === 'manual' ? 'manual' : 'auto',
     };
     runs.unshift(run);
-    this.notifier.push(uid, { kind: 'system', title: `Algo deployed · ${run.name}`, body: `${params.symbol} · ${params.lots} lot(s) per leg · paper trading on live prices` });
+    this.notifier.push(uid, { kind: 'system', title: `Algo deployed · ${run.name}`, body: `${params.symbol} · ${params.lots} lot(s) per leg · ${run.execution === 'manual' ? 'MANUAL: signals only, you place the orders' : 'paper trading on live prices'}` });
     await this.withLock(run.id, () => this.tickRun(uid, run));
     this.db.save();
+    return this.view(run);
+  }
+
+  /**
+   * Change a deployed run's name, settings or execution. The settings are validated like a deploy (400 with the
+   * reason). While today's day has open positions (or has traded), only LIVE_EDITABLE_PARAMS (risk limits, exit
+   * time) change now; every other changed setting — and a change of execution — is kept and applied when the next
+   * day starts, so the open positions are never re-interpreted under other rules. With nothing traded today (or
+   * no day yet) everything applies at once (a day still waiting for its entry is restarted with them).
+   * Every change is written to the day's journal and notified.
+   */
+  async update(uid: string, id: string, input: AlgoRunUpdate): Promise<AlgoRunView> {
+    const run = this.find(uid, id);
+    const algo = this.algo(run.algoId);
+    await this.withLock(run.id, async () => {
+      const changes: string[] = [];
+      if (input.name !== undefined) {
+        const name = input.name.trim();
+        if (!name) throw httpError(400, 'The name cannot be empty');
+        if (name !== run.name) changes.push(`name → ${name}`);
+        run.name = name;
+      }
+      const day = run.day;
+      const legs = day && !day.closed ? (algo.openLegs(day.state) as AlgoLeg[]) : [];
+      const traded = !!day && !day.closed && (legs.length > 0 || day.events.some((e) => e.fills.length > 0));
+      if (input.params) {
+        const base = run.nextParams ?? run.params;
+        const next = this.params(algo, { ...base, ...input.params });
+        const before = run.params; // the journal quotes the values in force before this change
+        const changed = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
+        const live = (LIVE_EDITABLE_PARAMS as readonly string[]).filter((k) => changed.includes(k));
+        const later = changed.filter((k) => !live.includes(k));
+        const show = (k: string) => `${k} ${JSON.stringify(before[k] ?? null)} → ${JSON.stringify(next[k])}`;
+        if (traded) {
+          // Risk limits and the exit apply now; the rest from the next session.
+          for (const k of live) run.params = { ...run.params, [k]: next[k] };
+          if (later.length) run.nextParams = { ...run.params, ...Object.fromEntries(later.map((k) => [k, next[k]])) };
+          else delete run.nextParams;
+          if (live.length) changes.push(`now: ${live.map(show).join(', ')}`);
+          if (later.length) changes.push(`from the next session (positions are open today): ${later.map(show).join(', ')}`);
+        } else {
+          if (changed.length) changes.push(changed.map(show).join(', '));
+          run.params = next;
+          delete run.nextParams;
+          // A day still waiting for its entry restarts with the new settings (underlying / expiry may differ).
+          if (day && !day.closed && changed.length) run.day = null;
+        }
+      }
+      if (input.execution && input.execution !== (run.nextExecution ?? run.execution ?? 'auto')) {
+        if (traded) {
+          run.nextExecution = input.execution;
+          changes.push(`execution → ${input.execution} from the next session (positions are open today)`);
+        } else {
+          run.execution = input.execution;
+          delete run.nextExecution;
+          changes.push(`execution → ${input.execution}`);
+        }
+      }
+      if (!changes.length) return;
+      const msg = `Settings changed: ${changes.join('; ')}`;
+      if (run.day && !run.day.closed) run.day.events.push({ ts: this.md.clock.now(), kind: 'INFO', message: msg, fills: [] });
+      this.notifier.push(uid, { kind: 'system', title: `Algo settings changed · ${run.name}`, body: msg });
+      this.db.save();
+    });
     return this.view(run);
   }
 
@@ -939,10 +1033,148 @@ export class AlgoService {
           if (run.unsettled?.length) this.settlePending(uid, run);
           if (run.status === 'running') await this.withLock(run.id, () => this.tickRun(uid, run));
         }
+        // After every run moved: the user's portfolio stop loss over all of them.
+        try {
+          await this.checkGuard(uid);
+        } catch (err) {
+          this.notifier.push(uid, { kind: 'system', title: 'Portfolio stop loss check failed', body: `${errMsg(err)}. Watch your algo positions.` });
+        }
       }
     } finally {
       this.ticking = false;
     }
+  }
+
+  /* ----------------------------------- portfolio stop loss ----------------------------------- */
+
+  private guardOf(uid: string): StoredGuard {
+    const all = (this.db.data.algoGuard ??= {});
+    return (all[uid] ??= { settings: { ...DEFAULT_GUARD } });
+  }
+
+  /** IST date of now (the guard's day: NSE, BSE and MCX share it). */
+  private guardDate(): string {
+    return istParts(this.md.clock.now()).date;
+  }
+
+  /** The guard fired today: no run trades again today (new days are not started). */
+  haltedToday(uid: string, date = this.guardDate()): string | null {
+    const h = this.db.data.algoGuard?.[uid]?.halted;
+    return h && h.date === date ? h.reason : null;
+  }
+
+  /**
+   * Today's figures over the user's runs: each run's P&L today (realised + open at its last priced tick, before
+   * charges; null while an open leg has no live price) and open lots per underlying; the peak lots of the day are
+   * kept (a limit per lot traded never shrinks when positions are closed at a loss).
+   */
+  private guardFigures(uid: string, persist: boolean): Omit<PortfolioGuardView, 'settings' | 'halted' | 'gaps'> & { unknown: string[] } {
+    const g = this.guardOf(uid);
+    const date = this.guardDate();
+    if (!g.day || g.day.date !== date) g.day = { date, peak: {} };
+    const open: Record<string, number> = {};
+    const runs: PortfolioGuardView['runs'] = [];
+    const unknown: string[] = [];
+    let pnl: number | null = 0;
+    for (const run of this.runs(uid)) {
+      const day = run.day;
+      if (!day || day.date !== date) continue;
+      const algo = algoById(run.algoId);
+      if (!algo) continue;
+      const symbol = String(run.params.symbol);
+      const legs = day.closed ? [] : (algo.openLegs(day.state) as AlgoLeg[]);
+      const lots = legs.reduce((a, l) => a + l.lots, 0);
+      if (lots) open[symbol] = (open[symbol] ?? 0) + lots;
+      let runPnl: number | null;
+      if (!legs.length) runPnl = Math.round(algo.realized(day.state));
+      else runPnl = day.lastMtm ?? null; // the latest tick's (every few seconds), not the minute series
+      if (runPnl === null) {
+        unknown.push(run.name);
+        pnl = null;
+      } else if (pnl !== null) pnl += runPnl;
+      runs.push({ id: run.id, name: run.name, symbol, pnl: runPnl, openLots: lots });
+    }
+    for (const [sym, n] of Object.entries(open)) g.day.peak[sym] = Math.max(g.day.peak[sym] ?? 0, n);
+    if (persist) this.db.save();
+    const symbols = [...new Set([...Object.keys(open), ...Object.keys(g.day.peak)])].sort();
+    const lots = symbols.map((symbol) => ({ symbol, open: open[symbol] ?? 0, peak: g.day!.peak[symbol] ?? 0 }));
+    const peakLots = lots.reduce((a, l) => a + l.peak, 0);
+    const s = g.settings;
+    const perLotLimit = s.perLot > 0 && peakLots > 0 ? s.perLot * peakLots : null;
+    const totalLimit = s.totalLoss > 0 ? s.totalLoss : null;
+    const limits = [perLotLimit, totalLimit].filter((x): x is number => x !== null);
+    return { date, lots, openLots: lots.reduce((a, l) => a + l.open, 0), peakLots, pnl, perLotLimit, totalLimit, limit: limits.length ? Math.min(...limits) : null, runs, unknown };
+  }
+
+  guardView(uid: string): PortfolioGuardView {
+    const g = this.guardOf(uid);
+    const f = this.guardFigures(uid, false);
+    const gaps = new Gaps();
+    if (f.unknown.length) gaps.add('pnl', `No live price for an open leg of ${f.unknown.join(', ')}: the combined P&L is not known right now (the limit is checked again with the next price)`);
+    if (!g.settings.enabled) gaps.add('limit', 'The portfolio stop loss is switched off');
+    else if (f.limit === null) gaps.add('limit', g.settings.totalLoss > 0 ? 'No limit applies yet' : 'No lots traded today yet: the per-lot limit starts with the first position');
+    const { unknown: _u, ...rest } = f;
+    const h = g.halted && g.halted.date === f.date ? { at: g.halted.at, reason: g.halted.reason } : null;
+    return { settings: { ...g.settings }, ...rest, halted: h, ...gaps.out() };
+  }
+
+  saveGuard(uid: string, input: Partial<PortfolioGuardSettings>): PortfolioGuardView {
+    const g = this.guardOf(uid);
+    const next = { ...g.settings, ...input };
+    if (typeof next.enabled !== 'boolean') throw httpError(400, 'enabled must be true or false');
+    if (!(Number.isFinite(next.perLot) && next.perLot >= 0 && next.perLot <= 1_000_000)) throw httpError(400, 'Per-lot limit must be between ₹0 (not used) and ₹10,00,000');
+    if (!(Number.isFinite(next.totalLoss) && next.totalLoss >= 0 && next.totalLoss <= 100_000_000)) throw httpError(400, 'Total loss limit must be between ₹0 (not used) and ₹10,00,00,000');
+    if (next.enabled && next.perLot === 0 && next.totalLoss === 0) throw httpError(400, 'Set a per-lot or a total loss limit (or switch the portfolio stop loss off)');
+    const before = g.settings;
+    g.settings = next;
+    const rs = (v: number) => (v > 0 ? `₹${v.toLocaleString('en-IN')}` : 'not used');
+    this.notifier.push(uid, { kind: 'system', title: 'Portfolio stop loss changed', body: `${next.enabled ? 'On' : 'OFF'} · per lot ${rs(next.perLot)} (was ${rs(before.perLot)}) · total ${rs(next.totalLoss)} (was ${rs(before.totalLoss)})` });
+    this.db.save();
+    return this.guardView(uid);
+  }
+
+  /** Lift today's halt (the user's explicit decision): runs may trade again today. */
+  resumeGuard(uid: string): PortfolioGuardView {
+    const g = this.guardOf(uid);
+    if (!g.halted || g.halted.date !== this.guardDate()) throw httpError(400, 'Trading is not halted today');
+    const reason = g.halted.reason;
+    delete g.halted;
+    this.notifier.push(uid, { kind: 'system', title: 'Portfolio stop loss: trading resumed by you', body: `Halt lifted (it was: ${reason}). Runs whose day was already squared off stay closed today; runs that had not started may trade.` });
+    this.db.save();
+    return this.guardView(uid);
+  }
+
+  /**
+   * The portfolio stop loss: when the combined P&L of today's algo runs reaches −limit, every run with an open day
+   * is squared off through the broker (its day closed), trading is halted for the rest of the day for all runs,
+   * and the user is told — loudly if a square-off left a position open.
+   */
+  private async checkGuard(uid: string): Promise<void> {
+    const g = this.guardOf(uid);
+    const f = this.guardFigures(uid, false);
+    if (!g.settings.enabled || f.limit === null || f.pnl === null || this.haltedToday(uid)) return;
+    if (f.pnl > -f.limit) return;
+    const ts = this.md.clock.now();
+    const reason = `Portfolio stop loss: today's combined P&L of the algo runs ₹${Math.round(f.pnl).toLocaleString('en-IN')} reached −₹${Math.round(f.limit).toLocaleString('en-IN')} (${f.limit === f.perLotLimit ? `₹${g.settings.perLot.toLocaleString('en-IN')} per lot × ${f.peakLots} lots` : 'total loss limit'})`;
+    g.halted = { date: f.date, at: ts, reason };
+    this.db.save();
+    const left: string[] = [];
+    for (const run of this.runs(uid)) {
+      const day = run.day;
+      if (run.status !== 'running' || !day || day.closed) continue;
+      await this.withLock(run.id, async () => {
+        if (day.closed) return;
+        await this.finishDay(uid, run, day, ts, `${reason} — all algo positions squared off; trading halted for the day`);
+        const algo = this.algo(run.algoId);
+        const still = algo.openLegs(day.state) as AlgoLeg[];
+        for (const l of still) left.push(`${run.name}: ${instrumentLabel({ symbol: String(run.params.symbol), type: l.type, strike: l.strike, expiry: day.expiry })}`);
+      });
+    }
+    this.notifier.push(uid, { kind: 'system', title: 'PORTFOLIO STOP LOSS HIT — algo trading halted for today', body: `${reason}. Every algo run was squared off and none trades again today.` });
+    if (left.length) {
+      this.notifier.push(uid, { kind: 'system', title: 'CRITICAL: square-off failed — close these positions yourself now', body: left.join('; ') });
+    }
+    this.db.save();
   }
 
   /** Open legs of running algos (streamed in the provider's 'user' tier; createServices picks this up). */
@@ -1023,8 +1255,27 @@ export class AlgoService {
     return { snap, ...(waiting ? { waiting } : {}) };
   }
 
-  /** Paper orders through the broker: MARKET, filled only at a live bid/ask; anything else throws (reported by the algo). */
+  /**
+   * Paper orders through the broker: MARKET, filled only at a live bid/ask; anything else throws (reported by the
+   * algo). Manual execution: no order — a signal at the live bid (sell) / ask (buy), notified for the user to place
+   * by hand; without a live bid/ask it throws like a rejected order.
+   */
   private liveFill(uid: string, run: StoredAlgoRun, day: StoredAlgoDay): FillFn {
+    if (run.execution === 'manual') {
+      return (o) => {
+        const symbol = String(run.params.symbol);
+        const spec = { symbol, type: o.type, strike: o.strike, expiry: day.expiry };
+        const px = this.pricer.price(spec);
+        const price = o.side === 'BUY' ? px.ask : px.bid;
+        if (price === null) throw new Error(`No live ${o.side === 'BUY' ? 'ask' : 'bid'} for ${instrumentLabel(spec)}`);
+        this.notifier.push(uid, {
+          kind: 'system',
+          title: `Algo SIGNAL · ${run.name}: ${o.side} ${o.lots} lot${o.lots > 1 ? 's' : ''} ${instrumentLabel(spec)}`,
+          body: `Place this order yourself (manual mode): ${o.side} ${o.lots} lot(s) ${instrumentLabel(spec)} at market — live ${o.side === 'BUY' ? 'ask' : 'bid'} ₹${price}. Reason: ${o.reason}. The algo counts it at this price.`,
+        });
+        return price;
+      };
+    }
     return (o) => {
       const order = this.broker.place(uid, {
         symbol: String(run.params.symbol),
@@ -1154,7 +1405,22 @@ export class AlgoService {
         if (!day.closed) await this.finishDay(uid, run, day, ts, `Missed the ${String(run.params.exitTime ?? 'exit')} exit on ${day.date}`);
         day = null;
       }
+      if (!day && (run.nextParams || run.nextExecution)) {
+        // Settings saved during the last open day take effect now, before anything of the new day.
+        if (run.nextParams) run.params = run.nextParams;
+        if (run.nextExecution) run.execution = run.nextExecution;
+        delete run.nextParams;
+        delete run.nextExecution;
+        this.db.save();
+        return; // the next tick starts the day with them (the underlying may have changed)
+      }
       if (!day) {
+        // The portfolio stop loss fired today: no run starts a day again today.
+        const halt = this.haltedToday(uid);
+        if (halt) {
+          run.waiting = `Trading halted for today — ${halt}`;
+          return;
+        }
         const expiry = this.pickExpiry(symbol, run.params.expiry, ts);
         day = { date: session.date, expiry, state: algo.init(run.params), events: [], series: [], lastMinute: -1, maxProfit: 0, maxLoss: 0, maxLevel: 0, closed: false, lotSize: this.listedLotSize(symbol, expiry) };
         run.day = day;
@@ -1170,6 +1436,7 @@ export class AlgoService {
       const events = algo.step(run.params, day.state, snap, this.liveFill(uid, run, day));
       if (events.length) this.record(uid, run, day, events);
       const pt = this.point(algo, day.state, snap);
+      day.lastMtm = pt.mtm;
       if (pt.mtm !== null) {
         day.maxProfit = Math.max(day.maxProfit, pt.mtm);
         day.maxLoss = Math.min(day.maxLoss, pt.mtm);
@@ -1242,6 +1509,7 @@ export class AlgoService {
         mtm,
         series: day.series,
         events: [...day.events].reverse(),
+        lotSize,
       };
       // A closed day is already in the history.
       if (!day.closed) todayNet = mtm === null ? null : mtm - charges;
@@ -1262,6 +1530,9 @@ export class AlgoService {
       history: run.history,
       totalNet,
       error: run.error,
+      execution: run.execution ?? 'auto',
+      ...(run.nextParams ? { pendingParams: run.nextParams } : {}),
+      ...(run.nextExecution ? { pendingExecution: run.nextExecution } : {}),
       ...gaps.out(),
     };
   }

@@ -205,6 +205,7 @@ const ROUTES: RouteCase[] = [
   { method: 'GET', route: '/api/watchlists/:id/quotes', url: (c) => `/api/watchlists/${c.ids.watchlist}/quotes`, user: true, full200: true, liveOnly: true },
   { method: 'GET', route: '/api/algo-runs', url: () => '/api/algo-runs', user: true, full200: true },
   { method: 'GET', route: '/api/algo-presets', url: () => '/api/algo-presets', user: true, full200: true },
+  { method: 'GET', route: '/api/algo-guard', url: () => '/api/algo-guard', user: true, full200: true },
   { method: 'GET', route: '/api/algo-runs/:id', url: (c) => `/api/algo-runs/${c.ids.algoRun}`, user: true, full200: true },
   // user mutations
   { method: 'POST', route: '/api/strategies', url: () => '/api/strategies', body: (c) => ({ symbol: 'NIFTY', legs: [leg(c)] }), user: true, full200: true },
@@ -221,6 +222,10 @@ const ROUTES: RouteCase[] = [
   { method: 'PUT', route: '/api/watchlists/:id', url: (c) => `/api/watchlists/${c.ids.watchlist}`, body: () => ({ name: 'Y' }), user: true, full200: true },
   { method: 'POST', route: '/api/algo-runs', url: () => '/api/algo-runs', body: () => ({ algoId: 'premium-ladder', params: { symbol: 'NIFTY', startPremium: 30 } }), user: true, full200: true },
   { method: 'POST', route: '/api/algo-runs/:id/stop', url: (c) => `/api/algo-runs/${c.ids.algoRun}/stop`, user: true, full200: true },
+  // 400 unless trading was halted today (2xx/4xx, never 500).
+  { method: 'POST', route: '/api/algo-guard/resume', url: () => '/api/algo-guard/resume', body: () => ({}), user: true },
+  { method: 'PUT', route: '/api/algo-guard', url: () => '/api/algo-guard', body: () => ({ enabled: true, perLot: 3000, totalLoss: 0 }), user: true, full200: true },
+  { method: 'PATCH', route: '/api/algo-runs/:id', url: (c) => `/api/algo-runs/${c.ids.algoRun}`, body: () => ({ params: { stopLossPerLot: 2500 } }), user: true, full200: true },
   { method: 'POST', route: '/api/algo-presets', url: () => '/api/algo-presets', body: () => ({ algoId: 'oi-top-sell', name: `Mine ${Math.random().toString(36).slice(2, 8)}`, params: { symbol: 'NIFTY' } }), user: true, full200: true },
   // destructive, last
   { method: 'DELETE', route: '/api/algo-presets/:id', url: (c) => `/api/algo-presets/${c.ids.algoPreset}`, user: true, full200: true },

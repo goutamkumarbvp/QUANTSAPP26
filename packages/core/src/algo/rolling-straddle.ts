@@ -32,6 +32,10 @@ export interface RollingStraddleParams {
   /** Daily maximum loss in ₹ per lot (× lots); 0 = none. */
   stopLossPerLot: number;
   lateEntry: boolean;
+  /** Daily profit target in ₹ per lot (× lots): squared off and stopped for the day when reached; 0 or absent = none. */
+  profitTargetPerLot?: number;
+  /** Rolls allowed in a day: when one more is due, everything is squared off for the day; 0 or absent = no limit. */
+  maxRolls?: number;
 }
 
 export interface RollingStraddleState {
@@ -119,6 +123,8 @@ function rules(p: Partial<RollingStraddleParams>): string[] {
     sl > 0
       ? `Daily maximum loss ₹${r2(sl)} per lot (× lots), watched separately from the roll: when realised + open P&L of the day (before charges) reaches −₹${r2(sl)} per lot, everything is squared off and trading stops for the day (no re-entry, no roll).`
       : 'Daily maximum loss: not set (0).',
+    ...(num(p.profitTargetPerLot, 0) > 0 ? [`Daily profit target ₹${r2(num(p.profitTargetPerLot, 0))} per lot (× lots): when the day's P&L reaches it, everything is squared off and trading stops for the day.`] : []),
+    ...(num(p.maxRolls, 0) > 0 ? [`At most ${num(p.maxRolls, 0)} roll${num(p.maxRolls, 0) === 1 ? '' : 's'} a day: when one more is due, everything is squared off and trading stops for the day.`] : []),
     'If no strike can be chosen, or the chosen strike has no traded premium on one side, everything is squared off and trading stops for the day.',
     `Exit: square off everything at ${p.exitTime || '15:25'}. No overnight positions.`,
     'This run keeps its own positions (its own book in Positions), P&L, stop loss, roll count and trade journal.',
@@ -176,10 +182,12 @@ export const rollingStraddle: AlgoDefinition<RollingStraddleParams, RollingStrad
     { key: 'entryTime', label: 'Entry time', type: 'time' },
     { key: 'exitTime', label: 'Exit time', type: 'time' },
     { key: 'stopLossPerLot', label: 'Daily max loss ₹ per lot', type: 'number', min: 0, max: 100000, step: 100, help: 'Realised + open P&L of the day. 0 = none.' },
+    { key: 'profitTargetPerLot', label: 'Daily profit target ₹ per lot', type: 'number', min: 0, max: 100000, step: 100, help: 'Realised + open P&L of the day: squared off and stopped when reached. 0 = none.' },
+    { key: 'maxRolls', label: 'Max rolls per day', type: 'number', min: 0, max: 100, step: 1, help: 'When one more roll is due after this many, everything is squared off for the day instead. 0 = no limit.' },
     { key: 'lateEntry', label: 'Deployed after entry time: enter immediately', type: 'boolean' },
   ],
   defaults(instrument) {
-    return { symbol: instrument.symbol, expiry: 'current', lots: 1, strikeMode: 'atm', rollPct: 20, strikeMultiple: instrument.symbol === 'NIFTY' ? 100 : instrument.strikeStep, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true };
+    return { symbol: instrument.symbol, expiry: 'current', lots: 1, strikeMode: 'atm', rollPct: 20, strikeMultiple: instrument.symbol === 'NIFTY' ? 100 : instrument.strikeStep, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true, profitTargetPerLot: 0, maxRolls: 0 };
   },
   validate(p) {
     if (!p.symbol) return 'Choose an underlying';
@@ -189,6 +197,8 @@ export const rollingStraddle: AlgoDefinition<RollingStraddleParams, RollingStrad
     if (!(p.strikeMultiple >= 0)) return 'Strike multiple cannot be negative';
     if (!(p.stopLossPerLot >= 0 && p.stopLossPerLot <= 100000)) return 'Daily max loss must be between ₹0 (none) and ₹1,00,000 per lot';
     if (p.expiry !== 'current' && p.expiry !== 'next') return 'Expiry must be current or next';
+    if (p.profitTargetPerLot !== undefined && !(p.profitTargetPerLot >= 0 && p.profitTargetPerLot <= 100000)) return 'Daily profit target must be between ₹0 (none) and ₹1,00,000 per lot';
+    if (p.maxRolls !== undefined && !(Number.isInteger(p.maxRolls) && p.maxRolls >= 0 && p.maxRolls <= 100)) return 'Max rolls must be a whole number from 0 (no limit) to 100';
     return validateTimes(p.entryTime, p.exitTime);
   },
   init: () => ({ phase: 'waiting', legs: { CE: null, PE: null }, reference: 0, strike: null, rolls: 0, realized: 0, lotSize: 0, firstSeenMinute: null, stopReason: null, orders: 0 }),
@@ -256,8 +266,20 @@ export const rollingStraddle: AlgoDefinition<RollingStraddleParams, RollingStrad
       }
     }
 
+    // Daily profit target.
+    const target = (p.profitTargetPerLot ?? 0) * p.lots;
+    if (target > 0) {
+      const pnl = dayPnl(s, snap);
+      if (pnl != null && pnl + EPS >= target) {
+        return stop('STOP', `Daily profit target reached: day P&L ${rupees(pnl)} reached +${rupees(target)} (${rupees(p.profitTargetPerLot ?? 0)} per lot × ${p.lots}). Everything squared off; no more trades today.`, 'Daily profit target');
+      }
+    }
+
     const now = combined(s, snap);
     if (now == null || now + EPS < s.reference * (1 + p.rollPct / 100)) return [];
+    if ((p.maxRolls ?? 0) > 0 && s.rolls >= (p.maxRolls ?? 0)) {
+      return stop('STOP', `Combined premium ${rupees(now)} rose ${p.rollPct}% above the ${rupees(s.reference)} reference, but the ${p.maxRolls} roll${p.maxRolls === 1 ? '' : 's'} allowed today are used up. Everything squared off; no more trades today.`, 'Roll limit');
+    }
     const pick = chooseStrike(p, snap);
     if ('wait' in pick) return [];
     const from = s.strike;
@@ -287,7 +309,8 @@ export const rollingStraddle: AlgoDefinition<RollingStraddleParams, RollingStrad
     const items: AlgoStatusItem[] = [{ label: 'State', value: { waiting: `Waiting for ${p.entryTime}`, active: 'Active', stopped: 'Stopped for the day', exited: 'Exited for the day' }[s.phase] }];
     items.push({ label: 'Straddle', value: s.legs.CE && s.legs.PE ? `${s.strike} CE @ ${rupees(s.legs.CE.entryPrice)} + PE @ ${rupees(s.legs.PE.entryPrice)}` : '—' });
     if (s.reference > 0) items.push({ label: 'Reference combined', value: `${rupees(s.reference)} → roll at ${rupees(s.reference * (1 + p.rollPct / 100))}` });
-    items.push({ label: 'Rolls', value: String(s.rolls) });
+    items.push({ label: 'Rolls', value: `${s.rolls}${(p.maxRolls ?? 0) > 0 ? ` of ${p.maxRolls} allowed` : ''}` });
+    if ((p.profitTargetPerLot ?? 0) > 0) items.push({ label: 'Daily profit target', value: `+${rupees((p.profitTargetPerLot ?? 0) * p.lots)} (${rupees(p.profitTargetPerLot ?? 0)} per lot × ${p.lots})` });
     items.push({ label: 'Daily max loss', value: p.stopLossPerLot > 0 ? `−${rupees(p.stopLossPerLot * p.lots)} (${rupees(p.stopLossPerLot)} per lot × ${p.lots})` : 'Not set' });
     if (s.stopReason) items.push({ label: 'Reason', value: s.stopReason });
     return items;

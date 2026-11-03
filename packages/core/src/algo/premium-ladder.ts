@@ -73,6 +73,13 @@ export interface PremiumLadderParams {
    * sold besides out-of-the-money ones. Off or absent: strictly OTM. A strike further in the money: never.
    */
   allowAtm?: boolean;
+  /**
+   * Daily profit target in ₹ per lot (× lots): when realised + open P&L of both legs (before charges) reaches
+   * +target, both legs are squared off and trading stops for the day (profit booked). 0 or absent: none.
+   */
+  profitTargetPerLot?: number;
+  /** Adjustments allowed in a day; the one after the last is not made: everything is squared off instead. 0 or absent: no limit. */
+  maxAdjustments?: number;
 }
 
 export interface PremiumLadderState {
@@ -318,6 +325,8 @@ export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
     sl > 0
       ? `Daily combined stop loss ₹${r2(sl)} per lot (× lots): when realised + open P&L of both legs (before charges) reaches −₹${r2(sl)} per lot, both legs are squared off and trading stops for the day.`
       : 'Daily stop loss: not set (0) — set a ₹ amount per lot to use one.',
+    ...(num(p.profitTargetPerLot, 0) > 0 ? [`Daily profit target ₹${r2(num(p.profitTargetPerLot, 0))} per lot (× lots): when realised + open P&L reaches it, both legs are squared off and trading stops for the day.`] : []),
+    ...(num(p.maxAdjustments, 0) > 0 ? [`At most ${num(p.maxAdjustments, 0)} adjustment${num(p.maxAdjustments, 0) === 1 ? '' : 's'} a day: when one more is due, everything is squared off and trading stops for the day.`] : []),
     `Exit: square off everything at ${exit} regardless of profit or loss. No overnight positions.`,
     'This run keeps its own positions (its own book in Positions), P&L, stop loss, adjustment count and trade journal, apart from every other run.',
     'Live data only: premiums are traded prices of the live session (backtests: the recorded prices of the session). Without a live underlying price the algo waits and never sells blind.',
@@ -346,6 +355,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     { key: 'lateEntry', label: 'Deployed after entry time: enter immediately', type: 'boolean' },
     { key: 'mode', label: 'Adjustment', type: 'select', options: [{ value: 'ladder', label: 'Opposite leg, rising ladder (S1/S2)' }, { value: 'fixed', label: 'Same leg, fixed trigger (S3/S4)' }], help: 'Ladder: the triggered leg is held and the opposite leg rolled to the new level. Fixed: the triggered leg itself is rolled farther OTM to the starting premium; the trigger stays at start + step.' },
     { key: 'stopLossPerLot', label: 'Daily stop loss ₹ per lot', type: 'number', min: 0, max: 100000, step: 100, help: 'Combined realised + open P&L of both legs. 0 = no stop loss.' },
+    { key: 'profitTargetPerLot', label: 'Daily profit target ₹ per lot', type: 'number', min: 0, max: 100000, step: 100, help: 'Combined realised + open P&L of both legs: squared off and stopped for the day when reached. 0 = none.' },
+    { key: 'maxAdjustments', label: 'Max adjustments per day', type: 'number', min: 0, max: 100, step: 1, help: 'When one more adjustment is due after this many, everything is squared off for the day instead. 0 = no limit.' },
     { key: 'allowAtm', label: 'Allow the ATM strike (never ITM)', type: 'boolean' },
   ],
   defaults(instrument) {
@@ -364,6 +375,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       mode: 'ladder',
       stopLossPerLot: 0,
       allowAtm: true,
+      profitTargetPerLot: 0,
+      maxAdjustments: 0,
     };
   },
   validate(p) {
@@ -377,6 +390,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     if (p.triggerOn !== 'either' && p.triggerOn !== 'same') return 'Invalid trigger mode';
     if (p.mode !== undefined && p.mode !== 'ladder' && p.mode !== 'fixed') return 'Adjustment must be ladder or fixed';
     if (p.stopLossPerLot !== undefined && !(p.stopLossPerLot >= 0 && p.stopLossPerLot <= 100000)) return 'Daily stop loss must be between ₹0 (none) and ₹1,00,000 per lot';
+    if (p.profitTargetPerLot !== undefined && !(p.profitTargetPerLot >= 0 && p.profitTargetPerLot <= 100000)) return 'Daily profit target must be between ₹0 (none) and ₹1,00,000 per lot';
+    if (p.maxAdjustments !== undefined && !(Number.isInteger(p.maxAdjustments) && p.maxAdjustments >= 0 && p.maxAdjustments <= 100)) return 'Max adjustments must be a whole number from 0 (no limit) to 100';
     return validateTimes(p.entryTime, p.exitTime);
   },
   init: initState,
@@ -462,6 +477,17 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       return out;
     }
 
+    // 7. Daily profit target.
+    const tp = profitTargetCheck(p, s, snap);
+    if (tp) {
+      const errors = c.closeAll('Daily profit target');
+      s.phase = 'stopped';
+      s.stopReason = `Daily profit target reached: combined P&L ${rupees(tp.pnl)} reached +${rupees(tp.target)} (${rupees(p.profitTargetPerLot ?? 0)} per lot × ${p.lots}). Both legs squared off; no more trades today.`;
+      const out = [ev('STOP', s.stopReason)];
+      if (errors.length) out.push(ev('ERROR', `Square-off failed — ${errors.join('; ')}`));
+      return out;
+    }
+
     if (fixedMode(p)) return fixedAdjust(p, s, snap, c, ev);
 
     // 3–5. Ladder adjustments.
@@ -478,6 +504,7 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     if (!trig) return [];
     // The new leg must be OTM: without the underlying price, wait (nothing changes until it is back).
     if (snap.spot == null) return [];
+    if (adjustmentsExhausted(p, s)) return exhausted(p, s, c, ev, `${trig.side} ${s.legs[trig.side]!.strike} premium ${rupees(trig.ltp)} reached the next level`);
     const next = ladderLevel(s.level, trig.ltp, p.stepPct);
     const opp = other(trig.side);
     const from = s.level;
@@ -534,6 +561,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     items.push({ label: 'Put leg', value: legText(s.legs.PE) });
     const per = s.sideAdjustments;
     items.push({ label: 'Adjustments', value: `${s.adjustments}${per ? ` (CE ${per.CE} · PE ${per.PE})` : ''}` });
+    if ((p.profitTargetPerLot ?? 0) > 0) items.push({ label: 'Daily profit target', value: `+${rupees((p.profitTargetPerLot ?? 0) * p.lots)} (${rupees(p.profitTargetPerLot ?? 0)} per lot × ${p.lots})` });
+    if ((p.maxAdjustments ?? 0) > 0) items.push({ label: 'Adjustments left today', value: String(Math.max(0, (p.maxAdjustments ?? 0) - s.adjustments)) });
     items.push({ label: 'Daily stop loss', value: (p.stopLossPerLot ?? 0) > 0 ? `−${rupees((p.stopLossPerLot ?? 0) * p.lots)} (${rupees(p.stopLossPerLot ?? 0)} per lot × ${p.lots})` : 'Not set' });
     if (s.stopReason) items.push({ label: 'Reason', value: s.stopReason });
     return items;
@@ -560,6 +589,14 @@ function countSide(s: PremiumLadderState, side: OptionSide): void {
 export function stopLossCheck(p: PremiumLadderParams, s: PremiumLadderState, snap: Pick<AlgoSnapshot, 'premium'>): { pnl: number; limit: number } | null {
   const per = p.stopLossPerLot ?? 0;
   if (!(per > 0) || s.phase !== 'active') return null;
+  const pnl = ladderDayPnl(s, snap);
+  if (pnl == null) return null;
+  const limit = per * p.lots;
+  return pnl <= -limit + EPS ? { pnl, limit } : null;
+}
+
+/** Realised + open P&L of the day (before charges); null while an open leg has no premium. */
+export function ladderDayPnl(s: PremiumLadderState, snap: Pick<AlgoSnapshot, 'premium'>): number | null {
   let pnl = s.realized;
   for (const t of SIDES) {
     const leg = s.legs[t];
@@ -568,8 +605,23 @@ export function stopLossCheck(p: PremiumLadderParams, s: PremiumLadderState, sna
     if (ltp == null) return null;
     pnl += (leg.side === 'SELL' ? 1 : -1) * (leg.entryPrice - ltp) * leg.lots * s.lotSize;
   }
-  const limit = per * p.lots;
-  return pnl <= -limit + EPS ? { pnl, limit } : null;
+  return pnl;
+}
+
+/** The daily profit target when reached (realised + open P&L ≥ target per lot × lots); null otherwise or without one. */
+export function profitTargetCheck(p: PremiumLadderParams, s: PremiumLadderState, snap: Pick<AlgoSnapshot, 'premium'>): { pnl: number; target: number } | null {
+  const per = p.profitTargetPerLot ?? 0;
+  if (!(per > 0) || s.phase !== 'active') return null;
+  const pnl = ladderDayPnl(s, snap);
+  if (pnl == null) return null;
+  const target = per * p.lots;
+  return pnl + EPS >= target ? { pnl, target } : null;
+}
+
+/** True when the day's adjustment limit is used up (the next adjustment is not made). */
+function adjustmentsExhausted(p: PremiumLadderParams, s: PremiumLadderState): boolean {
+  const max = p.maxAdjustments ?? 0;
+  return max > 0 && s.adjustments >= max;
 }
 
 /**
@@ -591,6 +643,7 @@ function fixedAdjust(p: PremiumLadderParams, s: PremiumLadderState, snap: AlgoSn
   if (snap.spot == null) return [];
   const out: AlgoEvent[] = [];
   for (const h of hits) {
+    if (adjustmentsExhausted(p, s)) return [...out, ...exhausted(p, s, c, ev, `${h.side} ${s.legs[h.side]!.strike} premium ${rupees(h.ltp)} reached the fixed ${rupees(trigger)} trigger`)];
     const old = s.legs[h.side]!;
     const keep = s.legs[other(h.side)];
     const head = `${h.side} ${old.strike} premium ${rupees(h.ltp)} reached the fixed ${rupees(trigger)} trigger`;
@@ -617,6 +670,16 @@ function fixedAdjust(p: PremiumLadderParams, s: PremiumLadderState, snap: AlgoSn
   return out;
 }
 
+/** The day's adjustment limit is used up and another adjustment is due: square off everything and stop. */
+function exhausted(p: PremiumLadderParams, s: PremiumLadderState, c: Ctx, ev: (k: AlgoEvent['kind'], m: string) => AlgoEvent, head: string): AlgoEvent[] {
+  const errors = c.closeAll('Adjustment limit');
+  s.phase = 'stopped';
+  s.stopReason = `${head}, but the ${p.maxAdjustments} adjustment${p.maxAdjustments === 1 ? '' : 's'} allowed today are used up. All positions squared off; no more trades today.`;
+  const out = [ev('STOP', s.stopReason)];
+  if (errors.length) out.push(ev('ERROR', `Square-off failed — ${errors.join('; ')}`));
+  return out;
+}
+
 /** An order could not be filled: square off what is open and stop for the day. */
 function failed(s: PremiumLadderState, c: Ctx, ev: (k: AlgoEvent['kind'], m: string) => AlgoEvent, err: unknown): AlgoEvent[] {
   const msg = err instanceof Error ? err.message : String(err);
@@ -627,7 +690,7 @@ function failed(s: PremiumLadderState, c: Ctx, ev: (k: AlgoEvent['kind'], m: str
 }
 
 /** The ladder's settings shared by the presets: NIFTY, current expiry, strikes in 100s, 09:20–15:25, ATM/OTM only. */
-const NIFTY_BASE = { symbol: 'NIFTY', expiry: 'current', lots: 1, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true, allowAtm: true } as const;
+const NIFTY_BASE = { symbol: 'NIFTY', expiry: 'current', lots: 1, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true, allowAtm: true, profitTargetPerLot: 0, maxAdjustments: 0 } as const;
 
 /**
  * S1–S4 as specified by the user (3 Nov 2026). Each deployed preset is its own run: separate positions (book),
@@ -643,7 +706,7 @@ export const ALGO_PRESETS: AlgoPreset[] = [
     params: { ...NIFTY_BASE, startPremium: 40, mode: 'ladder', stopLossPerLot: 3000 },
   },
   {
-    id: 'strategy-2-rs20', // the earlier "Strategy 2" (same ladder), now S2
+    id: 's2-ladder-20',
     algoId: 'premium-ladder',
     name: 'S2 · NIFTY OTM premium ladder 20–30–45',
     summary: 'Sell ATM/OTM CE and PE near ₹20 at 09:20 (strikes in 100s). Ladder ₹20 → 30 → 45 → 67.50 → 101.25 (×1.5): the leg that reaches the next level is held, the opposite leg is rolled to that level. Daily stop loss not specified yet (0 = none; set it on the run). Exit 15:25.',
@@ -668,28 +731,20 @@ export const ALGO_PRESETS: AlgoPreset[] = [
     algoId: 'rolling-straddle',
     name: 'S5 · NIFTY ATM rolling straddle (20%)',
     summary: 'Sell ATM CE + PE of the same strike (multiples of 100 only, never 50) at 09:20, weekly expiry. When CE + PE LTP rises 20% above the reference: square off both, sell a fresh straddle at the new ATM strike, new reference. Daily max loss ₹3,000 per lot. Exit 15:25.',
-    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'atm', rollPct: 20, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true },
+    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'atm', rollPct: 20, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true, profitTargetPerLot: 0, maxRolls: 0 },
   },
   {
     id: 's6-maxpain-straddle-25',
     algoId: 'rolling-straddle',
     name: 'S6 · NIFTY max-pain rolling straddle (25%)',
     summary: 'Sell CE + PE at the max-pain strike of the live option chain OI (entry 09:20). When CE + PE LTP rises 25% above the reference: square off both, recalculate max pain from the current OI, sell a fresh straddle there. Daily max loss ₹3,000 per lot. Exit 15:25.',
-    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'maxpain', rollPct: 25, strikeMultiple: 0, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true },
+    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'maxpain', rollPct: 25, strikeMultiple: 0, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true, profitTargetPerLot: 0, maxRolls: 0 },
   },
   {
     id: 's7-sensex-top-oi',
     algoId: 'oi-top-sell',
     name: 'S7 · SENSEX OI-based option selling',
     summary: 'Wednesdays and Thursdays only. At 09:20 rank SENSEX CE and PE strikes by live OI separately; sell 1 lot at each of the top 3 CE and top 3 PE strikes (6 positions). Daily stop loss ₹3,000 on all six combined. Exit 15:25.',
-    params: { symbol: 'SENSEX', expiry: 'current', lots: 1, topN: 3, strikeMultiple: 0, days: 'wed-thu', entryTime: '09:20', exitTime: '15:25', stopLoss: 3000, lateEntry: true },
-  },
-  {
-    // The earlier "Strategy 3" (₹50 start, opposite-leg ladder, strictly OTM), kept so saved runs and habits still work.
-    id: 'strategy-3-rs50',
-    algoId: 'premium-ladder',
-    name: 'Ladder · Starting premium ₹50 (earlier Strategy 3)',
-    summary: 'NIFTY short strangle at ₹50 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (50 → 75 → 112.5 …); strictly OTM; no stop loss; exit 15:25.',
-    params: { ...NIFTY_BASE, startPremium: 50, mode: 'ladder', stopLossPerLot: 0, allowAtm: false },
+    params: { symbol: 'SENSEX', expiry: 'current', lots: 1, topN: 3, strikeMultiple: 0, days: 'wed-thu', entryTime: '09:20', exitTime: '15:25', stopLoss: 3000, lateEntry: true, profitTarget: 0 },
   },
 ];

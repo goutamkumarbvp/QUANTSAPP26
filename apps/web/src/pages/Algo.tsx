@@ -7,10 +7,12 @@ import {
   type AlgoCatalog,
   type AlgoDaySummary,
   type AlgoEvent,
+  type AlgoInfo,
   type AlgoParamSpec,
   type AlgoPreset,
   type AlgoRunView,
   type AlgoSeriesPoint,
+  type PortfolioGuardView,
 } from '@q26/core';
 import { Chart, axis, baseOption, pnlVisualMap, timeAxis, useChartColors } from '../components/Chart';
 import { DataTable } from '../components/DataTable';
@@ -43,7 +45,14 @@ const toneOf = (x: number | null) => (isNum(x) ? (x > 0 ? 'up' : x < 0 ? 'down' 
 
 /* ----------------------------------- charts ----------------------------------- */
 
-function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeriesPoint[]; events: AlgoEvent[]; stepPct: number; height?: number }) {
+/** Title of the strategy-specific chart. */
+function premTitle(algoId: string, params: Params): string {
+  if (algoId === 'rolling-straddle') return 'Straddle premium (CE + PE) vs reference and roll trigger';
+  if (algoId === 'oi-top-sell') return 'Premium of every sold position (top-OI strikes)';
+  return params.mode === 'fixed' ? 'Sold-leg premiums vs starting premium and fixed trigger' : 'Sold-leg premiums vs ladder level';
+}
+
+function DayCharts({ series, events, stepPct, algoId, params, height = 260 }: { series: AlgoSeriesPoint[]; events: AlgoEvent[]; stepPct: number; algoId: string; params: Params; height?: number }) {
   const c = useChartColors();
   const pnl = useMemo(() => {
     if (!series.length) return {};
@@ -73,18 +82,51 @@ function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeri
   }, [series, events, c]);
   const prem = useMemo(() => {
     if (!series.length) return {};
+    const line = (name: string, data: [number, number | null][], color: string, extra: Record<string, unknown> = {}) => ({ name, type: 'line', showSymbol: false, connectNulls: false, data, itemStyle: { color }, lineStyle: { color, ...((extra.lineStyle as object) ?? {}) }, ...extra, ...(extra.lineStyle ? { lineStyle: { color, ...(extra.lineStyle as object) } } : {}) });
+    const yAxis = { type: 'value', ...axis(c), axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => `₹${v}` } };
+    if (algoId === 'rolling-straddle') {
+      // Straddle: both legs, their sum, the reference (entry combined premium) and the roll trigger above it.
+      const rollPct = Number(params.rollPct ?? 20);
+      return {
+        ...baseOption(c),
+        xAxis: timeAxis(c),
+        yAxis,
+        series: [
+          line('CE', series.map((p) => [p.ts, p.ce]), c.up),
+          line('PE', series.map((p) => [p.ts, p.pe]), c.down),
+          line('CE + PE', series.map((p) => [p.ts, p.ce != null && p.pe != null ? +(p.ce + p.pe).toFixed(2) : null]), c.ink, { lineStyle: { width: 2 } }),
+          line('Reference', series.map((p) => [p.ts, p.level || null]), c.accent, { step: 'end', lineStyle: { type: 'dashed' } }),
+          line(`Roll trigger (+${rollPct}%)`, series.map((p) => [p.ts, p.level ? +(p.level * (1 + rollPct / 100)).toFixed(2) : null]), c.warn, { step: 'end', lineStyle: { type: 'dotted' } }),
+        ],
+      };
+    }
+    if (algoId === 'oi-top-sell') {
+      // One line per sold position (top-OI strikes), CE green shades, PE red shades.
+      const keys = [...new Set(series.flatMap((p) => (p.positions ?? []).map((x) => x.key)))];
+      const shade = (k: string, i: number) => (k.endsWith('CE') ? ['#16a34a', '#22c55e', '#86efac', '#15803d'][i % 4] : ['#dc2626', '#f87171', '#fca5a5', '#b91c1c'][i % 4]);
+      const ce = keys.filter((k) => k.endsWith('CE'));
+      const pe = keys.filter((k) => k.endsWith('PE'));
+      return {
+        ...baseOption(c),
+        xAxis: timeAxis(c),
+        yAxis,
+        series: [...ce.map((k, i) => [k, i] as const), ...pe.map((k, i) => [k, i] as const)].map(([k, i]) => line(k, series.map((p) => [p.ts, p.positions?.find((x) => x.key === k)?.ltp ?? null]), shade(k, i))),
+      };
+    }
+    // Premium ladder: ladder levels (S1/S2) or the fixed trigger (S3/S4).
+    const fixed = params.mode === 'fixed';
     return {
       ...baseOption(c),
       xAxis: timeAxis(c),
-      yAxis: { type: 'value', ...axis(c), axisLabel: { color: c.muted, fontSize: 11, formatter: (v: number) => `₹${v}` } },
+      yAxis,
       series: [
-        { name: 'CE', type: 'line', showSymbol: false, connectNulls: false, data: series.map((p) => [p.ts, p.ce]), itemStyle: { color: c.up }, lineStyle: { color: c.up } },
-        { name: 'PE', type: 'line', showSymbol: false, connectNulls: false, data: series.map((p) => [p.ts, p.pe]), itemStyle: { color: c.down }, lineStyle: { color: c.down } },
-        { name: 'Level', type: 'line', step: 'end', showSymbol: false, data: series.map((p) => [p.ts, p.level || null]), lineStyle: { type: 'dashed', color: c.accent }, itemStyle: { color: c.accent } },
-        { name: 'Next trigger', type: 'line', step: 'end', showSymbol: false, data: series.map((p) => [p.ts, p.level && (p.ce != null || p.pe != null) ? +(p.level * (1 + stepPct / 100)).toFixed(2) : null]), lineStyle: { type: 'dotted', color: c.warn }, itemStyle: { color: c.warn } },
+        line('CE', series.map((p) => [p.ts, p.ce]), c.up),
+        line('PE', series.map((p) => [p.ts, p.pe]), c.down),
+        line(fixed ? 'Starting premium' : 'Level', series.map((p) => [p.ts, p.level || null]), c.accent, { step: 'end', lineStyle: { type: 'dashed' } }),
+        line(fixed ? 'Fixed trigger' : 'Next trigger', series.map((p) => [p.ts, p.level && (p.ce != null || p.pe != null) ? +(p.level * (1 + stepPct / 100)).toFixed(2) : null]), c.warn, { step: 'end', lineStyle: { type: 'dotted' } }),
       ],
     };
-  }, [series, stepPct, c]);
+  }, [series, stepPct, c, algoId, params]);
   if (!series.length) return <NoData compact title="No data for this session yet" reason="Charts are drawn from real prices only: minutes without a recorded or live price are not drawn." />;
   return (
     <div className="grid gap-3 lg:grid-cols-2">
@@ -93,8 +135,66 @@ function DayCharts({ series, events, stepPct, height = 260 }: { series: AlgoSeri
         <Chart option={pnl} height={height} />
       </div>
       <div>
-        <div className="mb-1 text-xs font-medium text-muted">Sold-leg premiums vs ladder level</div>
+        <div className="mb-1 text-xs font-medium text-muted">{premTitle(algoId, params)}</div>
         <Chart option={prem} height={height} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The day in figures, for every algo: premium sold and bought back, orders and adjustments, the best and worst
+ * P&L of the day and how much of the peak was given back, how much of the stop loss was used (now and at worst),
+ * progress to the profit target and the share of the day in profit. From the day's own fills and P&L points only.
+ */
+function DayAnalysis({ series, events, params, lotSize, charges, mtm }: { series: AlgoSeriesPoint[]; events: AlgoEvent[]; params: Params; lotSize: number; charges: number | null; mtm: number | null }) {
+  const a = useMemo(() => {
+    const fills = events.flatMap((e) => e.fills);
+    const sold = fills.filter((f) => f.side === 'SELL').reduce((x, f) => x + f.price * f.lots * lotSize, 0);
+    const bought = fills.filter((f) => f.side === 'BUY').reduce((x, f) => x + f.price * f.lots * lotSize, 0);
+    const known = series.map((p) => p.mtm).filter((v): v is number => v !== null);
+    const peak = known.length ? Math.max(0, ...known) : null;
+    const worst = known.length ? Math.min(0, ...known) : null;
+    const inProfit = known.length ? Math.round((known.filter((v) => v > 0).length / known.length) * 100) : null;
+    const lots = Number(params.lots ?? 1);
+    const sl = Number(params.stopLossPerLot ?? 0) > 0 ? Number(params.stopLossPerLot) * lots : Number(params.stopLoss ?? 0) > 0 ? Number(params.stopLoss) : null;
+    const tp = Number(params.profitTargetPerLot ?? 0) > 0 ? Number(params.profitTargetPerLot) * lots : Number(params.profitTarget ?? 0) > 0 ? Number(params.profitTarget) : null;
+    const entry = [...events].reverse().find((e) => e.kind === 'ENTRY');
+    const adj = events.filter((e) => e.kind === 'ADJUSTMENT').length;
+    const lastAdj = events.find((e) => e.kind === 'ADJUSTMENT');
+    return { sold, bought, orders: fills.length, adj, peak, worst, inProfit, sl, tp, entry, lastAdj, giveback: peak !== null && mtm !== null ? peak - mtm : null };
+  }, [series, events, params, lotSize, mtm]);
+  if (!a.orders && !series.length) return null;
+  const pct = (v: number | null, of: number | null) => (v === null || of === null || of <= 0 ? null : Math.round((v / of) * 100));
+  const slNow = mtm !== null && mtm < 0 ? pct(-mtm, a.sl) : a.sl !== null && mtm !== null ? 0 : null;
+  const slWorst = a.worst !== null ? pct(-a.worst, a.sl) : null;
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium text-muted">Day analysis (₹, before charges unless said)</div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-8">
+        <Stat label="Premium sold" value={rupee(Math.round(a.sold))} sub={`${a.orders} order${a.orders === 1 ? '' : 's'}`} />
+        <Stat label="Bought back" value={rupee(Math.round(a.bought))} />
+        <Stat label="Adjustments / rolls" value={String(a.adj)} sub={a.lastAdj ? `last ${formatSessionTime(a.lastAdj.ts)}` : a.entry ? `entry ${formatSessionTime(a.entry.ts)}` : undefined} />
+        <Stat label="Peak profit" value={a.peak === null ? null : signed(Math.round(a.peak))} reason="No priced point yet" tone="up" />
+        <Stat label="Max drawdown" value={a.worst === null ? null : signed(Math.round(a.worst))} reason="No priced point yet" tone="down" />
+        <Stat label="Given back from peak" value={a.giveback === null ? null : rupee(Math.round(a.giveback))} reason="Needs the current P&L" tone={a.giveback && a.giveback > 0 ? 'warn' : undefined} />
+        <Stat
+          label="Stop loss used"
+          value={a.sl === null ? 'Not set' : slNow === null ? null : `${slNow}%`}
+          reason="Needs the current P&L"
+          sub={a.sl === null ? undefined : `limit −${rupee(a.sl)}${slWorst !== null ? ` · worst ${slWorst}%` : ''}`}
+          tone={slNow !== null && slNow >= 75 ? 'down' : slNow !== null && slNow >= 50 ? 'warn' : undefined}
+        />
+        <Stat
+          label="Profit target"
+          value={a.tp === null ? 'Not set' : mtm === null ? null : `${Math.max(0, pct(mtm, a.tp) ?? 0)}%`}
+          reason="Needs the current P&L"
+          sub={a.tp === null ? undefined : `target +${rupee(a.tp)}`}
+          tone={a.tp !== null && mtm !== null && mtm >= a.tp ? 'up' : undefined}
+        />
+      </div>
+      <div className="mt-1 text-2xs text-muted">
+        Time in profit: {a.inProfit === null ? '—' : `${a.inProfit}% of the priced points`}{charges !== null && mtm !== null ? ` · net after charges ${signed(Math.round(mtm - charges))}` : ''}
       </div>
     </div>
   );
@@ -162,8 +262,72 @@ function ParamInput({ spec, value, onChange, symbols, symbolsWhy }: { spec: Algo
 
 /* ---------------------------------- live runs ---------------------------------- */
 
-function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }) {
+/** One line of a run's settings, for any algo (labels from the algo's own parameter list). */
+function paramLine(run: AlgoRunView, algo: AlgoInfo | undefined): string {
+  if (!algo) return Object.entries(run.params).map(([k, v]) => `${k} ${String(v)}`).join(' · ');
+  return algo.params
+    .filter((s) => s.type !== 'boolean' && s.key !== 'symbol')
+    .map((s) => {
+      const v = run.params[s.key];
+      const shown = s.type === 'select' ? s.options?.find((o) => o.value === v)?.label ?? String(v) : String(v ?? '—');
+      return `${s.label} ${shown}`;
+    })
+    .join(' · ');
+}
+
+/** Edit a deployed run: every setting, its name and execution; risk limits apply now, the rest from the next session while positions are open. */
+function RunEditor({ run, algo, symbols, symbolsWhy, onDone }: { run: AlgoRunView; algo: AlgoInfo; symbols: AlgoCatalog['symbols']; symbolsWhy?: string; onDone: (saved: boolean) => void }) {
+  const [p, setP] = useState<Params>(() => ({ ...((run.pendingParams ?? run.params) as Params) }));
+  const [name, setName] = useState(run.name);
+  const [execution, setExecution] = useState<'auto' | 'manual'>(run.pendingExecution ?? run.execution);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const traded = !!run.today && run.today.phase !== 'waiting' && run.today.phase !== 'exited' || (run.today?.legs.length ?? 0) > 0;
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/algo-runs/${run.id}`, { method: 'PATCH', body: { name, params: p, execution } });
+      onDone(true);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+      <div className="text-xs text-muted">
+        {traded
+          ? 'Positions are open (or were traded) today: risk limits (stop loss, profit target, max adjustments / rolls, max premium gap) and the exit time change NOW; every other change applies from the next session, so today’s open positions keep their rules.'
+          : 'Nothing traded today yet: every change applies now.'}
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        <Field label="Run name">
+          <input className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Select label="Execution" className="w-full" value={execution} onChange={(v) => setExecution(v as 'auto' | 'manual')} options={[{ value: 'auto', label: 'Auto (paper orders)' }, { value: 'manual', label: 'Manual (signals only)' }]} />
+        {algo.params.filter((s) => s.type !== 'boolean').map((s) => (
+          <ParamInput key={s.key} spec={s} value={p[s.key]} onChange={(v) => setP((x) => ({ ...x, [s.key]: v }))} symbols={symbols} symbolsWhy={symbolsWhy} />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        {algo.params.filter((s) => s.type === 'boolean').map((s) => (
+          <ParamInput key={s.key} spec={s} value={p[s.key]} onChange={(v) => setP((x) => ({ ...x, [s.key]: v }))} symbols={symbols} symbolsWhy={symbolsWhy} />
+        ))}
+      </div>
+      {error != null && <ErrorState error={error} compact title="Not saved" />}
+      <div className="flex gap-2">
+        <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save settings'}</button>
+        <button className="btn-ghost" disabled={busy} onClick={() => onDone(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function RunCard({ run, onChanged, algo, symbols, symbolsWhy }: { run: AlgoRunView; onChanged: () => void; algo?: AlgoInfo; symbols: AlgoCatalog['symbols']; symbolsWhy?: string }) {
   const [open, setOpen] = useState(true);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const t = run.today;
@@ -192,11 +356,17 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
           </button>
           <Pill tone={run.status === 'running' ? 'up' : 'muted'}>{run.status === 'running' ? '● Running' : 'Stopped'}</Pill>
           {t && <Pill tone={phaseTone}>{t.phase}</Pill>}
+          <Pill tone={run.execution === 'manual' ? 'warn' : 'accent'}>{run.execution === 'manual' ? 'Manual · signals' : 'Auto'}</Pill>
         </span>
       }
       actions={
         <>
           <span className={cx('text-sm font-semibold tabular-nums', pnlClass(net))} title={net === null ? run.gaps?.today ?? 'No live price for an open leg' : 'Today, after charges'}>{signed(net)}</span>
+          {algo && (
+            <button className="btn-ghost px-2 py-1 text-xs" disabled={busy || editing} onClick={() => setEditing(true)}>
+              Edit settings
+            </button>
+          )}
           {run.status === 'running' ? (
             <button className="btn-sell px-2 py-1 text-xs" disabled={busy} onClick={() => confirm(`Stop "${run.name}" and square off its open positions?`) && act(() => api(`/algo-runs/${run.id}/stop`, { method: 'POST', body: {} }))}>
               Stop & square off
@@ -215,8 +385,25 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
         <div className="mb-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn" role="status">Waiting for live data: {run.gaps.liveData}</div>
       )}
       <div className="text-xs text-muted">
-        {String(run.params.symbol)} · {String(run.params.lots)} lot(s)/leg · start ₹{String(run.params.startPremium)} · step {String(run.params.stepPct)}% · strikes ×{String(run.params.strikeMultiple)} · {String(run.params.entryTime)}–{String(run.params.exitTime)} · deployed {formatDateTime(run.createdAt)}
+        <span className="font-semibold text-ink">{String(run.params.symbol)}</span> · {paramLine(run, algo)} · deployed {formatDateTime(run.createdAt)}
       </div>
+      {run.execution === 'manual' && (
+        <div className="mt-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn" role="status">
+          Manual mode: this run places NO orders. Each order it would place is a signal (notification + the journal below) at the live bid / ask — place it yourself. Its P&L assumes you did, at those prices.
+        </div>
+      )}
+      {(run.pendingParams || run.pendingExecution) && (
+        <div className="mt-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-xs" role="status">
+          Saved changes apply from the next session (positions were open today):{' '}
+          {run.pendingParams && Object.keys(run.pendingParams).filter((k) => JSON.stringify(run.pendingParams![k]) !== JSON.stringify(run.params[k])).map((k) => `${k} → ${String(run.pendingParams![k])}`).join(', ')}
+          {run.pendingExecution && ` execution → ${run.pendingExecution}`}
+        </div>
+      )}
+      {editing && algo && (
+        <div className="mt-3">
+          <RunEditor run={run} algo={algo} symbols={symbols} symbolsWhy={symbolsWhy} onDone={(saved) => { setEditing(false); if (saved) onChanged(); }} />
+        </div>
+      )}
       {open && (
         <div className="mt-3 space-y-3">
           {t ? (
@@ -267,7 +454,8 @@ function RunCard({ run, onChanged }: { run: AlgoRunView; onChanged: () => void }
                   {rejected.length} order{rejected.length > 1 ? 's' : ''} rejected or failed today (never counted as filled), last: {rejected[rejected.length - 1].message}
                 </div>
               )}
-              <DayCharts series={t.series} events={t.events} stepPct={Number(run.params.stepPct ?? 50)} height={220} />
+              <DayAnalysis series={t.series} events={t.events} params={run.params as Params} lotSize={t.lotSize} charges={t.charges} mtm={t.mtm} />
+              <DayCharts series={t.series} events={t.events} stepPct={Number(run.params.stepPct ?? 50)} algoId={run.algoId} params={run.params as Params} height={220} />
               <div>
                 <div className="mb-1 text-xs font-medium text-muted">Today's events</div>
                 <EventLog events={t.events} />
@@ -350,7 +538,8 @@ function DayBacktest({ algoId, params, date, setDate, resolution }: { algoId: st
               <Stat label="Exit" value={d.entered ? EXIT_LABEL[d.exitKind] : 'No trade'} hint={d.exitReason} sub={d.exitTs ? formatSessionTime(d.exitTs) : undefined} />
             </div>
             {d.exitReason && <div className="rounded-lg border border-line bg-panel2/60 px-3 py-2 text-xs">{d.exitReason}</div>}
-            <DayCharts series={d.series} events={d.events} stepPct={Number(params.stepPct ?? 50)} />
+            <DayAnalysis series={d.series} events={d.events} params={params} lotSize={d.lotSize} charges={d.charges} mtm={d.pnl} />
+            <DayCharts series={d.series} events={d.events} stepPct={Number(params.stepPct ?? 50)} algoId={d.algoId} params={params} />
             <Card title="Trade log" pad={false}>
               <EventLog events={d.events} />
             </Card>
@@ -449,6 +638,91 @@ function RangeBacktest({ algoId, params, onPickDay, resolution }: { algoId: stri
   );
 }
 
+/* ------------------------------- portfolio stop loss ------------------------------- */
+
+/**
+ * Portfolio stop loss over all the user's algo runs: lots traded per underlying, today's combined P&L, the limit
+ * (₹ per lot × the most lots held today, and / or a total), editable; a halt banner with an explicit resume.
+ */
+function PortfolioGuardCard() {
+  const qc = useQueryClient();
+  const g = useLive<PortfolioGuardView>(['algo-guard'], '/algo-guard', 3000);
+  const [form, setForm] = useState<{ enabled: boolean; perLot: string; totalLoss: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const v = g.data;
+  const f = form ?? (v ? { enabled: v.settings.enabled, perLot: String(v.settings.perLot), totalLoss: String(v.settings.totalLoss) } : null);
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      setForm(null);
+      await qc.invalidateQueries({ queryKey: ['algo-guard'] });
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const used = v && v.limit !== null && v.pnl !== null && v.pnl < 0 ? Math.round((-v.pnl / v.limit) * 100) : v && v.pnl !== null ? 0 : null;
+  return (
+    <Card title="Portfolio stop loss · all algo runs" actions={v ? <Pill tone={v.halted ? 'down' : v.settings.enabled ? 'up' : 'muted'}>{v.halted ? 'HALTED today' : v.settings.enabled ? 'Protecting' : 'Off'}</Pill> : undefined}>
+      <Loadable q={g}>
+        {(v) => (
+          <div className="space-y-3">
+            {v.halted && (
+              <div className="rounded-lg border border-down/50 bg-down/10 px-3 py-2 text-sm text-down" role="alert">
+                <div className="font-semibold">Algo trading halted for today ({formatSessionTime(v.halted.at)})</div>
+                <div className="text-xs">{v.halted.reason}. Every run was squared off; none trades again today.</div>
+                <button className="btn-ghost mt-2 px-2 py-1 text-xs" disabled={busy} onClick={() => confirm('Lift today\'s halt? Runs that have not started today may then trade again. Runs already squared off stay closed today.') && act(() => api('/algo-guard/resume', { method: 'POST', body: {} }))}>
+                  Resume trading today
+                </button>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Stat label="Combined P&L today" value={v.pnl === null ? null : signed(v.pnl)} reason={v.gaps?.pnl ?? 'Not known right now'} tone={toneOf(v.pnl)} sub="all algo runs, before charges" />
+              <Stat label="Limit" value={v.limit === null ? null : `−${rupee(v.limit)}`} reason={v.gaps?.limit ?? 'No limit applies yet'} sub={[v.perLotLimit !== null ? `per lot ${rupee(v.settings.perLot)} × ${v.peakLots}` : null, v.totalLimit !== null ? `total ${rupee(v.totalLimit)}` : null].filter(Boolean).join(' · ') || undefined} />
+              <Stat label="Limit used" value={used === null ? null : `${used}%`} reason="Needs the P&L and a limit" tone={used !== null && used >= 75 ? 'down' : used !== null && used >= 50 ? 'warn' : undefined} />
+              <Stat label="Lots open / peak today" value={`${v.openLots} / ${v.peakLots}`} sub="every leg's lots, all underlyings" />
+            </div>
+            {v.lots.length > 0 && (
+              <table className="tbl">
+                <thead><tr><th>Underlying</th><th className="num">Lots open</th><th className="num">Most today</th></tr></thead>
+                <tbody>{v.lots.map((l) => <tr key={l.symbol}><td>{l.symbol}</td><td className="num">{l.open}</td><td className="num">{l.peak}</td></tr>)}</tbody>
+              </table>
+            )}
+            {v.runs.length > 0 && (
+              <table className="tbl">
+                <thead><tr><th>Run today</th><th>Underlying</th><th className="num">Lots open</th><th className="num">P&L</th></tr></thead>
+                <tbody>{v.runs.map((r) => <tr key={r.id}><td>{r.name}</td><td>{r.symbol}</td><td className="num">{r.openLots}</td><td className={cx('num', pnlClass(r.pnl))}><Val value={r.pnl} format={(x) => signed(x)} reason="An open leg has no live price" /></td></tr>)}</tbody>
+              </table>
+            )}
+            {f && (
+              <div className="flex flex-wrap items-end gap-3 border-t border-line pt-3">
+                <Toggle label="Portfolio stop loss on" checked={f.enabled} onChange={(on) => setForm({ ...f, enabled: on })} />
+                <Field label="₹ per lot traded today" className="w-40">
+                  <input className="input" type="number" min={0} step={100} value={f.perLot} onChange={(e) => setForm({ ...f, perLot: e.target.value })} />
+                </Field>
+                <Field label="Total portfolio loss ₹ (0 = not used)" className="w-56">
+                  <input className="input" type="number" min={0} step={500} value={f.totalLoss} onChange={(e) => setForm({ ...f, totalLoss: e.target.value })} />
+                </Field>
+                <button className="btn-primary" disabled={busy || !form} onClick={() => act(() => api('/algo-guard', { method: 'PUT', body: { enabled: f.enabled, perLot: Number(f.perLot || 0), totalLoss: Number(f.totalLoss || 0) } }))}>
+                  {busy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            )}
+            {error != null && <ErrorState error={error} compact title="Not saved" />}
+            <p className="text-2xs text-muted">
+              Checked every few seconds over every algo run today (auto and manual): when the combined realised + open P&L reaches −limit, every run is squared off and no run trades again today. Limit = ₹ per lot × the most lots held at once today (every leg counts: a 1-lot strangle is 2 lots), and / or the total — with both, the smaller. Manual trades are not included. A square-off the broker cannot fill is announced as CRITICAL: close it yourself.
+            </p>
+          </div>
+        )}
+      </Loadable>
+    </Card>
+  );
+}
+
 /* ------------------------------------- page ------------------------------------- */
 
 export default function Algo() {
@@ -462,6 +736,7 @@ export default function Algo() {
   const [btDate, setBtDate] = useState('');
   const [resolution, setResolution] = useState<Resolution>('1m');
   const [name, setName] = useState('');
+  const [execution, setExecution] = useState<'auto' | 'manual'>('auto');
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -485,6 +760,9 @@ export default function Algo() {
     setPresetId(p.id);
     setParams(p.params as Params);
     setApplied(p.params as Params);
+    // A newly picked strategy starts from Auto: a Manual choice for another strategy never carries over silently.
+    setExecution('auto');
+    setSaveMsg(null);
   };
   const setParam = async (key: string, v: string | number | boolean) => {
     if (key === 'symbol' && algo) {
@@ -507,7 +785,7 @@ export default function Algo() {
     setDeploying(true);
     setError(null);
     try {
-      await api(`/algo-runs`, { body: { algoId: algo.id, presetId: preset?.id, name: name || undefined, params } });
+      await api(`/algo-runs`, { body: { algoId: algo.id, presetId: preset?.id, name: name || undefined, params, execution } });
       setApplied(params);
       setTab('live');
       await qc.invalidateQueries({ queryKey: ['algo-runs'] });
@@ -612,6 +890,7 @@ export default function Algo() {
                     <Field label="Run name (optional)" className="w-56">
                       <input className="input" value={name} maxLength={60} placeholder={preset?.name} onChange={(e) => setName(e.target.value)} />
                     </Field>
+                    <Select label="Execution" className="w-52" value={execution} onChange={(v) => setExecution(v as 'auto' | 'manual')} options={[{ value: 'auto', label: 'Auto (paper orders)' }, { value: 'manual', label: 'Manual (signals only — you place the orders)' }]} />
                     <button className="btn-ghost" onClick={() => setApplied(params)} disabled={!dirty}>
                       Apply to backtests
                     </button>
@@ -630,6 +909,8 @@ export default function Algo() {
                 </Card>
               )}
 
+              <PortfolioGuardCard />
+
               <Segmented
                 value={tab}
                 onChange={setTab}
@@ -646,7 +927,7 @@ export default function Algo() {
                     list.length ? (
                       <div className="space-y-3">
                         {list.map((r) => (
-                          <RunCard key={r.id} run={r} onChanged={() => qc.invalidateQueries({ queryKey: ['algo-runs'] })} />
+                          <RunCard key={r.id} run={r} algo={cat.algos.find((a) => a.id === r.algoId)} symbols={cat.symbols} symbolsWhy={cat.gaps?.symbols} onChanged={() => qc.invalidateQueries({ queryKey: ['algo-runs'] })} />
                         ))}
                       </div>
                     ) : (
