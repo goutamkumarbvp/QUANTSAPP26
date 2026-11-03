@@ -54,6 +54,24 @@ export interface PremiumLadderParams {
   triggerOn: 'either' | 'same';
   /** A live run started after the entry time enters straight away (else it waits a day). */
   lateEntry: boolean;
+  /**
+   * 'ladder' (S1/S2): when a leg reaches the next level, that leg is held and the OPPOSITE leg is rolled to a
+   * strike near the new level; levels rise ×(1 + step) each time.
+   * 'fixed' (S3/S4): the trigger stays at start × (1 + step); the triggered leg ITSELF is bought back and re-sold
+   * farther out of the money near the starting premium; the opposite leg is not touched.
+   * Absent (runs saved before this option): 'ladder'.
+   */
+  mode?: 'ladder' | 'fixed';
+  /**
+   * Daily combined stop loss in ₹ per lot (× lots): when realised + open P&L of both legs (before charges)
+   * falls to −limit, both legs are squared off and trading stops for the day. 0 or absent: none.
+   */
+  stopLossPerLot?: number;
+  /**
+   * The at-the-money strike (the strike nearest the spot, so at most half a strike step in the money) may be
+   * sold besides out-of-the-money ones. Off or absent: strictly OTM. A strike further in the money: never.
+   */
+  allowAtm?: boolean;
 }
 
 export interface PremiumLadderState {
@@ -72,6 +90,8 @@ export interface PremiumLadderState {
   entryTs: number | null;
   stopReason: string | null;
   orders: number;
+  /** Adjustments per side: the side whose leg was rolled (ladder: the opposite of the trigger; fixed: the triggered side). */
+  sideAdjustments?: { CE: number; PE: number };
 }
 
 const EPS = 1e-9;
@@ -105,30 +125,65 @@ export type StrikeSelection = { ok: true; pick: StrikePick } | { ok: false; reas
  * The eligible strike (OTM, multiple of `multiple`) whose premium is closest to `target`.
  * Ties go to the strike further out of the money.
  */
+/**
+ * The at-the-money strike among multiples of `multiple`: the one nearest the spot; null without a spot, or when
+ * two strikes are equally near (one of them is then out of the money anyway).
+ */
+export function ladderAtmStrike(strikes: readonly number[], spot: number | null, multiple: number): number | null {
+  if (spot == null || !Number.isFinite(spot)) return null;
+  let best: number | null = null;
+  let tie = false;
+  for (const k of strikes) {
+    if (!isStrikeMultiple(k, multiple)) continue;
+    const d = Math.abs(k - spot);
+    const bd = best == null ? Infinity : Math.abs(best - spot);
+    if (d < bd - EPS) {
+      best = k;
+      tie = false;
+    } else if (Math.abs(d - bd) <= EPS && k !== best) tie = true;
+  }
+  return tie ? null : best;
+}
+
 export function selectStrike(
   snap: Pick<AlgoSnapshot, 'spot' | 'strikes' | 'premium'>,
   type: OptionSide,
   target: number,
-  opts: { multiple: number; maxGapPct: number },
+  opts: {
+    multiple: number;
+    maxGapPct: number;
+    /** The ATM strike may be chosen besides OTM ones. */
+    allowAtm?: boolean;
+    /** Only strikes strictly farther out of the money than this one (CE above it, PE below it). */
+    beyond?: number;
+    /** Only premiums strictly below this (a re-sold leg must not be at its trigger already). */
+    below?: number;
+  },
 ): StrikeSelection {
   const mult = opts.multiple > 0 ? ` (multiple of ${opts.multiple})` : '';
-  if (snap.spot == null || !Number.isFinite(snap.spot)) return { ok: false, reason: `No underlying price: OTM ${type} strikes cannot be identified`, nearest: null };
+  const kind = opts.allowAtm ? 'ATM/OTM' : 'OTM';
+  if (snap.spot == null || !Number.isFinite(snap.spot)) return { ok: false, reason: `No underlying price: ${kind} ${type} strikes cannot be identified`, nearest: null };
+  const atm = opts.allowAtm ? ladderAtmStrike(snap.strikes, snap.spot, opts.multiple) : null;
+  const farther = opts.beyond == null ? '' : ` farther OTM than ${opts.beyond}`;
   let best: StrikePick | null = null;
   let otm = 0;
   for (const k of snap.strikes) {
-    if (!isStrikeMultiple(k, opts.multiple) || !isOtm(type, k, snap.spot)) continue;
+    if (!isStrikeMultiple(k, opts.multiple) || !(isOtm(type, k, snap.spot) || k === atm)) continue;
+    if (opts.beyond != null && !(type === 'CE' ? k > opts.beyond : k < opts.beyond)) continue;
     otm++;
     const prem = snap.premium(type, k);
     if (prem == null || !(prem > 0.05)) continue;
+    if (opts.below != null && !(prem < opts.below - EPS)) continue;
     const gapPct = (Math.abs(prem - target) / target) * 100;
     const furtherOtm = best != null && (type === 'CE' ? k > best.strike : k < best.strike);
     if (!best || gapPct < best.gapPct - EPS || (Math.abs(gapPct - best.gapPct) <= EPS && furtherOtm)) best = { strike: k, premium: prem, gapPct };
   }
-  if (!best) return { ok: false, reason: otm === 0 ? `No OTM ${type} strike${mult} is listed` : `No OTM ${type} strike${mult} has a traded premium (${otm} listed)`, nearest: null };
+  const under = opts.below != null ? ` below ${rupees(opts.below)}` : '';
+  if (!best) return { ok: false, reason: otm === 0 ? `No ${kind} ${type} strike${mult}${farther} is listed` : `No ${kind} ${type} strike${mult}${farther} has a traded premium${under} (${otm} listed)`, nearest: null };
   if (best.gapPct > opts.maxGapPct + EPS) {
     return {
       ok: false,
-      reason: `No OTM ${type} strike${mult} near ${rupees(target)}: nearest is ${best.strike} at ${rupees(best.premium)} (${best.gapPct.toFixed(0)}% away, limit ${opts.maxGapPct}%)`,
+      reason: `No ${kind} ${type} strike${mult}${farther} near ${rupees(target)}: nearest is ${best.strike} at ${rupees(best.premium)} (${best.gapPct.toFixed(0)}% away, limit ${opts.maxGapPct}%)`,
       nearest: best,
     };
   }
@@ -148,7 +203,7 @@ export function ladderLevel(level: number, premium: number, stepPct: number): { 
 }
 
 function initState(): PremiumLadderState {
-  return { phase: 'waiting', level: 0, rung: 0, legs: { CE: null, PE: null }, lastTrigger: null, adjustments: 0, realized: 0, lotSize: 0, firstSeenMinute: null, entryTs: null, stopReason: null, orders: 0 };
+  return { phase: 'waiting', level: 0, rung: 0, legs: { CE: null, PE: null }, lastTrigger: null, adjustments: 0, realized: 0, lotSize: 0, firstSeenMinute: null, entryTs: null, stopReason: null, orders: 0, sideAdjustments: { CE: 0, PE: 0 } };
 }
 
 function mmToHhmm(min: number): string {
@@ -223,7 +278,7 @@ export function ladderLevels(startPremium: number, stepPct: number, count = 4): 
   return out;
 }
 
-/** Plain-language rules for a parameter set (shown in the Algo panel; defaults = Strategy 2). */
+/** Plain-language rules for a parameter set (shown in the Algo panel; defaults = the ladder with ₹20 start). */
 export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
   const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) && v !== '' && v != null ? Number(v) : d);
   const symbol = p.symbol || 'NIFTY';
@@ -232,30 +287,50 @@ export function ladderRules(p: Partial<PremiumLadderParams>): string[] {
   // Same fallback as the server: NIFTY trades 100s; other symbols any listed strike.
   const mult = num(p.strikeMultiple, symbol === 'NIFTY' ? 100 : 0);
   const gap = num(p.maxGapPct, 50);
+  const sl = num(p.stopLossPerLot, 0);
   const entry = p.entryTime || '09:20';
   const exit = p.exitTime || '15:25';
-  const levels = ladderLevels(start, step).map((x) => `₹${x}`).join(' → ');
+  const atm = p.allowAtm === true;
+  const kind = atm ? 'ATM or OTM' : 'OTM';
   const strikes = mult > 0 ? `${symbol} strikes must be multiples of ${mult}.` : `Any listed ${symbol} strike may be used.`;
-  return [
-    `Entry at ${entry}: sell one CE and one PE, both OTM, with premiums closest to the starting premium (₹${r2(start)}). ${strikes}`,
-    `Adjustment ladder: levels at +${step}% steps — ${levels} → … with no limit.`,
-    p.triggerOn === 'same'
-      ? 'When a leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. After the first adjustment only the leg that triggered last can trigger the next level. A jump through several levels goes straight to the highest one reached.'
-      : 'When either leg’s premium reaches the next level, buy back the opposite leg and sell the OTM strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
-    'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
-    `If no eligible OTM strike is available for a required entry or adjustment (one with a traded premium within ±${gap}% of the target), square off all positions and stop trading for the day.`,
-    `Exit: square off everything at ${exit} regardless of profit or loss.`,
+  const fixed = p.mode === 'fixed';
+  const trigger = r2(start * (1 + step / 100));
+  const rules = [`Entry at ${entry}: sell one CE and one PE, both ${kind}, with premiums closest to the starting premium (₹${r2(start)}). ${strikes}`];
+  if (fixed) {
+    rules.push(
+      `Fixed trigger at ₹${trigger} (₹${r2(start)} + ${step}%). It never moves up: every adjustment is triggered at ₹${trigger}.`,
+      `Same-side adjustment: CE and PE are watched separately. When a leg's premium reaches ₹${trigger}, that leg is bought back and a fresh option of the same side is sold farther out of the money, at the strike whose premium is nearest ₹${r2(start)} (and below ₹${trigger}). The other leg is not touched. This repeats every time a leg reaches ₹${trigger}.`,
+    );
+  } else {
+    rules.push(
+      `Adjustment ladder: levels at +${step}% steps — ${ladderLevels(start, step, 5).map((x) => `₹${x}`).join(' → ')} → … with no limit.`,
+      p.triggerOn === 'same'
+        ? 'When a leg’s premium reaches the next level, that leg is held unchanged; the opposite leg is bought back in full and re-sold at the strike whose premium is nearest that level. After the first adjustment only the leg that triggered last can trigger the next level. A jump through several levels goes straight to the highest one reached.'
+        : 'CE and PE are watched separately. When either leg’s premium reaches the next level, that leg is held unchanged; the opposite leg is bought back in full and re-sold at the strike whose premium is nearest that level. A jump through several levels goes straight to the highest one reached.',
+    );
+  }
+  rules.push(
+    atm
+      ? 'ATM or OTM only, never ITM: the at-the-money strike (the one nearest the spot, at most half a strike step from it) or any out-of-the-money strike may be sold.'
+      : 'Strict OTM: every newly sold option must be out of the money at the time it is sold.',
+    `If no eligible ${kind} strike is available for a required entry or adjustment (one with a traded premium within ±${gap}% of the target), square off all positions and stop trading for the day.`,
+    sl > 0
+      ? `Daily combined stop loss ₹${r2(sl)} per lot (× lots): when realised + open P&L of both legs (before charges) reaches −₹${r2(sl)} per lot, both legs are squared off and trading stops for the day.`
+      : 'Daily stop loss: not set (0) — set a ₹ amount per lot to use one.',
+    `Exit: square off everything at ${exit} regardless of profit or loss. No overnight positions.`,
+    'This run keeps its own positions (its own book in Positions), P&L, stop loss, adjustment count and trade journal, apart from every other run.',
     'Live data only: premiums are traded prices of the live session (backtests: the recorded prices of the session). Without a live underlying price the algo waits and never sells blind.',
-  ];
+  );
+  return rules;
 }
 
 export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderState> = {
   id: 'premium-ladder',
   name: 'Premium ladder short strangle',
-  description: 'Sell an OTM call and put at a target premium; each time either leg gains another 50%, roll the other leg to the new premium level.',
+  description: 'Sell an OTM call and put at a target premium. Ladder mode: each time a leg gains another step, roll the other leg to the new premium level. Fixed mode: a leg that reaches the fixed trigger is rolled farther OTM to the starting premium.',
   rules: ladderRules({}),
   describeRules: (p) => ladderRules(p),
-  label: (p) => `Premium ladder · ₹${r2(p.startPremium)} start${p.symbol !== 'NIFTY' ? ` · ${p.symbol}` : ''}`,
+  label: (p) => `${p.mode === 'fixed' ? 'Fixed premium' : 'Premium ladder'} · ₹${r2(p.startPremium)}–${r2(p.startPremium * (1 + p.stepPct / 100))}${p.symbol !== 'NIFTY' ? ` · ${p.symbol}` : ''}`,
   params: [
     { key: 'symbol', label: 'Underlying', type: 'symbol' },
     { key: 'expiry', label: 'Expiry', type: 'select', options: [{ value: 'current', label: 'Current (nearest)' }, { value: 'next', label: 'Next' }] },
@@ -268,6 +343,9 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     { key: 'maxGapPct', label: 'Max premium gap %', type: 'number', min: 1, max: 100, step: 1, help: 'How far the nearest OTM premium may be from the target before the strike counts as unavailable (then everything is squared off).' },
     { key: 'triggerOn', label: 'Next trigger from', type: 'select', options: [{ value: 'either', label: 'Either leg' }, { value: 'same', label: 'Same leg that triggered' }] },
     { key: 'lateEntry', label: 'Deployed after entry time: enter immediately', type: 'boolean' },
+    { key: 'mode', label: 'Adjustment', type: 'select', options: [{ value: 'ladder', label: 'Opposite leg, rising ladder (S1/S2)' }, { value: 'fixed', label: 'Same leg, fixed trigger (S3/S4)' }], help: 'Ladder: the triggered leg is held and the opposite leg rolled to the new level. Fixed: the triggered leg itself is rolled farther OTM to the starting premium; the trigger stays at start + step.' },
+    { key: 'stopLossPerLot', label: 'Daily stop loss ₹ per lot', type: 'number', min: 0, max: 100000, step: 100, help: 'Combined realised + open P&L of both legs. 0 = no stop loss.' },
+    { key: 'allowAtm', label: 'Allow the ATM strike (never ITM)', type: 'boolean' },
   ],
   defaults(instrument) {
     return {
@@ -282,6 +360,9 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       maxGapPct: 50,
       triggerOn: 'either',
       lateEntry: true,
+      mode: 'ladder',
+      stopLossPerLot: 0,
+      allowAtm: true,
     };
   },
   validate(p) {
@@ -293,6 +374,8 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     if (!(p.maxGapPct >= 1 && p.maxGapPct <= 100)) return 'Max premium gap must be between 1% and 100%';
     if (p.expiry !== 'current' && p.expiry !== 'next') return 'Expiry must be current or next';
     if (p.triggerOn !== 'either' && p.triggerOn !== 'same') return 'Invalid trigger mode';
+    if (p.mode !== undefined && p.mode !== 'ladder' && p.mode !== 'fixed') return 'Adjustment must be ladder or fixed';
+    if (p.stopLossPerLot !== undefined && !(p.stopLossPerLot >= 0 && p.stopLossPerLot <= 100000)) return 'Daily stop loss must be between ₹0 (none) and ₹1,00,000 per lot';
     const re = /^([01]\d|2[0-3]):[0-5]\d$/;
     if (!re.test(p.entryTime) || !re.test(p.exitTime)) return 'Times must be HH:MM';
     const en = hhmmToMinutes(p.entryTime);
@@ -352,12 +435,12 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
         return [ev('INFO', s.stopReason)];
       }
       s.lotSize = snap.lotSize;
-      const opts = { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct };
+      const opts = { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct, allowAtm: p.allowAtm === true };
       const ce = selectStrike(snap, 'CE', p.startPremium, opts);
       const pe = selectStrike(snap, 'PE', p.startPremium, opts);
       if (!ce.ok || !pe.ok) {
         s.phase = 'stopped';
-        s.stopReason = `No eligible OTM strike at entry — ${[ce, pe].filter((x): x is Extract<StrikeSelection, { ok: false }> => !x.ok).map((x) => x.reason).join('; ')}. No trades today.`;
+        s.stopReason = `No eligible ${p.allowAtm ? 'ATM/OTM' : 'OTM'} strike at entry — ${[ce, pe].filter((x): x is Extract<StrikeSelection, { ok: false }> => !x.ok).map((x) => x.reason).join('; ')}. No trades today.`;
         return [ev('STOP', s.stopReason)];
       }
       try {
@@ -370,8 +453,21 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       s.rung = 0;
       s.entryTs = snap.ts;
       s.phase = 'active';
-      return [ev('ENTRY', `Sold ${legText(s.legs.CE)} and ${legText(s.legs.PE)} (spot ${snap.spot.toFixed(2)}). Next adjustment when a leg reaches ${rupees(s.level * (1 + p.stepPct / 100))}.`)];
+      return [ev('ENTRY', `Sold ${legText(s.legs.CE)} and ${legText(s.legs.PE)} (spot ${snap.spot.toFixed(2)}). ${fixedMode(p) ? `A leg that reaches ${rupees(triggerOf(p, s))} is rolled farther OTM near ${rupees(p.startPremium)}` : `Next adjustment when a leg reaches ${rupees(s.level * (1 + p.stepPct / 100))}`}.`)];
     }
+
+    // 6. Daily combined stop loss (before any adjustment of this step).
+    const sl = stopLossCheck(p, s, snap);
+    if (sl) {
+      const errors = c.closeAll('Daily stop loss');
+      s.phase = 'stopped';
+      s.stopReason = `Daily stop loss hit: combined P&L ${rupees(sl.pnl)} reached −${rupees(sl.limit)} (${rupees(p.stopLossPerLot ?? 0)} per lot × ${p.lots}). Both legs squared off; no more trades today.`;
+      const out = [ev('STOP', s.stopReason)];
+      if (errors.length) out.push(ev('ERROR', `Square-off failed — ${errors.join('; ')}`));
+      return out;
+    }
+
+    if (fixedMode(p)) return fixedAdjust(p, s, snap, c, ev);
 
     // 3–5. Ladder adjustments.
     const watch = p.triggerOn === 'same' && s.lastTrigger ? [s.lastTrigger] : SIDES;
@@ -390,13 +486,13 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     const next = ladderLevel(s.level, trig.ltp, p.stepPct);
     const opp = other(trig.side);
     const from = s.level;
-    const sel = selectStrike(snap, opp, next.level, { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct });
+    const sel = selectStrike(snap, opp, next.level, { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct, allowAtm: p.allowAtm === true });
     const head = `${trig.side} ${s.legs[trig.side]!.strike} premium ${rupees(trig.ltp)} reached ${rupees(next.level)} (${rupees(from)} → ${rupees(next.level)}${next.rungs > 1 ? `, ${next.rungs} levels at once` : ''})`;
     if (!sel.ok) {
       s.level = next.level;
       s.rung += next.rungs;
       s.lastTrigger = trig.side;
-      const errors = c.closeAll('No eligible OTM strike');
+      const errors = c.closeAll(`No eligible ${p.allowAtm ? 'ATM/OTM' : 'OTM'} strike`);
       s.phase = 'stopped';
       s.stopReason = `${sel.reason}. All positions squared off; no more trades today.`;
       const out = [ev('STOP', `${head}. ${s.stopReason}`)];
@@ -414,6 +510,7 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       const exit = c.close(opp, `Shift ${opp} to ${rupees(next.level)}`);
       c.sell(opp, sel.pick.strike, `Shift ${opp} to ${rupees(next.level)}`);
       s.adjustments++;
+      countSide(s, opp);
       return [ev('ADJUSTMENT', `${head}. Bought back ${oldLeg ? `${oldLeg.strike} ${opp} @ ${rupees(exit ?? 0)}` : `no ${opp}`}, sold ${legText(s.legs[opp])}. Next adjustment at ${rupees(s.level * (1 + p.stepPct / 100))}.`)];
     } catch (err) {
       return failed(s, c, ev, err);
@@ -432,17 +529,98 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     const items: AlgoStatusItem[] = [];
     const phase = { waiting: `Waiting for ${p.entryTime}`, active: 'Active', stopped: 'Stopped for the day', exited: 'Exited for the day' }[s.phase];
     items.push({ label: 'State', value: phase });
-    if (s.phase === 'active' || s.level > 0) {
+    if (fixedMode(p)) {
+      if (s.phase === 'active') items.push({ label: 'Trigger (fixed)', value: `${rupees(triggerOf(p))} on either leg → that leg re-sold near ${rupees(p.startPremium)}` });
+    } else if (s.phase === 'active' || s.level > 0) {
       items.push({ label: 'Premium level', value: `${rupees(s.level)} (level ${s.rung})` });
       if (s.phase === 'active') items.push({ label: 'Next trigger', value: `${rupees(s.level * (1 + p.stepPct / 100))}${p.triggerOn === 'same' && s.lastTrigger ? ` on ${s.lastTrigger}` : ''}` });
     }
     items.push({ label: 'Call leg', value: legText(s.legs.CE) });
     items.push({ label: 'Put leg', value: legText(s.legs.PE) });
-    items.push({ label: 'Adjustments', value: String(s.adjustments) });
+    const per = s.sideAdjustments;
+    items.push({ label: 'Adjustments', value: `${s.adjustments}${per ? ` (CE ${per.CE} · PE ${per.PE})` : ''}` });
+    items.push({ label: 'Daily stop loss', value: (p.stopLossPerLot ?? 0) > 0 ? `−${rupees((p.stopLossPerLot ?? 0) * p.lots)} (${rupees(p.stopLossPerLot ?? 0)} per lot × ${p.lots})` : 'Not set' });
     if (s.stopReason) items.push({ label: 'Reason', value: s.stopReason });
     return items;
   },
 };
+
+const fixedMode = (p: PremiumLadderParams) => p.mode === 'fixed';
+
+/** Fixed mode's trigger premium: start × (1 + step), e.g. ₹40 → ₹60, ₹20 → ₹30. */
+function triggerOf(p: PremiumLadderParams, _s?: PremiumLadderState): number {
+  return p.startPremium * (1 + p.stepPct / 100);
+}
+
+function countSide(s: PremiumLadderState, side: OptionSide): void {
+  s.sideAdjustments ??= { CE: 0, PE: 0 };
+  s.sideAdjustments[side]++;
+}
+
+/**
+ * Combined P&L of the day (realised + open legs at their current premiums, before charges) when it has reached
+ * the daily stop loss; null otherwise, without a stop loss, or while an open leg has no premium (unknown P&L is
+ * never taken as a loss — the check runs again with the next price).
+ */
+export function stopLossCheck(p: PremiumLadderParams, s: PremiumLadderState, snap: Pick<AlgoSnapshot, 'premium'>): { pnl: number; limit: number } | null {
+  const per = p.stopLossPerLot ?? 0;
+  if (!(per > 0) || s.phase !== 'active') return null;
+  let pnl = s.realized;
+  for (const t of SIDES) {
+    const leg = s.legs[t];
+    if (!leg) continue;
+    const ltp = snap.premium(t, leg.strike);
+    if (ltp == null) return null;
+    pnl += (leg.side === 'SELL' ? 1 : -1) * (leg.entryPrice - ltp) * leg.lots * s.lotSize;
+  }
+  const limit = per * p.lots;
+  return pnl <= -limit + EPS ? { pnl, limit } : null;
+}
+
+/**
+ * Fixed-trigger, same-side adjustment (S3/S4): each leg whose premium has reached the trigger is bought back and
+ * re-sold farther out of the money at the strike whose premium is nearest the starting premium (and below the
+ * trigger); the other leg is left exactly as it is. No eligible strike: everything is squared off for the day.
+ */
+function fixedAdjust(p: PremiumLadderParams, s: PremiumLadderState, snap: AlgoSnapshot, c: Ctx, ev: (k: AlgoEvent['kind'], m: string) => AlgoEvent): AlgoEvent[] {
+  const trigger = triggerOf(p);
+  const hits: { side: OptionSide; ltp: number }[] = [];
+  for (const side of SIDES) {
+    const leg = s.legs[side];
+    if (!leg) continue;
+    const ltp = snap.premium(side, leg.strike);
+    if (ltp != null && ltp + EPS >= trigger) hits.push({ side, ltp });
+  }
+  if (!hits.length) return [];
+  // The new leg must be ATM/OTM: without the underlying price, wait (nothing changes until it is back).
+  if (snap.spot == null) return [];
+  const out: AlgoEvent[] = [];
+  for (const h of hits) {
+    const old = s.legs[h.side]!;
+    const keep = s.legs[other(h.side)];
+    const head = `${h.side} ${old.strike} premium ${rupees(h.ltp)} reached the fixed ${rupees(trigger)} trigger`;
+    const sel = selectStrike(snap, h.side, p.startPremium, { multiple: p.strikeMultiple, maxGapPct: p.maxGapPct, allowAtm: p.allowAtm === true, beyond: old.strike, below: trigger });
+    s.lastTrigger = h.side;
+    if (!sel.ok) {
+      const errors = c.closeAll(`No eligible ${p.allowAtm ? 'ATM/OTM' : 'OTM'} strike`);
+      s.phase = 'stopped';
+      s.stopReason = `${sel.reason}. All positions squared off; no more trades today.`;
+      out.push(ev('STOP', `${head}. ${s.stopReason}`));
+      if (errors.length) out.push(ev('ERROR', `Square-off failed — ${errors.join('; ')}`));
+      return out;
+    }
+    try {
+      const exit = c.close(h.side, `Roll ${h.side} farther OTM`);
+      c.sell(h.side, sel.pick.strike, `Roll ${h.side} farther OTM`);
+      s.adjustments++;
+      countSide(s, h.side);
+      out.push(ev('ADJUSTMENT', `${head}. Bought back ${old.strike} ${h.side} @ ${rupees(exit ?? 0)}, sold ${legText(s.legs[h.side])} (farther OTM, near ${rupees(p.startPremium)}). ${other(h.side)} ${keep ? legText(keep) : '—'} untouched.`));
+    } catch (err) {
+      return [...out, ...failed(s, c, ev, err)];
+    }
+  }
+  return out;
+}
 
 /** An order could not be filled: square off what is open and stop for the day. */
 function failed(s: PremiumLadderState, c: Ctx, ev: (k: AlgoEvent['kind'], m: string) => AlgoEvent, err: unknown): AlgoEvent[] {
@@ -453,21 +631,49 @@ function failed(s: PremiumLadderState, c: Ctx, ev: (k: AlgoEvent['kind'], m: str
   return [ev('ERROR', s.stopReason + (errors.length ? ` Square-off failed — ${errors.join('; ')}` : ''))];
 }
 
+/** The ladder's settings shared by the presets: NIFTY, current expiry, strikes in 100s, 09:20–15:25, ATM/OTM only. */
+const NIFTY_BASE = { symbol: 'NIFTY', expiry: 'current', lots: 1, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true, allowAtm: true } as const;
+
+/**
+ * S1–S4 as specified by the user (3 Nov 2026). Each deployed preset is its own run: separate positions (book),
+ * P&L, stop loss, adjustment counters and journal. S2 and S4 have no daily stop loss until its value is decided
+ * (0 = none; set it on the run).
+ */
 export const ALGO_PRESETS: AlgoPreset[] = [
   {
-    id: 'strategy-2-rs20',
+    id: 's1-ladder-40',
     algoId: 'premium-ladder',
-    name: 'Strategy 2 · Starting premium ₹20',
-    summary: 'NIFTY short strangle at ₹20 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (20 → 30 → 45 …); stop if no OTM strike; exit 15:25.',
-    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true },
+    name: 'S1 · NIFTY OTM premium ladder 40–60–90',
+    summary: 'Sell ATM/OTM CE and PE near ₹40 at 09:20 (strikes in 100s). Ladder ₹40 → 60 → 90 → 135 → 202.50 (×1.5): the leg that reaches the next level is held, the opposite leg is rolled to that level. Daily stop loss ₹3,000 per lot. Exit 15:25.',
+    params: { ...NIFTY_BASE, startPremium: 40, mode: 'ladder', stopLossPerLot: 3000 },
   },
   {
-    // Same rules as Strategy 2, starting from ₹50 premiums (closer to the money).
+    id: 'strategy-2-rs20', // the earlier "Strategy 2" (same ladder), now S2
+    algoId: 'premium-ladder',
+    name: 'S2 · NIFTY OTM premium ladder 20–30–45',
+    summary: 'Sell ATM/OTM CE and PE near ₹20 at 09:20 (strikes in 100s). Ladder ₹20 → 30 → 45 → 67.50 → 101.25 (×1.5): the leg that reaches the next level is held, the opposite leg is rolled to that level. Daily stop loss not specified yet (0 = none; set it on the run). Exit 15:25.',
+    params: { ...NIFTY_BASE, startPremium: 20, mode: 'ladder', stopLossPerLot: 0 },
+  },
+  {
+    id: 's3-fixed-40',
+    algoId: 'premium-ladder',
+    name: 'S3 · NIFTY OTM fixed premium 40–60',
+    summary: 'Sell ATM/OTM CE and PE near ₹40 at 09:20 (strikes in 100s). Fixed trigger ₹60: the leg that reaches it is bought back and re-sold farther OTM near ₹40; the other leg is untouched. Daily stop loss ₹3,000 per lot. Exit 15:25.',
+    params: { ...NIFTY_BASE, startPremium: 40, mode: 'fixed', stopLossPerLot: 3000 },
+  },
+  {
+    id: 's4-fixed-20',
+    algoId: 'premium-ladder',
+    name: 'S4 · NIFTY OTM fixed premium 20–30',
+    summary: 'Sell ATM/OTM CE and PE near ₹20 at 09:20 (strikes in 100s). Fixed trigger ₹30: the leg that reaches it is bought back and re-sold farther OTM near ₹20; the other leg is untouched. Daily stop loss as S2: not specified yet (0 = none; set it on the run). Exit 15:25.',
+    params: { ...NIFTY_BASE, startPremium: 20, mode: 'fixed', stopLossPerLot: 0 },
+  },
+  {
+    // The earlier "Strategy 3" (₹50 start, opposite-leg ladder, strictly OTM), kept so saved runs and habits still work.
     id: 'strategy-3-rs50',
     algoId: 'premium-ladder',
-    name: 'Strategy 3 · Starting premium ₹50',
-    summary: 'NIFTY short strangle at ₹50 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (50 → 75 → 112.5 …); stop if no OTM strike; exit 15:25.',
-    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, startPremium: 50, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', maxGapPct: 50, triggerOn: 'either', lateEntry: true },
+    name: 'Ladder · Starting premium ₹50 (earlier Strategy 3)',
+    summary: 'NIFTY short strangle at ₹50 premiums (strikes in 100s) entered 09:20; shift the opposite leg every +50% (50 → 75 → 112.5 …); strictly OTM; no stop loss; exit 15:25.',
+    params: { ...NIFTY_BASE, startPremium: 50, mode: 'ladder', stopLossPerLot: 0, allowAtm: false },
   },
 ];
-

@@ -271,3 +271,45 @@ pauses, and the token-budget warning every few seconds.
   - order flow: Kotak minutes added, recorded wins, nothing recorded, and Kotak refusing (MCX);
   - write-behind store;
   - web: chart note and minute table.
+
+## C-56 — Algo strategies S1–S4 (ladder and fixed premium), daily stop loss, ATM/OTM, separate books
+
+The user's specification of 3 Nov 2026, built on the existing premium-ladder algo (`packages/core/src/algo/premium-ladder.ts`).
+
+Presets (Algo Strategies → library). All are NIFTY, current expiry, strikes in 100s, entry 09:20, exit 15:25 and
+ATM/OTM only:
+
+| Preset | Start | Adjustment | Daily stop loss |
+|---|---|---|---|
+| S1 · NIFTY OTM premium ladder 40–60–90 | ₹40 | ladder ×1.5 (40 → 60 → 90 → 135 → 202.50 → …), opposite leg rolled | ₹3,000 per lot |
+| S2 · NIFTY OTM premium ladder 20–30–45 | ₹20 | ladder ×1.5 (20 → 30 → 45 → 67.50 → 101.25 → …), opposite leg rolled | not specified: 0 = none, set on the run |
+| S3 · NIFTY OTM fixed premium 40–60 | ₹40 | fixed trigger ₹60, same leg rolled farther OTM near ₹40 | ₹3,000 per lot |
+| S4 · NIFTY OTM fixed premium 20–30 | ₹20 | fixed trigger ₹30, same leg rolled farther OTM near ₹20 | as S2: 0 = none until decided |
+
+S2 keeps the id of the earlier "Strategy 2" (the same ladder). The earlier ₹50 ladder stays as "Ladder · Starting
+premium ₹50 (earlier Strategy 3)", strictly OTM with no stop loss.
+
+New settings (any run):
+- **`mode`**:
+  - `ladder` (S1/S2): the leg that reaches the next level is held, and the opposite leg is bought back in full and
+    re-sold near that level. This is the existing behaviour.
+  - `fixed` (S3/S4): the trigger stays at start × (1 + step). The triggered leg itself is bought back and re-sold at
+    the strike strictly farther OTM whose premium is nearest the starting premium and below the trigger. The other
+    leg is not touched, and this repeats on every trigger.
+  - If no such strike exists, everything is squared off for the day.
+- **`stopLossPerLot`**: daily combined stop loss in ₹ per lot (× lots). It counts realised + open P&L of both legs,
+  before charges, and is checked before any adjustment of a step. On a hit, both legs are squared off and the run
+  stops for the day. 0 = none. A leg without a current premium is not judged on an unknown P&L.
+- **`allowAtm`**: the ATM strike may be sold besides OTM ones; ITM never. ATM = the strike nearest the spot, at most
+  half a strike step from it; with two equally near, only the OTM one.
+
+Runs saved before these settings keep their behaviour: ladder, no stop loss, strictly OTM.
+
+Separate books: a run's orders (tag `algo:<run id>`) now form their own positions in the paper broker
+(`Position.book`). Two runs selling the same strike, and manual trades on it, no longer net into one position: each
+keeps its own average price, P&L and exit. Positions shows an "Algo <id>" label on such positions. Each run already
+had its own state, P&L, adjustment count (now also per side) and journal of events.
+
+Tests: presets; ATM/never-ITM selection; S3 rolls only the triggered leg, trigger fixed; S3 stops when nothing is
+farther OTM; stop loss hit, not set, and unknown premium; S1 and S3 side by side; broker books apart (two runs + a
+manual trade, exit of one).

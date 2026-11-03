@@ -7,6 +7,8 @@ import {
   ladderRules,
   isOtm,
   ladderLevel,
+  ladderAtmStrike,
+  stopLossCheck,
   openPnl,
   premiumLadder,
   selectStrike,
@@ -283,7 +285,7 @@ describe('Strategy 3 (starting premium ₹50)', () => {
 
   it('differs from Strategy 2 only in the starting premium', () => {
     expect(P50.startPremium).toBe(50);
-    expect({ ...P50, startPremium: 20 }).toEqual(P20);
+    expect({ ...P50, startPremium: 20, allowAtm: true }).toEqual(P20); // S2 allows the ATM strike; the ₹50 ladder stays strictly OTM
     expect(premiumLadder.validate(P50)).toBeNull();
   });
 
@@ -359,6 +361,127 @@ describe('Strategy 3 rolls the opposite leg to the strike nearest the new level'
     expect(ladderRules({ ...P50, triggerOn: 'same' }).join(' ')).toMatch(/only the leg that triggered last/);
     expect(ladderRules({ ...P50, maxGapPct: 20 }).join(' ')).toMatch(/within ±20% of the target/);
     expect(ladderRules({ symbol: 'FINNIFTY', strikeMultiple: '' as unknown as number }).join(' ')).toMatch(/Any listed FINNIFTY strike/);
-    expect(premiumLadder.label!({ ...P50, startPremium: 30 })).toBe('Premium ladder · ₹30 start');
+    expect(premiumLadder.label!({ ...P50, startPremium: 30 })).toBe('Premium ladder · ₹30–45');
+  });
+});
+
+describe('S1–S4 rules (ATM/OTM, daily stop loss, same-side fixed trigger)', () => {
+  const preset = (id: string) => ({ ...P, ...(ALGO_PRESETS.find((x) => x.id === id)!.params as Partial<PremiumLadderParams>) }) as PremiumLadderParams;
+  const S1 = preset('s1-ladder-40');
+  const S3 = preset('s3-fixed-40');
+  // The toy market jumps a leg from about ₹29 to ₹99 in one step, past S3's ₹3,000 stop loss: the adjustment
+  // tests run without it (the stop loss has its own tests below).
+  const S3noSL = { ...S3, stopLossPerLot: 0 };
+  const S1noSL = { ...S1, stopLossPerLot: 0 };
+
+  it('presets: S1–S4 with their own premiums, modes and stop losses; S2/S4 have none until it is set', () => {
+    expect(ALGO_PRESETS.map((x) => x.name)).toEqual([
+      'S1 · NIFTY OTM premium ladder 40–60–90',
+      'S2 · NIFTY OTM premium ladder 20–30–45',
+      'S3 · NIFTY OTM fixed premium 40–60',
+      'S4 · NIFTY OTM fixed premium 20–30',
+      'Ladder · Starting premium ₹50 (earlier Strategy 3)',
+    ]);
+    expect(ALGO_PRESETS.slice(0, 4).map((x) => [x.params.startPremium, x.params.mode, x.params.stopLossPerLot, x.params.allowAtm, x.params.strikeMultiple, x.params.entryTime, x.params.exitTime])).toEqual([
+      [40, 'ladder', 3000, true, 100, '09:20', '15:25'],
+      [20, 'ladder', 0, true, 100, '09:20', '15:25'],
+      [40, 'fixed', 3000, true, 100, '09:20', '15:25'],
+      [20, 'fixed', 0, true, 100, '09:20', '15:25'],
+    ]);
+    for (const x of ALGO_PRESETS) expect(premiumLadder.validate({ ...P, ...(x.params as Partial<PremiumLadderParams>) } as PremiumLadderParams)).toBeNull();
+    expect(ladderLevels(40, 50, 5)).toEqual([40, 60, 90, 135, 202.5]);
+    expect(ladderLevels(20, 50, 5)).toEqual([20, 30, 45, 67.5, 101.25]);
+    expect(ladderRules(S3).join(' ')).toMatch(/Fixed trigger at ₹60 .* never moves up/);
+    expect(ladderRules(S3).join(' ')).toMatch(/The other leg is not touched/);
+    expect(ladderRules(S1).join(' ')).toMatch(/Daily combined stop loss ₹3000 per lot/);
+    expect(ladderRules(preset('s4-fixed-20')).join(' ')).toMatch(/Daily stop loss: not set/);
+  });
+
+  it('ATM or OTM, never ITM: the strike nearest the spot may be sold, one further in the money never', () => {
+    const strikes = [24800, 24900, 25000, 25100, 25200];
+    expect(ladderAtmStrike(strikes, 25040, 100)).toBe(25000);
+    expect(ladderAtmStrike(strikes, 25050, 100)).toBeNull(); // equally near 25000 and 25100: no ATM, the OTM one is allowed anyway
+    const snap = market(25040, 560);
+    const atm = selectStrike(snap, 'CE', 147, { multiple: 100, maxGapPct: 50, allowAtm: true });
+    expect(atm.ok && atm.pick.strike).toBe(25000);
+    const strict = selectStrike(snap, 'CE', 147, { multiple: 100, maxGapPct: 50 });
+    expect(strict.ok && strict.pick.strike).not.toBe(25000);
+    // A deep target would want the in-the-money 24900 CE: never chosen.
+    const itm = selectStrike(snap, 'CE', 250, { multiple: 100, maxGapPct: 100, allowAtm: true });
+    expect(itm.ok && itm.pick.strike).toBe(25000);
+  });
+
+  it('S3: the leg that reaches ₹60 is bought back and re-sold farther OTM near ₹40; the other leg is untouched; the trigger stays ₹60', () => {
+    const r = runner(S3noSL);
+    r.at(market(25000, 560));
+    expect(r.s.legs.CE?.strike).toBe(25200);
+    expect(r.s.legs.PE?.strike).toBe(24800);
+    const pe = r.s.legs.PE;
+    r.orders.length = 0;
+    // CE 25200 rises to about ₹99 (≥ ₹60).
+    const ev = r.at(market(25150, 600));
+    expect(r.orders.map((o) => [o.side, o.type, o.strike])).toEqual([['BUY', 'CE', 25200], ['SELL', 'CE', 25300]]);
+    expect(r.s.legs.PE).toBe(pe); // the same object: not touched
+    expect(ev[0].kind).toBe('ADJUSTMENT');
+    expect(ev[0].message).toMatch(/CE 25200 premium .* reached the fixed ₹60 trigger.*farther OTM.*PE 24800 .* untouched/);
+    expect(r.s.sideAdjustments).toEqual({ CE: 1, PE: 0 });
+    // Again at ₹60 (not ₹90): CE 25300 at about ₹107 → rolled to 25400.
+    r.orders.length = 0;
+    r.at(market(25260, 620));
+    expect(r.orders.map((o) => [o.side, o.type, o.strike])).toEqual([['BUY', 'CE', 25300], ['SELL', 'CE', 25400]]);
+    expect(r.s.adjustments).toBe(2);
+    expect(r.s.phase).toBe('active');
+  });
+
+  it('S3: no ATM/OTM strike farther out near ₹40 (and below ₹60) → both legs squared off, stopped for the day', () => {
+    const r = runner(S3noSL);
+    r.at(market(25000, 560));
+    r.orders.length = 0;
+    // Only the strikes up to 25300 are listed: nothing farther out than 25200 sits near ₹40 below ₹60.
+    const snap = market(25150, 600);
+    const ev = r.at({ ...snap, strikes: snap.strikes.filter((k) => k <= 25200) });
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/No ATM\/OTM CE strike \(multiple of 100\) farther OTM than 25200/);
+    expect(r.orders.map((o) => [o.side, o.type, o.strike])).toEqual([['BUY', 'CE', 25200], ['BUY', 'PE', 24800]]);
+    expect(r.s.phase).toBe('stopped');
+    expect(r.at(market(25000, 630))).toEqual([]);
+  });
+
+  it('daily combined stop loss: realised + open P&L at −₹3,000 per lot × lots squares off both legs and halts', () => {
+    const r = runner({ ...S1, lots: 2 });
+    r.at(market(25000, 560));
+    r.orders.length = 0;
+    // CE 25200 deep in the money: the combined loss is far beyond ₹6,000 (2 lots); checked before any adjustment.
+    const ev = r.at(market(25350, 600));
+    expect(ev[0].kind).toBe('STOP');
+    expect(ev[0].message).toMatch(/Daily stop loss hit: combined P&L .* reached −₹6000 \(₹3000 per lot × 2\)/);
+    expect(r.orders.map((o) => [o.side, o.type, o.strike])).toEqual([['BUY', 'CE', 25200], ['BUY', 'PE', 24800]]);
+    expect(r.s.phase).toBe('stopped');
+    expect(r.s.realized).toBeLessThanOrEqual(-6000);
+    expect(r.at(market(25000, 630))).toEqual([]); // no more trades today
+  });
+
+  it('stop loss: not set → never fires; an open leg without a premium → not judged on unknown P&L', () => {
+    const r = runner(S1noSL);
+    r.at(market(25000, 560));
+    expect(stopLossCheck({ ...S1, stopLossPerLot: 0 }, r.s, market(25350, 600))).toBeNull();
+    const blind = { premium: (t: 'CE' | 'PE') => (t === 'CE' ? null : 1) };
+    expect(stopLossCheck(S1, r.s, blind)).toBeNull();
+    expect(stopLossCheck(S1, r.s, market(25350, 600))).not.toBeNull();
+  });
+
+  it('two runs (S1 and S3) on the same market keep separate legs, P&L and counters', () => {
+    const a = runner(S1noSL);
+    const b = runner(S3noSL);
+    for (const [spot, min] of [[25000, 560], [25150, 600], [25260, 620]] as const) {
+      a.at(market(spot, min));
+      b.at(market(spot, min));
+    }
+    // S1 (ladder) rolled the PUT to the new level; S3 (fixed) rolled the CALL farther out.
+    expect(a.s.sideAdjustments!.PE).toBeGreaterThan(0);
+    expect(a.s.sideAdjustments!.CE).toBe(0);
+    expect(b.s.sideAdjustments).toEqual({ CE: 2, PE: 0 });
+    expect(a.s.legs.CE).not.toBe(b.s.legs.CE);
+    expect(a.orders).not.toEqual(b.orders);
   });
 });

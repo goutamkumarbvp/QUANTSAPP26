@@ -819,6 +819,11 @@ export interface Position {
   strike?: number;
   expiry: string;
   product: ProductType;
+  /**
+   * The algo run this position belongs to (`algo:<run id>`): every run keeps its own positions and P&L, apart
+   * from other runs and manual trades on the same contract. Absent for manual trades.
+   */
+  book?: string;
   netQty: number;
   /** Lot size the contract traded with (from the orders). */
   lotSize: number;

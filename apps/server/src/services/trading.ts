@@ -43,8 +43,24 @@ const MAX_LOTS_PER_ORDER = 50;
 export type Notify = (userId: string, n: Omit<Notification, 'id' | 'ts' | 'read'>) => void;
 export type EmitOrder = (userId: string, order: Order) => void;
 
+/**
+ * An algo run's orders (tag `algo:<run id>`) form their own book: each run's positions, average prices and
+ * P&L stay apart from the other runs' and from manual trades, even on the same contract. Manual orders: ''.
+ */
+export function bookOf(tag: string | undefined): string {
+  return tag && tag.startsWith('algo:') ? tag : '';
+}
+
+/** Position key: the contract and product, plus the book of an algo run. */
+function positionKey(o: { symbol: string; type: Position['type']; strike?: number; expiry: string; product: Position['product']; tag?: string }): string {
+  const book = bookOf(o.tag);
+  return instrumentKey({ symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product }) + (book ? `|${book}` : '');
+}
+
 interface PositionAgg {
   key: string;
+  /** Algo run book (`algo:<run id>`), '' for manual trades. */
+  book: string;
   symbol: string;
   type: Position['type'];
   strike?: number;
@@ -98,9 +114,9 @@ export class PaperBroker {
     for (const t of [...trades].reverse()) {
       const o = byOrder.get(t.orderId);
       if (!o) continue;
-      const key = instrumentKey({ symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product });
+      const key = positionKey(o);
       const lotSize = o.lots > 0 ? o.quantity / o.lots : 1;
-      const agg = map.get(key) ?? { key, symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product, lotSize, buyQty: 0, sellQty: 0, buyValue: 0, sellValue: 0 };
+      const agg = map.get(key) ?? { key, book: bookOf(o.tag), symbol: o.symbol, type: o.type, strike: o.strike, expiry: o.expiry, product: o.product, lotSize, buyQty: 0, sellQty: 0, buyValue: 0, sellValue: 0 };
       if (t.side === 'BUY') {
         agg.buyQty += t.quantity;
         agg.buyValue += t.quantity * t.price;
@@ -162,6 +178,7 @@ export class PaperBroker {
         strike: a.strike,
         expiry: a.expiry,
         product: a.product,
+        ...(a.book ? { book: a.book } : {}),
         netQty: shownQty,
         lotSize: a.lotSize,
         avgPrice: +avgPrice.toFixed(2),
@@ -325,7 +342,7 @@ export class PaperBroker {
 
   /** The order only reduces an existing position of the same contract and product (never flips it). */
   private reducesRisk(uid: string, order: Order): boolean {
-    const key = instrumentKey({ symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry, product: order.product });
+    const key = positionKey(order);
     const agg = this.aggregate(this.trades(uid), this.orders(uid)).find((a) => a.key === key);
     if (!agg) return false;
     const net = agg.buyQty - agg.sellQty;
@@ -381,7 +398,7 @@ export class PaperBroker {
       const before = this.fundsFor(uid, this.toPositions(this.aggregate(trades, orders), ts), ts);
       const afterPositions = this.toPositions(this.aggregate([trade, ...trades], orders), ts);
       // The traded contract without a live-session trade yet is marked at its fill (a live bid/ask).
-      const key = instrumentKey({ symbol: order.symbol, type: order.type, strike: order.strike, expiry: order.expiry, product: order.product });
+      const key = positionKey(order);
       for (const p of afterPositions) {
         if (p.key === key && p.status === 'open' && p.ltp === null) {
           p.ltp = fillPrice;
@@ -460,7 +477,7 @@ export class PaperBroker {
       const n = Math.min(perSlice, left);
       const o = this.placeOrder(
         uid,
-        { symbol: pos.symbol, type: pos.type, strike: pos.strike, expiry: pos.expiry, side: pos.netQty > 0 ? 'SELL' : 'BUY', lots: n, orderType: 'MARKET', product: pos.product, tag: 'exit' },
+        { symbol: pos.symbol, type: pos.type, strike: pos.strike, expiry: pos.expiry, side: pos.netQty > 0 ? 'SELL' : 'BUY', lots: n, orderType: 'MARKET', product: pos.product, tag: pos.book || 'exit' },
         Infinity,
       );
       orders.push(o);

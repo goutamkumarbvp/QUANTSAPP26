@@ -488,3 +488,23 @@ describe('user contracts streamed in the user tier', () => {
     expect(p.userContracts()).toEqual([]);
   });
 });
+
+describe('algo runs keep separate books', () => {
+  it('two runs selling the same contract, and a manual trade on it, are three positions with their own P&L; exiting one leaves the others', () => {
+    const { book, broker } = setup();
+    broker.place('u1', ce(book, 25000, { side: 'SELL', lots: 1, tag: 'algo:ALG-S1' }));
+    broker.place('u1', ce(book, 25000, { side: 'SELL', lots: 2, tag: 'algo:ALG-S3' }));
+    broker.place('u1', ce(book, 25000, { side: 'BUY', lots: 1 }));
+    const pos = broker.positions('u1');
+    expect(pos.map((x) => [x.book ?? 'manual', x.netQty / x.lotSize]).sort()).toEqual([['algo:ALG-S1', -1], ['algo:ALG-S3', -2], ['manual', 1]]);
+    expect(new Set(pos.map((x) => x.key)).size).toBe(3);
+    // Squaring off S1's position touches only S1's book.
+    const s1 = pos.find((x) => x.book === 'algo:ALG-S1')!;
+    const exits = broker.exitPosition('u1', s1.key);
+    expect(exits.every((o) => o.status === 'COMPLETE' && o.tag === 'algo:ALG-S1')).toBe(true);
+    const after = broker.positions('u1');
+    expect(after.find((x) => x.book === 'algo:ALG-S1')!.netQty).toBe(0);
+    expect(after.find((x) => x.book === 'algo:ALG-S3')!.netQty / s1.lotSize).toBe(-2);
+    expect(after.find((x) => !x.book)!.netQty / s1.lotSize).toBe(1);
+  });
+});

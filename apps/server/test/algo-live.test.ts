@@ -106,9 +106,12 @@ describe('algo catalogue, defaults and presets', () => {
     const { p, algos } = setupLive();
     const c: AlgoCatalog = algos.catalog();
     expect(c.algos.map((a) => a.id)).toContain('premium-ladder');
-    expect(c.presets.map((x) => x.id)).toEqual(['strategy-2-rs20', 'strategy-3-rs50']);
-    expect(c.presets[0].params).toMatchObject({ symbol: 'NIFTY', startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25' });
-    expect(c.presets[1].params).toMatchObject({ startPremium: 50 });
+    expect(c.presets.map((x) => x.id)).toEqual(['s1-ladder-40', 'strategy-2-rs20', 's3-fixed-40', 's4-fixed-20', 'strategy-3-rs50']);
+    expect(c.presets[1].params).toMatchObject({ symbol: 'NIFTY', startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', mode: 'ladder', stopLossPerLot: 0, allowAtm: true });
+    expect(c.presets[0].params).toMatchObject({ startPremium: 40, mode: 'ladder', stopLossPerLot: 3000 });
+    expect(c.presets[2].params).toMatchObject({ startPremium: 40, mode: 'fixed', stopLossPerLot: 3000 });
+    expect(c.presets[3].params).toMatchObject({ startPremium: 20, mode: 'fixed', stopLossPerLot: 0 });
+    expect(c.presets[4].params).toMatchObject({ startPremium: 50, allowAtm: false });
     expect(c.symbols).toEqual([
       { symbol: 'NIFTY', lotSize: 75, strikeStep: 50, kind: 'index' },
       { symbol: 'BANKNIFTY', lotSize: 35, strikeStep: 100, kind: 'index' },
@@ -130,14 +133,14 @@ describe('algo catalogue, defaults and presets', () => {
     const { p, book, algos } = setupLive();
     quoteChain(p, W(book), 25000);
     const preset = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { lots: 1 } });
-    expect(preset).toMatchObject({ name: 'Strategy 3 · Starting premium ₹50', presetId: 'strategy-3-rs50', status: 'running' });
-    expect(preset.params).toMatchObject({ ...ALGO_PRESETS[1].params });
+    expect(preset).toMatchObject({ name: 'Ladder · Starting premium ₹50 (earlier Strategy 3)', presetId: 'strategy-3-rs50', status: 'running' });
+    expect(preset.params).toMatchObject({ ...ALGO_PRESETS[4].params });
     const blank = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: '' } });
     expect(blank.params.startPremium).toBe(50);
     expect(blank.presetId).toBe('strategy-3-rs50');
     const edited = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: 30 } });
     expect(edited.params.startPremium).toBe(30);
-    expect(edited.name).toBe('Premium ladder · ₹30 start');
+    expect(edited.name).toBe('Premium ladder · ₹30–45');
     expect(edited.presetId).toBeUndefined();
     await expect(algos.create('u1', { algoId: 'premium-ladder', presetId: 'nope', params: {} })).rejects.toMatchObject({ statusCode: 404 });
     expect(algos.list('u1')).toHaveLength(3);
@@ -189,7 +192,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     const D = book.date;
     // Pre-open: deployed, but nothing happens before the session opens.
     const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-2-rs20', params: {} });
-    expect(run).toMatchObject({ status: 'running', name: 'Strategy 2 · Starting premium ₹20', today: null });
+    expect(run).toMatchObject({ status: 'running', name: 'S2 · NIFTY OTM premium ladder 20–30–45', today: null });
 
     p.setNow(at(D, '09:16'));
     quoteChain(p, W(book), 25000);
@@ -313,7 +316,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     await algos.tick();
     const v = algos.get('u1', run.id);
     const stop = v.today!.events.find((e) => e.kind === 'STOP')!;
-    expect(stop.message).toMatch(/No eligible OTM strike at entry — No OTM PE strike \(multiple of 100\) has a traded premium/);
+    expect(stop.message).toMatch(/No eligible ATM\/OTM strike at entry — No ATM\/OTM PE strike \(multiple of 100\) has a traded premium/);
     expect(v.today!.phase).toBe('stopped');
     expect(broker.orders('u1')).toHaveLength(0);
     expect(v.history[0]).toMatchObject({ entered: false, exitKind: 'STOP', pnl: 0, charges: 0, orders: 0 });
@@ -331,7 +334,7 @@ describe('live paper run (Strategy 2 · ₹20)', () => {
     await algos.tick();
     const v = view();
     const stop = v.today!.events.find((e) => e.kind === 'STOP')!;
-    expect(stop.message).toMatch(/CE 25200 premium ₹31 reached ₹30 .*No OTM PE strike \(multiple of 100\) has a traded premium/);
+    expect(stop.message).toMatch(/CE 25200 premium ₹31 reached ₹30 .*No ATM\/OTM PE strike \(multiple of 100\) has a traded premium/);
     expect(stop.fills.map((f) => [f.side, f.type, f.strike])).toEqual([['BUY', 'CE', 25200], ['BUY', 'PE', 24800]]);
     expect(v.today!.phase).toBe('stopped');
     expect(broker.positions('u1').every((x) => x.netQty === 0)).toBe(true);

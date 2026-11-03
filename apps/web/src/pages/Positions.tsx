@@ -168,7 +168,7 @@ export default function Positions() {
                     {rows.map((p) => (
                       <tr key={p.key} className={cx(p.netQty === 0 && 'opacity-60')}>
                         <td className="font-medium">
-                          {p.instrument} {p.status !== 'open' && <Pill tone={p.status === 'awaiting settlement' ? 'warn' : 'muted'}>{p.status}</Pill>}
+                          {p.instrument}{p.book && <Link to="/algo" className="ml-1.5" title={`Position of algo run ${p.book.slice(5)}: kept apart from other runs and manual trades`}><Pill tone="accent">Algo {p.book.slice(5)}</Pill></Link>} {p.status !== 'open' && <Pill tone={p.status === 'awaiting settlement' ? 'warn' : 'muted'}>{p.status}</Pill>}
                           {p.reason && p.netQty !== 0 && <div className="max-w-[20rem] whitespace-normal text-2xs font-normal text-muted">{p.reason}</div>}
                         </td>
                         <td>{p.product}</td>
