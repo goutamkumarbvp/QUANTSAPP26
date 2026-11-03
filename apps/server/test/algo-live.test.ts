@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import {
   ALGO_PRESETS,
+  algoById,
   istTs,
   type AlgoBacktestDay,
   type AlgoCatalog,
@@ -31,6 +32,7 @@ import { SecondStore, type SecondRow } from '../src/live/store/seconds';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { addTestCommodities } from './support/e2e-mcx';
 import { FakeProvider, loadSampleBook, type SampleBook } from './support/fake-provider';
 
 const cleanup: (() => unknown)[] = [];
@@ -76,6 +78,8 @@ type QuoteOpts = {
   noTrade?: (type: OptionSide, strike: number) => boolean;
   /** Legs quoted without a book (no bid/ask). */
   noBook?: (type: OptionSide, strike: number) => boolean;
+  /** Open interest per leg (TEST DATA); default 100,000 everywhere. */
+  oi?: (type: OptionSide, strike: number) => number;
 };
 
 /** TEST DATA: re-quote the NIFTY spot and one expiry's chain at `spot`, stamped now (traded LTP, ±₹0.05 book). */
@@ -91,7 +95,7 @@ function quoteChain(p: FakeProvider, expiry: string, spot: number, o: QuoteOpts 
         ltp: px,
         bid: noBook ? undefined : r2(Math.max(0.05, px - 0.05)),
         ask: noBook ? undefined : r2(px + 0.05),
-        oi: 100_000,
+        oi: o.oi?.(type, strike) ?? 100_000,
         volume: o.noTrade?.(type, strike) ? 0 : 50_000,
       });
     }
@@ -106,12 +110,12 @@ describe('algo catalogue, defaults and presets', () => {
     const { p, algos } = setupLive();
     const c: AlgoCatalog = algos.catalog();
     expect(c.algos.map((a) => a.id)).toContain('premium-ladder');
-    expect(c.presets.map((x) => x.id)).toEqual(['s1-ladder-40', 'strategy-2-rs20', 's3-fixed-40', 's4-fixed-20', 'strategy-3-rs50']);
+    expect(c.presets.map((x) => x.id)).toEqual(['s1-ladder-40', 'strategy-2-rs20', 's3-fixed-40', 's4-fixed-20', 's5-atm-straddle-20', 's6-maxpain-straddle-25', 's7-sensex-top-oi', 'strategy-3-rs50']);
     expect(c.presets[1].params).toMatchObject({ symbol: 'NIFTY', startPremium: 20, stepPct: 50, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', mode: 'ladder', stopLossPerLot: 0, allowAtm: true });
     expect(c.presets[0].params).toMatchObject({ startPremium: 40, mode: 'ladder', stopLossPerLot: 3000 });
     expect(c.presets[2].params).toMatchObject({ startPremium: 40, mode: 'fixed', stopLossPerLot: 3000 });
     expect(c.presets[3].params).toMatchObject({ startPremium: 20, mode: 'fixed', stopLossPerLot: 0 });
-    expect(c.presets[4].params).toMatchObject({ startPremium: 50, allowAtm: false });
+    expect(c.presets[7].params).toMatchObject({ startPremium: 50, allowAtm: false });
     expect(c.symbols).toEqual([
       { symbol: 'NIFTY', lotSize: 75, strikeStep: 50, kind: 'index' },
       { symbol: 'BANKNIFTY', lotSize: 35, strikeStep: 100, kind: 'index' },
@@ -123,7 +127,7 @@ describe('algo catalogue, defaults and presets', () => {
     // Instrument master not loaded: algos and presets still listed, symbols blank with the reason.
     p.ref.setLoaded(false);
     const blank = algos.catalog();
-    expect(blank.algos.length).toBe(1);
+    expect(blank.algos.map((a) => a.id)).toEqual(['premium-ladder', 'rolling-straddle', 'oi-top-sell']);
     expect(blank.symbols).toEqual([]);
     expect(blank.gaps?.symbols).toMatch(/Instrument master not loaded/);
     expect(() => algos.defaults('premium-ladder', 'NIFTY')).toThrow(NoLiveData);
@@ -134,7 +138,7 @@ describe('algo catalogue, defaults and presets', () => {
     quoteChain(p, W(book), 25000);
     const preset = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { lots: 1 } });
     expect(preset).toMatchObject({ name: 'Ladder · Starting premium ₹50 (earlier Strategy 3)', presetId: 'strategy-3-rs50', status: 'running' });
-    expect(preset.params).toMatchObject({ ...ALGO_PRESETS[4].params });
+    expect(preset.params).toMatchObject({ ...ALGO_PRESETS.find((x) => x.id === 'strategy-3-rs50')!.params });
     const blank = await algos.create('u1', { algoId: 'premium-ladder', presetId: 'strategy-3-rs50', params: { startPremium: '' } });
     expect(blank.params.startPremium).toBe(50);
     expect(blank.presetId).toBe('strategy-3-rs50');
@@ -166,8 +170,8 @@ describe('algo catalogue, defaults and presets', () => {
     await expect(algos.stop('u1', run.id)).rejects.toMatchObject({ statusCode: 400 });
     algos.remove('u1', run.id);
     expect(() => algos.get('u1', run.id)).toThrow(/not found/);
-    for (let i = 0; i < 5; i++) await algos.create('u1', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } });
-    await expect(algos.create('u1', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } })).rejects.toThrow(/At most 5 algos/);
+    for (let i = 0; i < 10; i++) await algos.create('u1', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } });
+    await expect(algos.create('u1', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } })).rejects.toThrow(/At most 10 algos/);
     p.ref.setLoaded(false);
     await expect(algos.create('u2', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } })).rejects.toBeInstanceOf(NoLiveData);
   });
@@ -855,5 +859,65 @@ describe('backtests on one-second snapshots', () => {
     expect(r.skipped.find((x) => x.date === B.date)?.reason).toBe(`No one-second data was recorded on ${B.date}`);
     p.seconds = undefined;
     await expect(algos.backtestDay('premium-ladder', { symbol: 'NIFTY' }, '2026-10-12', undefined, '1s')).rejects.toThrow('One-second data is not recorded (SECONDS_RECORD=false in .env)');
+  });
+});
+
+describe('S5–S7, the user\'s own strategies and MCX underlyings', () => {
+  it('S5 live: sells the ATM straddle (a multiple of 100) at 09:20 through the broker, in its own book', async () => {
+    const { p, book, algos, broker } = setupLive('09:16');
+    const D = book.date;
+    quoteChain(p, W(book), 25040);
+    const run = await algos.create('u1', { algoId: 'rolling-straddle', presetId: 's5-atm-straddle-20', params: {} });
+    expect(run).toMatchObject({ name: 'S5 · NIFTY ATM rolling straddle (20%)', presetId: 's5-atm-straddle-20' });
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25040);
+    await algos.tick();
+    const v = algos.get('u1', run.id);
+    expect(v.today?.phase).toBe('active');
+    expect(fillsOf(v.today!.events, 'ENTRY').map((f) => [f.side, f.type, f.strike])).toEqual([['SELL', 'CE', 25000], ['SELL', 'PE', 25000]]);
+    const pos = broker.positions('u1').filter((x) => x.book === `algo:${run.id}`);
+    expect(pos.map((x) => [x.type, x.strike, x.netQty < 0])).toEqual(expect.arrayContaining([['CE', 25000, true], ['PE', 25000, true]]));
+  });
+
+  it('S7-style live run: the top-3 OI CE and PE strikes of the live chain are sold', async () => {
+    const { p, book, algos } = setupLive('09:16');
+    const D = book.date;
+    // TEST DATA: call OI peaks above 25000, put OI below it.
+    const oi = (t: OptionSide, k: number) => (t === 'CE' ? (k > 25000 ? Math.round(9_000_000 / (k - 24950)) : 10) : k < 25000 ? Math.round(9_000_000 / (25050 - k)) : 10);
+    quoteChain(p, W(book), 25000, { oi });
+    const run = await algos.create('u1', { algoId: 'oi-top-sell', params: { symbol: 'NIFTY', days: 'all', topN: 3, strikeMultiple: 100 } });
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000, { oi });
+    await algos.tick();
+    const v = algos.get('u1', run.id);
+    expect(fillsOf(v.today!.events, 'ENTRY').map((f) => [f.type, f.strike])).toEqual([['CE', 25100], ['CE', 25200], ['CE', 25300], ['PE', 24900], ['PE', 24800], ['PE', 24700]]);
+  });
+
+  it('save, list, deploy and delete the user\'s own strategy; built-in ones cannot be deleted; names are unique', async () => {
+    const { p, book, algos } = setupLive('09:16');
+    quoteChain(p, W(book), 25000);
+    const mine = algos.savePreset('u1', { algoId: 'rolling-straddle', name: 'My 30% straddle', params: { symbol: 'NIFTY', rollPct: 30, stopLossPerLot: 2000 } });
+    expect(mine).toMatchObject({ algoId: 'rolling-straddle', name: 'My 30% straddle', custom: true, params: { rollPct: 30, stopLossPerLot: 2000, strikeMultiple: 100 } });
+    expect(algos.userPresets('u1').map((x) => x.id)).toEqual([mine.id]);
+    expect(algos.userPresets('u2')).toEqual([]);
+    expect(() => algos.savePreset('u1', { algoId: 'rolling-straddle', name: 'my 30% straddle', params: { symbol: 'NIFTY' } })).toThrow(/already exists/);
+    expect(() => algos.savePreset('u1', { algoId: 'rolling-straddle', name: 'Bad', params: { symbol: 'NIFTY', rollPct: 0 } })).toThrow(/Roll %/);
+    const run = await algos.create('u1', { algoId: 'rolling-straddle', presetId: mine.id, params: {} });
+    expect(run).toMatchObject({ name: 'My 30% straddle', presetId: mine.id, params: { rollPct: 30 } });
+    expect(() => algos.deletePreset('u1', 's1-ladder-40')).toThrow(/Built-in strategies cannot be deleted/);
+    algos.deletePreset('u1', mine.id);
+    expect(algos.userPresets('u1')).toEqual([]);
+    expect(algos.get('u1', run.id).status).toBe('running'); // a deployed run keeps running
+  });
+
+  it('MCX commodities are listed for algos, and their times are checked against the MCX session', () => {
+    const { p, book, algos } = setupLive('09:16');
+    addTestCommodities(p, book.date);
+    const c = algos.catalog();
+    expect(c.symbols.filter((x) => x.kind === 'commodity').map((x) => x.symbol)).toEqual(expect.arrayContaining(['CRUDEOIL', 'GOLD']));
+    // An evening run is fine on MCX, not on NSE.
+    expect(algos.params(algoById('rolling-straddle')!, { symbol: 'CRUDEOIL', entryTime: '18:00', exitTime: '23:00' })).toMatchObject({ symbol: 'CRUDEOIL', entryTime: '18:00' });
+    expect(() => algos.params(algoById('rolling-straddle')!, { symbol: 'NIFTY', entryTime: '18:00', exitTime: '23:00' })).toThrow(/NIFTY trades 09:15–15:30 \(NSE\)/);
+    expect(() => algos.params(algoById('premium-ladder')!, { symbol: 'CRUDEOIL', entryTime: '08:00', exitTime: '23:00' })).toThrow(/market hours|CRUDEOIL trades/);
   });
 });

@@ -380,6 +380,9 @@ describe('S1–S4 rules (ATM/OTM, daily stop loss, same-side fixed trigger)', ()
       'S2 · NIFTY OTM premium ladder 20–30–45',
       'S3 · NIFTY OTM fixed premium 40–60',
       'S4 · NIFTY OTM fixed premium 20–30',
+      'S5 · NIFTY ATM rolling straddle (20%)',
+      'S6 · NIFTY max-pain rolling straddle (25%)',
+      'S7 · SENSEX OI-based option selling',
       'Ladder · Starting premium ₹50 (earlier Strategy 3)',
     ]);
     expect(ALGO_PRESETS.slice(0, 4).map((x) => [x.params.startPremium, x.params.mode, x.params.stopLossPerLot, x.params.allowAtm, x.params.strikeMultiple, x.params.entryTime, x.params.exitTime])).toEqual([
@@ -388,7 +391,10 @@ describe('S1–S4 rules (ATM/OTM, daily stop loss, same-side fixed trigger)', ()
       [40, 'fixed', 3000, true, 100, '09:20', '15:25'],
       [20, 'fixed', 0, true, 100, '09:20', '15:25'],
     ]);
-    for (const x of ALGO_PRESETS) expect(premiumLadder.validate({ ...P, ...(x.params as Partial<PremiumLadderParams>) } as PremiumLadderParams)).toBeNull();
+    for (const x of ALGO_PRESETS) {
+      const a = algoById(x.algoId)!;
+      expect(a.validate({ ...(a.defaults({ symbol: String(x.params.symbol), strikeStep: 100, kind: 'index' }) as object), ...x.params })).toBeNull();
+    }
     expect(ladderLevels(40, 50, 5)).toEqual([40, 60, 90, 135, 202.5]);
     expect(ladderLevels(20, 50, 5)).toEqual([20, 30, 45, 67.5, 101.25]);
     expect(ladderRules(S3).join(' ')).toMatch(/Fixed trigger at ₹60 .* never moves up/);

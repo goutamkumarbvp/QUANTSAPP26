@@ -149,7 +149,7 @@ function ParamInput({ spec, value, onChange, symbols, symbolsWhy }: { spec: Algo
     );
   }
   else if (spec.type === 'select') input = <Select label={spec.label} className="w-full" value={String(value ?? spec.options?.[0]?.value ?? '')} onChange={onChange} options={spec.options ?? []} />;
-  else if (spec.type === 'time') input = <input aria-label={spec.label} className="input" type="time" min="09:15" max="15:30" value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />;
+  else if (spec.type === 'time') input = <input aria-label={spec.label} className="input" type="time" min="09:00" max="23:55" title="Inside the underlying’s session: NSE/BSE 09:15–15:30, MCX 09:00–23:30 (checked on deploy)" value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />;
   else input = <input aria-label={spec.label} className="input" type="number" min={spec.min} max={spec.max} step={spec.step} value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} />;
   return (
     <Field label={spec.label}>
@@ -465,7 +465,11 @@ export default function Algo() {
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const presets = catalog.data?.presets ?? [];
+  // The user's own strategies (saved settings), listed after the built-in ones.
+  const mine = useQuery({ queryKey: ['algo-presets'], queryFn: () => api<AlgoPreset[]>('/algo-presets'), staleTime: 60_000 });
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const presets = [...(catalog.data?.presets ?? []), ...(mine.data ?? [])];
   const preset: AlgoPreset | undefined = presets.find((p) => p.id === presetId) ?? presets[0];
   const algo = catalog.data?.algos.find((a) => a.id === preset?.algoId);
 
@@ -514,6 +518,48 @@ export default function Algo() {
     }
   };
 
+  // Save the current settings as the user's own strategy (it then appears in the library).
+  const savePreset = async () => {
+    if (!algo) return;
+    setSaving(true);
+    setError(null);
+    setSaveMsg(null);
+    try {
+      const saved = await api<AlgoPreset>('/algo-presets', { body: { algoId: algo.id, name: name.trim() || `${preset?.name ?? algo.name} · my settings`, params } });
+      await qc.invalidateQueries({ queryKey: ['algo-presets'] });
+      setPresetId(saved.id);
+      setApplied(params);
+      setSaveMsg(`Saved as "${saved.name}" in My strategies.`);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const deletePreset = async (p: AlgoPreset) => {
+    if (!window.confirm(`Delete your strategy "${p.name}"? Runs already deployed from it keep running.`)) return;
+    try {
+      await api(`/algo-presets/${p.id}`, { method: 'DELETE' });
+      if (p.id === preset?.id) setPresetId('');
+      await qc.invalidateQueries({ queryKey: ['algo-presets'] });
+    } catch (e) {
+      setError(e);
+    }
+  };
+  const card = (p: AlgoPreset) => (
+    <div key={p.id} className={cx('relative rounded-lg border transition-colors', p.id === preset?.id ? 'border-accent bg-accent/10' : 'border-line hover:border-accent/60')}>
+      <button onClick={() => pick(p)} className="w-full px-3 py-2 text-left">
+        <div className="pr-6 text-sm font-semibold">{p.name}</div>
+        <div className="mt-0.5 text-2xs text-muted">{p.summary}</div>
+      </button>
+      {p.custom && (
+        <button className="absolute right-2 top-2 text-xs text-muted hover:text-down" title={`Delete "${p.name}"`} aria-label={`Delete ${p.name}`} onClick={() => deletePreset(p)}>
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-3">
       <PageHeader title="Algo Strategies" subtitle="Rule-based strategies that trade your paper account automatically. Backtest them on recorded sessions, then deploy. New algos appear here as they are added.">
@@ -526,17 +572,12 @@ export default function Algo() {
             <div className="space-y-3">
               <Card title="Algo library">
                 <div className="space-y-2">
-                  {cat.presets.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => pick(p)}
-                      className={cx('w-full rounded-lg border px-3 py-2 text-left transition-colors', p.id === preset?.id ? 'border-accent bg-accent/10' : 'border-line hover:border-accent/60')}
-                    >
-                      <div className="text-sm font-semibold">{p.name}</div>
-                      <div className="mt-0.5 text-2xs text-muted">{p.summary}</div>
-                    </button>
-                  ))}
-                  <div className="rounded-lg border border-dashed border-line px-3 py-2 text-2xs text-muted">More algos will be added to this library.</div>
+                  {cat.presets.map(card)}
+                  {(mine.data?.length ?? 0) > 0 && <div className="pt-1 text-2xs font-semibold uppercase tracking-wide text-muted">My strategies</div>}
+                  {(mine.data ?? []).map(card)}
+                  <div className="rounded-lg border border-dashed border-line px-3 py-2 text-2xs text-muted">
+                    Add your own: pick the closest strategy, change its settings (underlying — NIFTY, SENSEX or an MCX commodity —, premiums, stop loss, times…), give it a name below and press “Save as my strategy”.
+                  </div>
                 </div>
               </Card>
               {algo && (
@@ -574,10 +615,14 @@ export default function Algo() {
                     <button className="btn-ghost" onClick={() => setApplied(params)} disabled={!dirty}>
                       Apply to backtests
                     </button>
+                    <button className="btn-ghost" disabled={saving} onClick={savePreset} title="Keep these settings as your own strategy in the library">
+                      {saving ? 'Saving…' : 'Save as my strategy'}
+                    </button>
                     <button className="btn-primary" disabled={deploying} onClick={deploy}>
                       {deploying ? 'Deploying…' : 'Deploy on paper account'}
                     </button>
                   </div>
+                  {saveMsg && <div className="mt-2 text-xs text-up">{saveMsg}</div>}
                   {error != null && <div className="mt-2"><ErrorState error={error} compact title="Not deployed" /></div>}
                   <p className="mt-2 text-2xs text-muted">
                     Deployed algos place MARKET orders (MIS, tagged <code>algo:&lt;id&gt;</code>) through the paper broker every couple of seconds, run every trading day until stopped, and show up in Positions & Orders. Orders fill only at the live bid / ask: an order the broker rejects is logged on the run and never counted as filled, and a run with no live price waits instead of guessing one. Don't exit an algo's positions by hand — use Stop. Paper trading only; not investment advice.

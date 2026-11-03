@@ -44,7 +44,7 @@ interface Ctx {
   svc: Services;
   app: FastifyInstance;
   token: string;
-  ids: { strategy: string; alert: string; order: string; watchlist: string; algoRun: string; position: string };
+  ids: { strategy: string; alert: string; order: string; watchlist: string; algoRun: string; position: string; algoPreset: string };
 }
 
 async function setup(opts: { onError?: (where: string, e: unknown) => void } = {}): Promise<Omit<Ctx, 'token' | 'ids'>> {
@@ -93,9 +93,11 @@ async function withFixtures(c: Omit<Ctx, 'token' | 'ids'>): Promise<Ctx> {
   await call(app, 'PUT', `/api/watchlists/${watchlist.body.id}`, { items: [{ symbol: 'NIFTY', type: 'EQ' }, { symbol: 'NIFTY', type: 'CE', strike: 25000, expiry: w1 }, { symbol: 'NIFTY', type: 'FUT', expiry: b.expiries.NIFTY[1] }] }, token);
   const run = await call(app, 'POST', '/api/algo-runs', { algoId: 'premium-ladder', params: { symbol: 'NIFTY' } }, token);
   expect(run.status).toBe(200);
+  const mine = await call(app, 'POST', '/api/algo-presets', { algoId: 'rolling-straddle', name: 'My straddle', params: { symbol: 'NIFTY', rollPct: 30 } }, token);
+  expect(mine.status).toBe(200);
   const positions = await call(app, 'GET', '/api/broker/positions', undefined, token);
   const position = (positions.body as { key: string; type: string }[]).find((x) => x.type === 'CE' && x.key.includes('|25000|'))!.key;
-  return { ...c, token, ids: { strategy: strategy.body.id, alert: alert.body.id, order: working.body.id, watchlist: watchlist.body.id, algoRun: run.body.id, position } };
+  return { ...c, token, ids: { strategy: strategy.body.id, alert: alert.body.id, order: working.body.id, watchlist: watchlist.body.id, algoRun: run.body.id, position, algoPreset: mine.body.id } };
 }
 
 type State = 'full' | 'partial' | 'closed' | 'stale' | 'empty';
@@ -202,6 +204,7 @@ const ROUTES: RouteCase[] = [
   { method: 'GET', route: '/api/watchlists', url: () => '/api/watchlists', user: true, full200: true },
   { method: 'GET', route: '/api/watchlists/:id/quotes', url: (c) => `/api/watchlists/${c.ids.watchlist}/quotes`, user: true, full200: true, liveOnly: true },
   { method: 'GET', route: '/api/algo-runs', url: () => '/api/algo-runs', user: true, full200: true },
+  { method: 'GET', route: '/api/algo-presets', url: () => '/api/algo-presets', user: true, full200: true },
   { method: 'GET', route: '/api/algo-runs/:id', url: (c) => `/api/algo-runs/${c.ids.algoRun}`, user: true, full200: true },
   // user mutations
   { method: 'POST', route: '/api/strategies', url: () => '/api/strategies', body: (c) => ({ symbol: 'NIFTY', legs: [leg(c)] }), user: true, full200: true },
@@ -218,7 +221,9 @@ const ROUTES: RouteCase[] = [
   { method: 'PUT', route: '/api/watchlists/:id', url: (c) => `/api/watchlists/${c.ids.watchlist}`, body: () => ({ name: 'Y' }), user: true, full200: true },
   { method: 'POST', route: '/api/algo-runs', url: () => '/api/algo-runs', body: () => ({ algoId: 'premium-ladder', params: { symbol: 'NIFTY', startPremium: 30 } }), user: true, full200: true },
   { method: 'POST', route: '/api/algo-runs/:id/stop', url: (c) => `/api/algo-runs/${c.ids.algoRun}/stop`, user: true, full200: true },
+  { method: 'POST', route: '/api/algo-presets', url: () => '/api/algo-presets', body: () => ({ algoId: 'oi-top-sell', name: `Mine ${Math.random().toString(36).slice(2, 8)}`, params: { symbol: 'NIFTY' } }), user: true, full200: true },
   // destructive, last
+  { method: 'DELETE', route: '/api/algo-presets/:id', url: (c) => `/api/algo-presets/${c.ids.algoPreset}`, user: true, full200: true },
   { method: 'DELETE', route: '/api/algo-runs/:id', url: (c) => `/api/algo-runs/${c.ids.algoRun}`, user: true, full200: true },
   { method: 'DELETE', route: '/api/alerts/:id', url: (c) => `/api/alerts/${c.ids.alert}`, user: true, full200: true },
   { method: 'DELETE', route: '/api/watchlists/:id', url: (c) => `/api/watchlists/${c.ids.watchlist}`, user: true, full200: true },

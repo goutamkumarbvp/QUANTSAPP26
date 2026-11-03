@@ -35,6 +35,7 @@ import {
   type AlgoExitKind,
   type AlgoFill,
   type AlgoLeg,
+  type AlgoPreset,
   type AlgoRunView,
   type AlgoSeriesPoint,
   type AlgoSkippedDay,
@@ -53,7 +54,10 @@ import type { PaperBroker } from './trading';
 
 const MINUTE = 60_000;
 /** Session minutes (09:15 → 15:30). */
-const MAX_RUNNING = 5;
+/** Runs at once: enough for every built-in strategy (S1–S7) plus a few of the user's own. */
+const MAX_RUNNING = 10;
+/** Saved strategies per user. */
+const MAX_USER_PRESETS = 50;
 const MAX_EVENTS_PER_DAY = 400;
 const MAX_HISTORY = 250;
 /** A recording gap of at least this many minutes is reported in a backtest's trade log. */
@@ -175,6 +179,17 @@ class SessionTape implements Tape {
     const c = leg.bars[leg.idx].close;
     return Number.isFinite(c) && c > 0 ? c : null;
   }
+
+  /** The leg's latest recorded open interest as of the seek time (the last completed minute that carried one). */
+  oi(type: OptionSide, strike: number): number | null {
+    const leg = this.legs.get(`${type}|${strike}`);
+    if (!leg) return null;
+    for (let i = leg.idx; i >= 0; i--) {
+      const v = leg.bars[i].oi;
+      if (v !== undefined && Number.isFinite(v)) return v;
+    }
+    return null;
+  }
 }
 
 /** What a replay reads: the underlying and the legs as of each step time. */
@@ -188,6 +203,7 @@ interface Tape {
   alive(ts: number): boolean;
   spotClose(): number | null;
   premium(type: OptionSide, strike: number): number | null;
+  oi(type: OptionSide, strike: number): number | null;
 }
 
 /** Data resolution of a backtest: recorded one-minute bars, or one-second snapshots. */
@@ -298,6 +314,17 @@ class SecondTape implements Tape {
     return v !== undefined && v > 0 ? v : null;
   }
 
+  /** The leg's latest recorded open interest as of the step time. */
+  oi(type: OptionSide, strike: number): number | null {
+    const l = this.leg(type, strike);
+    if (!l?.rows) return null;
+    for (let i = this.at(l.rows); i >= 0; i--) {
+      const v = l.rows[i].oi;
+      if (v !== undefined && Number.isFinite(v)) return v;
+    }
+    return null;
+  }
+
   /** The leg's book as of the step time and its age (null without a two-sided book). */
   book(type: OptionSide, strike: number): { bid: number; ask: number; age: number } | null {
     const l = this.leg(type, strike);
@@ -346,6 +373,10 @@ export class AlgoService {
         const u = all.find((x) => x.symbol === s);
         if (u) symbols.push({ symbol: u.symbol, lotSize: u.lotSize, strikeStep: u.strikeStep, kind: u.kind });
       }
+      // MCX commodities (options on the commodity futures), on their own session.
+      for (const u of all.filter((x) => x.kind === 'commodity').sort((a, b) => a.symbol.localeCompare(b.symbol))) {
+        symbols.push({ symbol: u.symbol, lotSize: u.lotSize, strikeStep: u.strikeStep, kind: u.kind });
+      }
     });
     return {
       algos: ALGOS.map((a) => ({ id: a.id, name: a.name, description: a.description, rules: a.rules, params: a.params })),
@@ -381,9 +412,26 @@ export class AlgoService {
       else p[spec.key] = String(v);
     }
     p.symbol = symbol;
-    const err = algo.validate(p);
+    const err = algo.validate(p) ?? this.sessionTimesError(symbol, p);
     if (err) throw httpError(400, err);
     return p;
+  }
+
+  /** Entry and exit must fall inside the symbol's own exchange session (NSE/BSE 09:15–15:30, MCX 09:00–23:30/23:55). */
+  private sessionTimesError(symbol: string, p: Record<string, unknown>): string | null {
+    if (typeof p.entryTime !== 'string' || typeof p.exitTime !== 'string') return null;
+    const cal = this.md.calendarOf(symbol);
+    const today = cal.session(this.md.clock.now()).date;
+    const day = cal.isTradingDay(today) ? today : cal.prev(today);
+    const open = istParts(cal.ts(day, 0)).minuteOfDay;
+    const close = open + cal.sessionMinutes(day);
+    const en = hhmmToMinutes(p.entryTime);
+    const ex = hhmmToMinutes(p.exitTime);
+    if (en < open || ex > close) {
+      const t = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+      return `${symbol} trades ${t(open)}–${t(close)} (${cal.exchange}): entry and exit must be inside that session`;
+    }
+    return null;
   }
 
   /** The listed, unexpired option expiry a live run trades (nearest, or the one after it). */
@@ -591,6 +639,7 @@ export class AlgoService {
         lotSize,
         strikes: tape.strikes,
         premium: (type, strike) => tape.premium(type, strike),
+        oi: (type, strike) => tape.oi(type, strike),
       };
       const fill: FillFn = (o) => {
         // One-second data: a buy fills at the recorded ask, a sell at the bid (book at most 10 s old),
@@ -784,9 +833,43 @@ export class AlgoService {
     return this.view(this.find(uid, id));
   }
 
+  /* ------------------------------- the user's own strategies ------------------------------- */
+
+  /** Strategies the user saved (an algo with settings and a name), newest first. */
+  userPresets(uid: string): AlgoPreset[] {
+    return this.db.list('algoPresets', uid);
+  }
+
+  /**
+   * Save the current settings of an algo as the user's own strategy: validated like a deploy (unknown algo 404,
+   * invalid settings 400); at most MAX_USER_PRESETS per user. Built-in presets are never changed.
+   */
+  savePreset(uid: string, input: { algoId: string; name: string; summary?: string; params: Record<string, unknown> }): AlgoPreset {
+    const algo = this.algo(input.algoId);
+    const name = input.name.trim();
+    if (!name) throw httpError(400, 'Give the strategy a name');
+    const params = this.params(algo, input.params);
+    const list = this.userPresets(uid);
+    if (list.length >= MAX_USER_PRESETS) throw httpError(400, `At most ${MAX_USER_PRESETS} saved strategies — delete one first`);
+    if ([...ALGO_PRESETS, ...list].some((x) => x.name.toLowerCase() === name.toLowerCase())) throw httpError(400, `A strategy named "${name}" already exists`);
+    const rules = algo.describeRules?.(params) ?? algo.rules;
+    const preset: AlgoPreset = { id: `my-${randomUUID().slice(0, 8)}`, algoId: algo.id, name, summary: (input.summary ?? '').trim() || `${algo.name}: ${rules[0] ?? ''}`.slice(0, 400), params, custom: true };
+    list.unshift(preset);
+    this.db.save();
+    return preset;
+  }
+
+  deletePreset(uid: string, id: string): void {
+    const list = this.userPresets(uid);
+    const i = list.findIndex((x) => x.id === id);
+    if (i < 0) throw httpError(404, ALGO_PRESETS.some((x) => x.id === id) ? 'Built-in strategies cannot be deleted' : 'No such saved strategy');
+    list.splice(i, 1);
+    this.db.save();
+  }
+
   async create(uid: string, input: AlgoRunInput): Promise<AlgoRunView> {
     const algo = this.algo(input.algoId);
-    const preset = input.presetId ? ALGO_PRESETS.find((x) => x.id === input.presetId) : undefined;
+    const preset = input.presetId ? [...ALGO_PRESETS, ...this.userPresets(uid)].find((x) => x.id === input.presetId) : undefined;
     if (input.presetId && !preset) throw httpError(404, `Unknown preset ${input.presetId}`);
     if (preset && preset.algoId !== algo.id) throw httpError(400, `Preset ${preset.id} belongs to algo ${preset.algoId}`);
     // A preset's own values fill anything the request leaves out (or blank).
@@ -929,6 +1012,12 @@ export class AlgoService {
           cache.set(id, v);
         }
         return v;
+      },
+      // Open interest as the feed reports it on the live chain (a strike off the chain: its own quote).
+      oi(type, strike) {
+        const id = `${type}|${strike}`;
+        const q = legs.get(id) ?? (chain && strikes.has(strike) ? undefined : md.live.quote(optKey(symbol, expiry, type, strike)));
+        return q && typeof q.oi === 'number' && Number.isFinite(q.oi) ? q.oi : null;
       },
     };
     return { snap, ...(waiting ? { waiting } : {}) };

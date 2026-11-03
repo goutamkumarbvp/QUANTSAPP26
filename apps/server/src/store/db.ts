@@ -4,7 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AlertDef, Notification, Order, SavedStrategy, Trade, UserSettings, Watchlist } from '@q26/core';
+import type { AlertDef, AlgoPreset, Notification, Order, SavedStrategy, Trade, UserSettings, Watchlist } from '@q26/core';
 import type { StoredAlgoRun } from '../services/algo';
 
 export interface StoredUser {
@@ -30,6 +30,8 @@ export interface DbShape {
   notifications: Record<string, Notification[]>;
   watchlists: Record<string, Watchlist[]>;
   algoRuns: Record<string, StoredAlgoRun[]>;
+  /** The user's own algo strategies (an algo with saved settings and a name), shown in the library beside the built-in ones. */
+  algoPresets: Record<string, AlgoPreset[]>;
   /**
    * The server's owner: the first account given a password (register, or a guest upgraded), recorded
    * once. With OPS_ADMIN_EMAILS empty it is the only operations operator.
@@ -48,6 +50,7 @@ const empty = (): DbShape => ({
   notifications: {},
   watchlists: {},
   algoRuns: {},
+  algoPresets: {},
 });
 
 export class Db {

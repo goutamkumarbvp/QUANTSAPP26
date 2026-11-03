@@ -286,6 +286,31 @@ test('algo: one-day backtest replays only a recorded session', async ({ page }) 
   await clean(page, watch);
 });
 
+test('algo library: S1–S7, SENSEX and MCX underlyings, and the user\'s own strategy saved and deleted', async ({ page }) => {
+  const watch = watchErrors(page);
+  await open(page, '/algo', /Algo Strategies/);
+  for (const n of ['S1 · NIFTY OTM premium ladder 40–60–90', 'S5 · NIFTY ATM rolling straddle (20%)', 'S6 · NIFTY max-pain rolling straddle (25%)', 'S7 · SENSEX OI-based option selling']) {
+    await expect(page.getByRole('button', { name: new RegExp(n.replace(/[()%·.]/g, '.')) }).first()).toBeVisible();
+  }
+  await page.getByRole('button', { name: /S7 · SENSEX OI-based option selling/ }).click();
+  const underlying = page.getByRole('combobox', { name: 'Underlying' });
+  await expect(underlying).toHaveValue('SENSEX');
+  const options = await underlying.locator('option').allTextContents();
+  expect(options.some((o) => o.startsWith('NIFTY'))).toBe(true);
+  expect(options.some((o) => o.startsWith('SENSEX'))).toBe(true);
+  expect(options.some((o) => o.startsWith('CRUDEOIL'))).toBe(true);
+  await expect(page.getByRole('combobox', { name: 'Trading days' })).toHaveValue('wed-thu');
+  // Save it under a new name: it appears under My strategies.
+  await page.getByRole('textbox', { name: 'Run name (optional)' }).fill('My SENSEX OI');
+  await page.getByRole('button', { name: 'Save as my strategy' }).click();
+  await expect(page.getByText('Saved as "My SENSEX OI" in My strategies.')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('My strategies', { exact: true })).toBeVisible();
+  page.once('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Delete My SENSEX OI' }).click();
+  await expect(page.getByRole('button', { name: 'Delete My SENSEX OI' })).toHaveCount(0, { timeout: 10_000 });
+  await clean(page, watch);
+});
+
 test('settings: the 1-second data card says whether one-second data is recorded', async ({ page }) => {
   const watch = watchErrors(page);
   await open(page, '/settings', /Settings/);

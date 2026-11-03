@@ -771,6 +771,16 @@ export async function buildApp(
     const b = z.object({ params: algoParams, days: z.coerce.number().int().min(1).max(250).default(20), resolution: z.enum(['1m', '1s']).default('1m') }).parse(req.body ?? {});
     return svc.algos.backtestRange(req.params.id, b.params, b.days, now(), b.resolution);
   });
+  // The user's own strategies (saved settings of an algo), shown in the library beside the built-in ones.
+  app.get('/api/algo-presets', async (req) => svc.algos.userPresets(requireUser(req).id));
+  app.post('/api/algo-presets', async (req) => {
+    const b = z.object({ algoId: z.string().min(1), name: z.string().trim().min(1).max(60), summary: z.string().max(400).optional(), params: algoParams }).parse(req.body ?? {});
+    return svc.algos.savePreset(requireUser(req).id, b);
+  });
+  app.delete<{ Params: { id: string } }>('/api/algo-presets/:id', async (req) => {
+    svc.algos.deletePreset(requireUser(req).id, req.params.id);
+    return { ok: true };
+  });
   app.get('/api/algo-runs', async (req) => svc.algos.list(requireUser(req).id));
   app.post('/api/algo-runs', async (req) => {
     const b = z.object({ algoId: z.string().min(1), presetId: z.string().optional(), name: z.string().max(60).optional(), params: algoParams }).parse(req.body ?? {});

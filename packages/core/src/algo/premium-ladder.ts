@@ -19,6 +19,7 @@
  */
 import {
   hhmmToMinutes,
+  validateTimes,
   type AlgoDefinition,
   type AlgoEvent,
   type AlgoFill,
@@ -376,13 +377,7 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
     if (p.triggerOn !== 'either' && p.triggerOn !== 'same') return 'Invalid trigger mode';
     if (p.mode !== undefined && p.mode !== 'ladder' && p.mode !== 'fixed') return 'Adjustment must be ladder or fixed';
     if (p.stopLossPerLot !== undefined && !(p.stopLossPerLot >= 0 && p.stopLossPerLot <= 100000)) return 'Daily stop loss must be between ₹0 (none) and ₹1,00,000 per lot';
-    const re = /^([01]\d|2[0-3]):[0-5]\d$/;
-    if (!re.test(p.entryTime) || !re.test(p.exitTime)) return 'Times must be HH:MM';
-    const en = hhmmToMinutes(p.entryTime);
-    const ex = hhmmToMinutes(p.exitTime);
-    if (en < 555 || ex > 930) return 'Times must be within market hours (09:15–15:30)';
-    if (ex <= en) return 'Exit time must be after entry time';
-    return null;
+    return validateTimes(p.entryTime, p.exitTime);
   },
   init: initState,
   phase: (s) => s.phase,
@@ -667,6 +662,27 @@ export const ALGO_PRESETS: AlgoPreset[] = [
     name: 'S4 · NIFTY OTM fixed premium 20–30',
     summary: 'Sell ATM/OTM CE and PE near ₹20 at 09:20 (strikes in 100s). Fixed trigger ₹30: the leg that reaches it is bought back and re-sold farther OTM near ₹20; the other leg is untouched. Daily stop loss as S2: not specified yet (0 = none; set it on the run). Exit 15:25.',
     params: { ...NIFTY_BASE, startPremium: 20, mode: 'fixed', stopLossPerLot: 0 },
+  },
+  {
+    id: 's5-atm-straddle-20',
+    algoId: 'rolling-straddle',
+    name: 'S5 · NIFTY ATM rolling straddle (20%)',
+    summary: 'Sell ATM CE + PE of the same strike (multiples of 100 only, never 50) at 09:20, weekly expiry. When CE + PE LTP rises 20% above the reference: square off both, sell a fresh straddle at the new ATM strike, new reference. Daily max loss ₹3,000 per lot. Exit 15:25.',
+    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'atm', rollPct: 20, strikeMultiple: 100, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true },
+  },
+  {
+    id: 's6-maxpain-straddle-25',
+    algoId: 'rolling-straddle',
+    name: 'S6 · NIFTY max-pain rolling straddle (25%)',
+    summary: 'Sell CE + PE at the max-pain strike of the live option chain OI (entry 09:20). When CE + PE LTP rises 25% above the reference: square off both, recalculate max pain from the current OI, sell a fresh straddle there. Daily max loss ₹3,000 per lot. Exit 15:25.',
+    params: { symbol: 'NIFTY', expiry: 'current', lots: 1, strikeMode: 'maxpain', rollPct: 25, strikeMultiple: 0, entryTime: '09:20', exitTime: '15:25', stopLossPerLot: 3000, lateEntry: true },
+  },
+  {
+    id: 's7-sensex-top-oi',
+    algoId: 'oi-top-sell',
+    name: 'S7 · SENSEX OI-based option selling',
+    summary: 'Wednesdays and Thursdays only. At 09:20 rank SENSEX CE and PE strikes by live OI separately; sell 1 lot at each of the top 3 CE and top 3 PE strikes (6 positions). Daily stop loss ₹3,000 on all six combined. Exit 15:25.',
+    params: { symbol: 'SENSEX', expiry: 'current', lots: 1, topN: 3, strikeMultiple: 0, days: 'wed-thu', entryTime: '09:20', exitTime: '15:25', stopLoss: 3000, lateEntry: true },
   },
   {
     // The earlier "Strategy 3" (₹50 start, opposite-leg ladder, strictly OTM), kept so saved runs and habits still work.

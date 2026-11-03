@@ -313,3 +313,68 @@ had its own state, P&L, adjustment count (now also per side) and journal of even
 Tests: presets; ATM/never-ITM selection; S3 rolls only the triggered leg, trigger fixed; S3 stops when nothing is
 farther OTM; stop loss hit, not set, and unknown premium; S1 and S3 side by side; broker books apart (two runs + a
 manual trade, exit of one).
+
+## C-57 — Algo strategies S5–S7, the user's own strategies, SENSEX and MCX underlyings
+
+From the user's specification of 3 Nov 2026.
+
+New algos (`packages/core/src/algo`):
+- **`rolling-straddle`** (S5, S6):
+  - sells a CE and a PE of the same strike: ATM, the multiple of `strikeMultiple` nearest the spot (an exact tie
+    goes to the lower strike), or max pain from the live chain's OI;
+  - the two fills make the reference combined premium;
+  - when CE LTP + PE LTP reaches reference × (1 + roll %), both legs are bought back, the strike is chosen again
+    and a fresh straddle is sold there; its fills are the new reference;
+  - a daily maximum loss per lot (realised + open, before charges) is checked first and separately from the roll;
+    when hit, everything is squared off and there is no re-entry;
+  - if no strike can be chosen, or one side of it has no traded premium, everything is squared off for the day;
+  - without a live price (or OI for max pain) it waits.
+- **`oi-top-sell`** (S7):
+  - trades on the chosen weekdays only;
+  - at the entry time it ranks CE and PE strikes by live OI separately and sells `lots` at each of the top N on
+    both sides;
+  - if a ranked strike has no traded premium, nothing is sold that day (the ranking is never changed to skip it);
+  - one daily stop loss in ₹ covers all positions combined;
+  - it waits until OI is live on both sides.
+- `AlgoSnapshot.oi(type, strike)`: from the live chain (or the leg's own quote), recorded minutes (the last minute
+  that carried OI) or one-second rows. Backtests replay the recorded OI.
+
+Presets:
+
+| Preset | Algo | Settings |
+|---|---|---|
+| S5 · NIFTY ATM rolling straddle (20%) | `rolling-straddle` | ATM, multiples of 100 (never 50), roll +20%, max loss ₹3,000 per lot, 09:20–15:25, current (weekly) expiry |
+| S6 · NIFTY max-pain rolling straddle (25%) | `rolling-straddle` | max pain over every listed strike (`strikeMultiple` 0), roll +25%, max loss ₹3,000 per lot, 09:20–15:25 |
+| S7 · SENSEX OI-based option selling | `oi-top-sell` | Wednesday and Thursday, top 3 CE + top 3 PE at 1 lot, ₹3,000 stop loss on all six, 09:20–15:25 |
+
+S6's entry and exit times were not specified; 09:20–15:25 is used as in the other strategies and can be changed
+on the run.
+
+The user's own strategies:
+- "Save as my strategy" on the Algo page keeps the current settings of any algo under a name (`/api/algo-presets`,
+  per user, at most 50, names unique).
+- They are listed under "My strategies" in the library, can be deployed like built-in ones, and deleted (✕).
+  Deleting one does not stop runs already deployed from it.
+
+Underlyings:
+- The Algo library lists NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX and BANKEX, and now also the MCX
+  commodities (options on their futures).
+- Entry and exit are checked against the symbol's own session (NSE/BSE 09:15–15:30, MCX 09:00–23:30/23:55), so an
+  evening MCX run is accepted and an evening NIFTY run is refused with the reason.
+
+Runs at once: 10 (was 5), so every built-in strategy can run side by side, each in its own book.
+
+Tests:
+- core:
+  - ATM never on a 50-point strike;
+  - S5 entry, roll and new reference, max loss, and exit P&L;
+  - max pain matches a brute-force calculation;
+  - S6 waits for OI;
+  - S7 ranking, six positions, combined stop loss, weekday rule, a missing premium, and waiting for OI.
+- server:
+  - S5 and top-OI live runs through the broker;
+  - the user's strategies: save, list, unique names, deploy, delete, and a built-in one that cannot be deleted;
+  - MCX in the catalogue and session-time checks;
+  - route table.
+- e2e: the library with S1–S7, SENSEX and MCX in the underlying list, and saving and deleting the user's own
+  strategy.

@@ -40,6 +40,11 @@ export interface AlgoSnapshot {
   strikes: number[];
   /** Premium of a strike; null when the strike has no live (or recorded) traded price. */
   premium(type: OptionSide, strike: number): number | null;
+  /**
+   * Open interest of a strike (contracts' units as the feed reports it); null when not known. Absent where the
+   * source carries no OI. Algos that rank or weigh strikes by OI (max pain, top OI) read it.
+   */
+  oi?(type: OptionSide, strike: number): number | null;
 }
 
 export interface AlgoOrder {
@@ -119,12 +124,26 @@ export interface AlgoPreset {
   name: string;
   summary: string;
   params: Record<string, unknown>;
+  /** Saved by the user ("My strategy"): can be deleted; built-in presets cannot. */
+  custom?: boolean;
 }
 
 export function hhmmToMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + (m || 0);
 }
+
+/** Entry/exit times: HH:MM, exit after entry, inside the longest session (MCX: 09:00–23:55); the server checks the symbol's own session. */
+export function validateTimes(entryTime: string, exitTime: string): string | null {
+  const re = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (!re.test(entryTime) || !re.test(exitTime)) return 'Times must be HH:MM';
+  const en = hhmmToMinutes(entryTime);
+  const ex = hhmmToMinutes(exitTime);
+  if (en < 540 || ex > 1435) return 'Times must be within market hours (09:00–23:55)';
+  if (ex <= en) return 'Exit time must be after entry time';
+  return null;
+}
+
 
 /** Unrealised P&L of open legs at current premiums (₹); null when any open leg has no premium. */
 export function openPnl(legs: AlgoLeg[], snap: Pick<AlgoSnapshot, 'premium' | 'lotSize'>): number | null {
