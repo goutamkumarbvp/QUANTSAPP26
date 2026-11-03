@@ -166,9 +166,17 @@ function runDraws(): void {
   const start = performance.now();
   // A frame draws charts for up to ~12 ms (at least one), so a page of charts paints first and
   // stays responsive while its charts are drawn one after the other.
-  do drawQueue.shift()?.();
-  while (drawQueue.length && performance.now() - start < 12);
-  drawFrame = drawQueue.length ? requestAnimationFrame(runDraws) : 0;
+  drawFrame = 0;
+  do {
+    const draw = drawQueue.shift();
+    try {
+      draw?.();
+    } catch (e) {
+      // One chart's bad option must not stop every other chart from drawing.
+      console.error('chart draw failed', e);
+    }
+  } while (drawQueue.length && performance.now() - start < 12);
+  if (drawQueue.length) drawFrame = requestAnimationFrame(runDraws);
 }
 /** Queues a chart draw for the next frame; the returned function cancels it if it has not run yet. */
 function scheduleDraw(draw: () => void): () => void {

@@ -455,9 +455,9 @@ export class AlgoService {
     const close = open + cal.sessionMinutes(day);
     const en = hhmmToMinutes(p.entryTime);
     const ex = hhmmToMinutes(p.exitTime);
-    if (en < open || ex > close) {
+    if (en < open || ex >= close) {
       const t = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-      return `${symbol} trades ${t(open)}–${t(close)} (${cal.exchange}): entry and exit must be inside that session`;
+      return `${symbol} trades ${t(open)}–${t(close)} (${cal.exchange}): entry and exit must be inside that session, the exit before the close (by ${t(close - 1)})`;
     }
     return null;
   }
@@ -944,18 +944,18 @@ export class AlgoService {
     const algo = this.algo(run.algoId);
     await this.withLock(run.id, async () => {
       const changes: string[] = [];
-      if (input.name !== undefined) {
-        const name = input.name.trim();
-        if (!name) throw httpError(400, 'The name cannot be empty');
-        if (name !== run.name) changes.push(`name → ${name}`);
+      // Everything is validated before anything changes: a refused edit leaves the run exactly as it was.
+      const name = input.name?.trim();
+      if (input.name !== undefined && !name) throw httpError(400, 'The name cannot be empty');
+      const next = input.params ? this.params(algo, { ...(run.nextParams ?? run.params), ...input.params }) : null;
+      if (name !== undefined && name !== run.name) {
+        changes.push(`name → ${name}`);
         run.name = name;
       }
       const day = run.day;
       const legs = day && !day.closed ? (algo.openLegs(day.state) as AlgoLeg[]) : [];
       const traded = !!day && !day.closed && (legs.length > 0 || day.events.some((e) => e.fills.length > 0));
-      if (input.params) {
-        const base = run.nextParams ?? run.params;
-        const next = this.params(algo, { ...base, ...input.params });
+      if (next) {
         const before = run.params; // the journal quotes the values in force before this change
         const changed = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(before[k]));
         const live = (LIVE_EDITABLE_PARAMS as readonly string[]).filter((k) => changed.includes(k));
@@ -1082,7 +1082,8 @@ export class AlgoService {
       const algo = algoById(run.algoId);
       if (!algo) continue;
       const symbol = String(run.params.symbol);
-      const legs = day.closed ? [] : (algo.openLegs(day.state) as AlgoLeg[]);
+      // Legs still open on a closed day (a square-off the broker could not fill) are still exposure: counted.
+      const legs = algo.openLegs(day.state) as AlgoLeg[];
       const lots = legs.reduce((a, l) => a + l.lots, 0);
       if (lots) open[symbol] = (open[symbol] ?? 0) + lots;
       let runPnl: number | null;
@@ -1137,6 +1138,11 @@ export class AlgoService {
   resumeGuard(uid: string): PortfolioGuardView {
     const g = this.guardOf(uid);
     if (!g.halted || g.halted.date !== this.guardDate()) throw httpError(400, 'Trading is not halted today');
+    // Today's realised losses still count: resuming while they are beyond the limit would halt again at once.
+    const f = this.guardFigures(uid, false);
+    if (g.settings.enabled && f.limit !== null && f.pnl !== null && f.pnl <= -f.limit) {
+      throw httpError(400, `Today's combined P&L ₹${Math.round(f.pnl).toLocaleString('en-IN')} is still beyond the −₹${Math.round(f.limit).toLocaleString('en-IN')} limit: raise the limit (or switch the portfolio stop loss off) to resume`);
+    }
     const reason = g.halted.reason;
     delete g.halted;
     this.notifier.push(uid, { kind: 'system', title: 'Portfolio stop loss: trading resumed by you', body: `Halt lifted (it was: ${reason}). Runs whose day was already squared off stay closed today; runs that had not started may trade.` });
@@ -1162,13 +1168,17 @@ export class AlgoService {
     for (const run of this.runs(uid)) {
       const day = run.day;
       if (run.status !== 'running' || !day || day.closed) continue;
-      await this.withLock(run.id, async () => {
-        if (day.closed) return;
-        await this.finishDay(uid, run, day, ts, `${reason} — all algo positions squared off; trading halted for the day`);
-        const algo = this.algo(run.algoId);
-        const still = algo.openLegs(day.state) as AlgoLeg[];
-        for (const l of still) left.push(`${run.name}: ${instrumentLabel({ symbol: String(run.params.symbol), type: l.type, strike: l.strike, expiry: day.expiry })}`);
-      });
+      // One run failing to square off never stops the others (and tickRun retries an open day while halted).
+      try {
+        await this.withLock(run.id, async () => {
+          if (day.closed) return;
+          await this.finishDay(uid, run, day, ts, `${reason} — all algo positions squared off; trading halted for the day`);
+        });
+      } catch (err) {
+        left.push(`${run.name}: square-off error — ${errMsg(err)}`);
+      }
+      const still = this.algo(run.algoId).openLegs(day.state) as AlgoLeg[];
+      for (const l of still) left.push(`${run.name}: ${instrumentLabel({ symbol: String(run.params.symbol), type: l.type, strike: l.strike, expiry: day.expiry })}`);
     }
     this.notifier.push(uid, { kind: 'system', title: 'PORTFOLIO STOP LOSS HIT — algo trading halted for today', body: `${reason}. Every algo run was squared off and none trades again today.` });
     if (left.length) {
@@ -1427,6 +1437,16 @@ export class AlgoService {
       }
       if (day.closed) {
         delete run.waiting;
+        return;
+      }
+      // Safety nets before the algo's own step: the portfolio stop loss halted trading today (a day still open,
+      // e.g. its square-off failed, is squared off again), and the session's last minute (an exit time at or
+      // after the close would otherwise leave positions overnight).
+      const halt = this.haltedToday(uid);
+      const closing = session.minute >= md.calendar.sessionMinutes(session.date) - 1;
+      if (halt || closing) {
+        await this.finishDay(uid, run, day, ts, halt ? `Trading halted for today — ${halt}` : 'Session closing: squared off before the close');
+        this.db.save();
         return;
       }
       const { snap, waiting } = await this.liveSnapshot(symbol, day.expiry, this.dayLotSize(day), ts);

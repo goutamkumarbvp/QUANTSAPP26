@@ -374,7 +374,9 @@ export const premiumLadder: AlgoDefinition<PremiumLadderParams, PremiumLadderSta
       lateEntry: true,
       mode: 'ladder',
       stopLossPerLot: 0,
-      allowAtm: true,
+      // Same as a run saved before this option (absent = strictly OTM): editing such a run never flips it.
+      // The S1–S4 presets set it to true explicitly.
+      allowAtm: false,
       profitTargetPerLot: 0,
       maxAdjustments: 0,
     };

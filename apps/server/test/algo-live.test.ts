@@ -1023,7 +1023,10 @@ describe('portfolio stop loss (all algo runs together)', () => {
     await algos.tick();
     expect(algos.get('u1', c.id).today).toBeNull();
     expect(algos.get('u1', c.id).gaps?.liveData).toMatch(/Trading halted for today — Portfolio stop loss/);
-    // The user may lift the halt explicitly.
+    // Resuming while today's losses are still beyond the limit would halt again at once: refused with the reason.
+    expect(() => algos.resumeGuard('u1')).toThrow(/still beyond the −₹4,000 limit: raise the limit/);
+    // After raising the limit the user may lift the halt explicitly.
+    algos.saveGuard('u1', { perLot: 100_000 });
     expect(algos.resumeGuard('u1').halted).toBeNull();
     expect(() => algos.resumeGuard('u1')).toThrow(/not halted/);
   });
@@ -1038,5 +1041,60 @@ describe('portfolio stop loss (all algo runs together)', () => {
     expect(() => algos.saveGuard('u1', { perLot: 0, totalLoss: 0 })).toThrow(/Set a per-lot or a total loss limit/);
     expect(algos.saveGuard('u1', { enabled: false, perLot: 0, totalLoss: 0 }).settings.enabled).toBe(false);
     expect(algos.guardView('u1').gaps?.limit).toMatch(/switched off/);
+  });
+});
+
+describe('audit fixes: safety nets', () => {
+  it('a day left open while trading is halted is squared off by the next tick (a failed guard square-off is retried)', async () => {
+    const { p, book, algos, broker, db } = setupLive('09:16');
+    const D = book.date;
+    quoteChain(p, W(book), 25000);
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { stopLossPerLot: 0 } });
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    expect(algos.get('u1', run.id).today?.legs).toHaveLength(2);
+    // Halt recorded (as if the guard fired and this run's square-off had failed).
+    (db.data.algoGuard as Record<string, { settings: object; halted?: object }>)['u1'] = { settings: { enabled: true, perLot: 3000, totalLoss: 0 }, halted: { date: D, at: p.now(), reason: 'Portfolio stop loss: test' } };
+    p.setNow(at(D, '09:30'));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    const v = algos.get('u1', run.id);
+    expect(v.today?.legs ?? []).toHaveLength(0);
+    for (const pos of broker.positions('u1').filter((x) => x.book === `algo:${run.id}`)) expect(pos.netQty).toBe(0);
+  });
+
+  it('an exit at or after the session close is refused; an open day is squared off in the last minute of the session', async () => {
+    const { p, book, algos, broker } = setupLive('09:16');
+    const D = book.date;
+    await expect(algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { exitTime: '15:30' } })).rejects.toThrow(/the exit before the close \(by 15:29\)/);
+    quoteChain(p, W(book), 25000);
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's1-ladder-40', params: { exitTime: '15:29', stopLossPerLot: 0 } });
+    p.setNow(at(D, '09:20', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    expect(algos.get('u1', run.id).today?.legs).toHaveLength(2);
+    // 15:29: the last minute of the NSE session — the safety net squares off even before the algo's own exit runs.
+    p.setNow(at(D, '15:29', 1));
+    quoteChain(p, W(book), 25000);
+    await algos.tick();
+    const v = algos.get('u1', run.id);
+    expect(v.today?.legs ?? []).toHaveLength(0);
+    expect(v.history[0]).toBeDefined();
+    for (const pos of broker.positions('u1').filter((x) => x.book === `algo:${run.id}`)) expect(pos.netQty).toBe(0);
+  });
+
+  it('a refused edit changes nothing (not even the name); an old run without allowAtm stays strictly OTM when edited', async () => {
+    const { p, book, algos, db } = setupLive('09:16');
+    quoteChain(p, W(book), 25000);
+    const run = await algos.create('u1', { algoId: 'premium-ladder', presetId: 's2-ladder-20', params: {} });
+    await expect(algos.update('u1', run.id, { name: 'Renamed', params: { lots: 0 } })).rejects.toMatchObject({ statusCode: 400 });
+    expect(algos.get('u1', run.id).name).toBe(run.name);
+    // A run saved before allowAtm existed (absent = strictly OTM).
+    const stored = (db.data.algoRuns['u1'] as { id: string; params: Record<string, unknown> }[]).find((r) => r.id === run.id)!;
+    delete stored.params.allowAtm;
+    const v = await algos.update('u1', run.id, { params: { stopLossPerLot: 1500 } });
+    expect(v.params.allowAtm).toBe(false);
+    expect(v.params.stopLossPerLot).toBe(1500);
   });
 });

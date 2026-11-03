@@ -449,3 +449,30 @@ Real-money note: the app sends nothing to Kotak. Every algo order goes to the pa
 mode. Live order placement through Kotak Neo would be a separate, explicitly authorised change: order APIs, rejects,
 partial fills, freeze limits, kill switch and reconciliation with the broker's positions, tested on small quantities
 first.
+
+## C-59 — Audit of 7b68df4..HEAD: seven fixes to the algo safety nets and charts
+
+A line-by-line review of this session's changes. The parallel reviewer agents were stopped by the account's usage
+limit before they reported anything, so the review was done here, file by file. Findings and fixes:
+
+1. **Portfolio stop loss could leave runs open.** The halt was saved before the square-offs, and one run's
+   square-off error stopped the loop. Every run is now squared off on its own (an error is reported as CRITICAL),
+   and `tickRun` squares off any day still open while trading is halted.
+2. **Exit at the session close (NSE 15:30) held positions overnight**, because the exit step never ran inside the
+   session.
+   - The exit must now be before the close (by 15:29 on NSE).
+   - Safety net: an open day is squared off in the session's last minute.
+3. **One failing chart draw stopped every chart.** `runDraws` now isolates each draw and always resets the frame.
+4. **"Resume trading today" was undone on the next tick.** Today's realised losses still exceeded the limit, so
+   the guard fired again at once. Resume is now refused while P&L ≤ −limit, saying to raise the limit first.
+5. **Editing an old ladder run switched it to ATM strikes.** The `allowAtm` default is now false, which matches the
+   behaviour when the key is absent. S1–S4 still set it to true.
+6. **A refused edit renamed the run.** The name and the settings are now validated before anything changes.
+7. **The guard ignored legs a failed square-off left open on a closed day.** It now counts them.
+
+Tests:
+- a failed or halted day is squared off on the next tick;
+- the exit at 15:30 is refused, and the last-minute square-off works;
+- resume is refused, then allowed after raising the limit;
+- a refused edit leaves the run unchanged;
+- an old run stays strictly OTM after an edit.
